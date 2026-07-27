@@ -31,7 +31,8 @@ import storage
 from providers import BaseProvider, ContentRefused, FatalError, ProviderError, RetryableError
 from pipeline import segment as seg
 from pipeline import stages
-from pipeline.normalize import normalize
+from pipeline import glyphmap
+from pipeline.normalize import Prepared, normalize, prepare
 from pipeline.prompts import PROMPT_VERSION
 from pipeline.schemas import (
     AnnotateResult,
@@ -137,6 +138,18 @@ class PageOut(BaseModel):
     text_blocks: list[dict] = Field(default_factory=list)
     quality: float = 1.0
     quality_notes: list[str] = Field(default_factory=list)
+    #: 這一頁各區塊的主要墨色。教用版靠顏色分辨題目與詳解。
+    ink: str | None = None
+
+
+class GlyphInfo(BaseModel):
+    """符號字型的還原結果，寫進 stageDetail 讓校對者看得到。"""
+
+    fonts: list[str] = Field(default_factory=list)
+    resolved: int = 0
+    unresolved: int = 0
+    from_cache: int = 0
+    samples: list[dict] = Field(default_factory=list)
 
 
 class NormalizeResponse(BaseModel):
@@ -147,17 +160,22 @@ class NormalizeResponse(BaseModel):
     page_count: int
     truncated: bool = False
     pages: list[PageOut]
+    glyphs: GlyphInfo = Field(default_factory=GlyphInfo)
     usage: Usage = Field(default_factory=Usage)
     elapsed_ms: int = 0
 
 
-def _normalize_sync(req: NormalizeRequest) -> NormalizeResponse:
+def _prepare_sync(req: NormalizeRequest) -> tuple[Prepared, bytes]:
+    """轉檔與符號字型盤點。同步、不呼叫 AI。"""
+    data = storage.get_bytes(req.source_key)
+    return prepare(data, req.file_name), data
+
+
+def _normalize_sync(req: NormalizeRequest, prep: Prepared, t0: float) -> NormalizeResponse:
     """
     同步的重活。在執行緒裡跑，見下方 endpoint 的說明。
     """
-    t0 = time.perf_counter()
-    data = storage.get_bytes(req.source_key)
-    result = normalize(data, req.file_name)
+    result = normalize(prep)
 
     pages = result.pages[: req.max_pages]
     truncated = len(result.pages) > len(pages)
@@ -169,6 +187,7 @@ def _normalize_sync(req: NormalizeRequest) -> NormalizeResponse:
         page_no = p.index + 1
         key = f"{req.page_key_prefix.rstrip('/')}/{page_no:04d}.png"
         storage.put_bytes(key, p.png, "image/png")
+        inks = [b.get("ink") for b in p.text_blocks if b.get("ink")]
         out.append(
             PageOut(
                 index=page_no,
@@ -179,6 +198,7 @@ def _normalize_sync(req: NormalizeRequest) -> NormalizeResponse:
                 text_blocks=p.text_blocks,
                 quality=p.quality,
                 quality_notes=p.quality_notes,
+                ink=max(set(inks), key=inks.count) if inks else None,
             )
         )
 
@@ -189,6 +209,7 @@ def _normalize_sync(req: NormalizeRequest) -> NormalizeResponse:
             f"其餘請拆成另一次匯入。"
         )
 
+    g = prep.glyphs
     return NormalizeResponse(
         kind=result.kind,
         quality=result.quality,
@@ -197,11 +218,23 @@ def _normalize_sync(req: NormalizeRequest) -> NormalizeResponse:
         page_count=len(out),
         truncated=truncated,
         pages=out,
+        glyphs=GlyphInfo(
+            fonts=g.fonts,
+            resolved=g.resolved,
+            unresolved=g.unresolved,
+            from_cache=g.from_cache,
+            # 只留前 20 筆給校對者抽查。「(A) 被讀成 A」這種錯
+            # 一眼就看得出來，但要先讓人看得到。
+            samples=[
+                {"font": u.font, "raw": u.char, "as": g.mapping.get(u.key, "（未還原）")}
+                for u in g.uses[:20]
+            ],
+        ),
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
     )
 
 
-async def normalize_endpoint(req: NormalizeRequest) -> NormalizeResponse:
+async def _normalize_impl(req: NormalizeRequest, get_provider) -> NormalizeResponse:
     """
     第一階段。不呼叫 AI，純本地運算（PDF 渲染、影像前處理、LibreOffice）。
 
@@ -209,8 +242,23 @@ async def normalize_endpoint(req: NormalizeRequest) -> NormalizeResponse:
     在事件迴圈裡直接跑會讓同一個行程的健康探測也一起卡住——
     然後容器被判定不健康而重啟，正在處理的 200 頁題本就白做了。
     """
+    t0 = time.perf_counter()
     try:
-        return await asyncio.to_thread(_normalize_sync, req)
+        # 三段：轉檔與盤點（執行緒）→ 符號字型辨識（AI，事件迴圈）
+        # → 正規化（執行緒）。中間那段是唯一需要呼叫 AI 的，
+        # 而且一份文件只呼叫一次。
+        prep, _raw = await asyncio.to_thread(_prepare_sync, req)
+
+        if prep.glyphs.uses and prep.pdf:
+            import fitz
+
+            doc = fitz.open(stream=prep.pdf, filetype="pdf")
+            try:
+                prep.glyphs = await glyphmap.resolve(get_provider(), doc, prep.glyphs)
+            finally:
+                doc.close()
+
+        return await asyncio.to_thread(_normalize_sync, req, prep, t0)
     except (ValueError, NotImplementedError) as e:
         # 格式不支援：重試沒有意義，要讓老師知道該換檔案。
         raise HTTPException(415, detail=str(e)) from e
@@ -245,11 +293,26 @@ class SectionOut(BaseModel):
     text: str
 
 
+class ExerciseOut(BaseModel):
+    """講義的題目單位：標頭＋題幹＋詳解＋答案。"""
+
+    label: str
+    page: int
+    stem: str
+    explanation: str = ""
+    answer: str = ""
+    inline_answers: list[str] = Field(default_factory=list)
+
+
 class SegmentResponse(BaseModel):
     method: dict[int, str]  # 頁碼 → native / vision
     blocks: list[LayoutBlock]
     group_ranges: list[str]
     sections: list[SectionOut]
+    #: 試卷走 sections，講義走 exercises。兩者互斥。
+    genre: str = "unknown"
+    exercises: list[ExerciseOut] = Field(default_factory=list)
+    answer_ink: str | None = None
     vision_pages: int = 0
     usage: Usage = Field(default_factory=Usage)
     elapsed_ms: int = 0
@@ -366,9 +429,9 @@ def build_router(get_provider) -> APIRouter:
     對維運人員沒有幫助）。
     """
     r = APIRouter(prefix="/v1/import", tags=["import"])
-    r.add_api_route(
-        "/normalize", normalize_endpoint, methods=["POST"], response_model=NormalizeResponse
-    )
+    @r.post("/normalize", response_model=NormalizeResponse)
+    async def _normalize(req: NormalizeRequest) -> NormalizeResponse:  # noqa: ANN202
+        return await _normalize_impl(req, get_provider)
 
     # ── 切分 ────────────────────────────────────────────────────
 
@@ -385,11 +448,19 @@ def build_router(get_provider) -> APIRouter:
         method: dict[int, str] = {}
         results: dict[int, SegmentResult] = {}
 
+        # 全份先做兩件跨頁的判斷，再逐頁切。
+        # 兩者都需要看過所有頁面才判斷得出來，所以不能放進單頁的迴圈。
+        all_blocks = [p.text_blocks for p in req.pages if p.text_blocks]
+        answer_ink = seg.detect_answer_ink(all_blocks) if all_blocks else None
+        running_heads = seg.detect_running_heads(all_blocks) if all_blocks else set()
+
         # 有文字層的先做完——純程式、零成本、零延遲。
         needs_vision: list[SegmentPage] = []
         for p in pages:
             if p.text_blocks:
-                results[p.index] = seg.segment_native(p.index, p.text_blocks)
+                results[p.index] = seg.segment_native(
+                    p.index, p.text_blocks, answer_ink, running_heads
+                )
                 method[p.index] = "native"
             else:
                 needs_vision.append(p)
@@ -423,6 +494,28 @@ def build_router(get_provider) -> APIRouter:
 
         ordered = [results[p.index] for p in sorted(pages, key=lambda x: x.index)]
         merged = seg.merge_across_pages(ordered)
+        genre = seg.detect_genre(merged)
+
+        # 講義才切題目單位。試卷走 sections，兩條路不重疊。
+        exercises: list[ExerciseOut] = []
+        if genre == "worksheet":
+            for u in seg.split_by_exercise(merged):
+                stem = u.stem_text()
+                exercises.append(
+                    ExerciseOut(
+                        label=u.label,
+                        page=u.page,
+                        stem=stem,
+                        explanation=u.explanation_text(),
+                        answer=u.answer,
+                        # 只有教用版才抓填空答案。學生版的空格之間
+                        # 是真的空白，抽出來會是空的，不會產生假答案。
+                        inline_answers=(
+                            seg.extract_inline_answers(stem) if answer_ink else []
+                        ),
+                    )
+                )
+
         sections = [
             SectionOut(
                 title=s["title"],
@@ -438,6 +531,9 @@ def build_router(get_provider) -> APIRouter:
             blocks=merged,
             group_ranges=sorted({g for r_ in ordered for g in r_.group_ranges}),
             sections=sections,
+            genre=genre,
+            exercises=exercises,
+            answer_ink=answer_ink,
             vision_pages=sum(1 for m in method.values() if m == "vision"),
             # 視覺切分的用量無法逐次取得（segment_scanned 內部走
             # _structured 的重試迴圈）。以實際用到視覺的頁數估算。

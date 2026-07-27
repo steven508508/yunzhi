@@ -78,9 +78,18 @@ class BlockType(str, Enum):
     OPTION = "OPTION"
     FIGURE = "FIGURE"
     TABLE = "TABLE"
-    ANSWER_AREA = "ANSWER_AREA"         # 非選題的作答區
+    ANSWER_AREA = "ANSWER_AREA"         # 非選題的作答區（空白，給學生寫）
     EXPLANATION = "EXPLANATION"         # 詳解區塊，另走解析匯入
     HEADER_FOOTER = "HEADER_FOOTER"
+
+    # ── 以下是講義體例，學測試卷不會出現 ────────────────────────
+    # 補習班日常用的是講義而不是試卷（訪談第 9 題：「可以參考學測、
+    # 但有時候會有作業或小考」），而講義的結構完全不同：
+    # 沒有「一、單選題（占 30 分）」，有的是「範例 1」「類題」「解」。
+    EXERCISE_HEADER = "EXERCISE_HEADER"  # 「範例 1」「類題 2」「習題」
+    ANSWER_KEY = "ANSWER_KEY"            # 「答：　(B)」教用版直接印答案
+    TEACHING_NOTE = "TEACHING_NOTE"      # 「說明：…」「註：…」教學內容，不是題目
+    CONCEPT = "CONCEPT"                  # 觀念條列：「1. 點斜式：…」
 
 
 class LayoutBlock(BaseModel):
@@ -90,6 +99,9 @@ class LayoutBlock(BaseModel):
     #: 本題是否延續自前頁／延續至次頁。跨頁題目靠這兩個旗標合併。
     continued_from_prev: bool = False
     continues_to_next: bool = False
+    #: 教用版裡印成答案墨色的片段。text 已經是拿掉這些之後的學生版，
+    #: 兩者分開存是因為它們的著作權地位不同（文件 16 §3）。
+    answers: list[str] = Field(default_factory=list)
 
 
 class SegmentResult(BaseModel):

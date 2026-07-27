@@ -172,7 +172,7 @@ def _unwrap(text: str) -> str:
     return re.sub(r"[ \t　]{2,}", " ", out).strip()
 
 
-def _text_blocks(page: fitz.Page) -> list[dict]:
+def _text_blocks(page: fitz.Page, translate=None) -> list[dict]:
     """
     取出原生 PDF 的文字區塊與座標，bbox 正規化成頁面比例。
 
@@ -182,33 +182,83 @@ def _text_blocks(page: fitz.Page) -> list[dict]:
     高於任何模型的估計。
 
     只有掃描件才真的需要視覺模型——因為那時候確實沒有別的來源。
+
+    走 get_text("dict") 而非 "blocks"，是因為需要逐 span 的字型名稱：
+    出版社的自製符號字型要靠字型名稱才還原得回來（見 glyphmap.py）。
+    `translate` 是 (字型, 字元) → 真正的字 的查表函式，None 代表
+    這份文件沒有符號字型、或還原不了。
     """
     w, h = page.rect.width, page.rect.height
     if w <= 0 or h <= 0:
         return []
 
     out: list[dict] = []
-    # get_text("blocks") 回傳 (x0, y0, x1, y1, text, block_no, block_type)
-    for x0, y0, x1, y1, text, no, btype in page.get_text("blocks"):
-        if btype != 0:
+    data = page.get_text("dict")
+
+    for no, block in enumerate(data.get("blocks", [])):
+        if block.get("type") != 0:
             continue  # 1 是影像區塊，文字才有內容可用
-        t = _unwrap(text or "")
+
+        lines: list[str] = []
+        runs: list[list] = []  # [[色碼, 文字], …] 依出現順序
+        for line in block.get("lines", []):
+            parts: list[str] = []
+            for span in line.get("spans", []):
+                text = _apply_translation(span, translate)
+                parts.append(text)
+                if text.strip():
+                    ink = f"{span.get('color', 0):06X}"
+                    if runs and runs[-1][0] == ink:
+                        runs[-1][1] += text
+                    else:
+                        runs.append([ink, text])
+            joined = "".join(parts)
+            if joined.strip():
+                lines.append(joined)
+
+        t = _unwrap("\n".join(lines))
         if not t:
             continue
-        out.append(
-            {
-                "text": t,
-                "bbox": {
-                    "x0": max(0.0, min(1.0, x0 / w)),
-                    "y0": max(0.0, min(1.0, y0 / h)),
-                    "x1": max(0.0, min(1.0, x1 / w)),
-                    "y1": max(0.0, min(1.0, y1 / h)),
-                },
-                "order": int(no),
-            }
-        )
+
+        x0, y0, x1, y1 = block["bbox"]
+        entry = {
+            "text": t,
+            "bbox": {
+                "x0": max(0.0, min(1.0, x0 / w)),
+                "y0": max(0.0, min(1.0, y0 / h)),
+                "x1": max(0.0, min(1.0, x1 / w)),
+                "y1": max(0.0, min(1.0, y1 / h)),
+            },
+            "order": no,
+        }
+
+        # 顏色。教用版講義把答案與詳解印成另一個顏色，那是分離
+        # 「試題」與「解析」最可靠的訊號——比任何文字特徵都準，
+        # 而這兩者的著作權地位完全不同（文件 11、16），必須分開存。
+        if runs:
+            tally: dict[str, int] = {}
+            for ink, text in runs:
+                tally[ink] = tally.get(ink, 0) + len(text.strip())
+            entry["ink"] = max(tally, key=tally.get)
+            if len(tally) > 1:
+                entry["runs"] = [[ink, text] for ink, text in runs if text.strip()]
+
+        out.append(entry)
 
     return _reading_order(out)
+
+
+def _apply_translation(span: dict, translate) -> str:
+    """把一個 span 的文字做符號字型還原。沒有對應的字元保留原樣。"""
+    text = span.get("text", "")
+    if translate is None or not text:
+        return text
+    font = span.get("font", "")
+    parts = []
+    for ch in text:
+        mapped = translate(font, ch) if ch.strip() else None
+        parts.append(mapped if mapped is not None else ch)
+    return "".join(parts)
 
 
 #: 判定雙欄所需的最低比例：至少這麼多區塊要能明確歸到某一欄。
@@ -278,8 +328,51 @@ def _find_gutter(blocks: list[dict]) -> float | None:
     return positions[best_start] + (best_len - 1) * step / 2
 
 
-def _by_y(b: dict) -> tuple[float, float]:
-    return (b["bbox"]["y0"], b["bbox"]["x0"])
+def _by_y(blocks: list[dict]) -> list[dict]:
+    """
+    單欄內的閱讀順序。
+
+    不是單純按 y0 排。講義與試卷都會把標記放在版心左側的欄外
+    （「範例 1」「類題」「解」這種標籤，或試卷的題號），而那些標籤
+    的垂直位置通常落在它所屬那一行的**中間**，不是頂端。純按 y0 排
+    會把標籤排到它所標記的內容後面，於是切題的時候整份文件錯開一格。
+
+    改成先把垂直上重疊的區塊歸成同一「行帶」，帶內再由左至右。
+    這也是人讀紙本的方式：同一行的東西先讀完，再換下一行。
+    """
+    ordered = sorted(blocks, key=lambda b: (b["bbox"]["y0"], b["bbox"]["x0"]))
+    out: list[dict] = []
+    band: list[dict] = []
+    band_y0 = band_y1 = 0.0
+
+    def flush():
+        # 帶內由左至右；同一 x 再依 y，讓左欄外連續兩個標籤保持上下順序
+        out.extend(sorted(band, key=lambda b: (b["bbox"]["x0"], b["bbox"]["y0"])))
+        band.clear()
+
+    for b in ordered:
+        y0, y1 = b["bbox"]["y0"], b["bbox"]["y1"]
+        if band:
+            overlap = min(y1, band_y1) - max(y0, band_y0)
+            shorter = min(y1 - y0, band_y1 - band_y0)
+            same_band = shorter > 0 and overlap / shorter >= _BAND_OVERLAP
+        else:
+            same_band = False
+
+        if not same_band:
+            flush()
+            band_y0, band_y1 = y0, y1
+        else:
+            band_y0, band_y1 = min(band_y0, y0), max(band_y1, y1)
+        band.append(b)
+
+    flush()
+    return out
+
+
+#: 兩個區塊垂直重疊超過較矮者的這個比例，就算同一行。
+#: 0.5 夠寬鬆到能收進欄外標籤，又夠嚴格到不會把上下兩行黏在一起。
+_BAND_OVERLAP = 0.5
 
 
 def _reading_order(blocks: list[dict], _depth: int = 0) -> list[dict]:
@@ -303,20 +396,20 @@ def _reading_order(blocks: list[dict], _depth: int = 0) -> list[dict]:
     """
     # 深度上限。八欄的頁面不存在於試卷上，繼續遞迴只會切出雜訊。
     if _depth >= 3:
-        return sorted(blocks, key=_by_y)
+        return _by_y(blocks)
 
     gutter = _find_gutter(blocks)
     if gutter is None:
-        return sorted(blocks, key=_by_y)
+        return _by_y(blocks)
 
     left = [b for b in blocks if b["bbox"]["x1"] <= gutter]
     right = [b for b in blocks if b["bbox"]["x0"] >= gutter]
     spanning = [b for b in blocks if b["bbox"]["x0"] < gutter < b["bbox"]["x1"]]
 
     if len(left) < 2 or len(right) < 2:
-        return sorted(blocks, key=_by_y)
+        return _by_y(blocks)
     if (len(left) + len(right)) / len(blocks) < _COLUMN_RATIO:
-        return sorted(blocks, key=_by_y)
+        return _by_y(blocks)
 
     # 每一欄自己可能還是多欄。遞迴前要重新正規化 x 座標，
     # 否則 _find_gutter 只看頁面中段的規則會讓子欄永遠找不到欄間帶。
@@ -325,7 +418,7 @@ def _reading_order(blocks: list[dict], _depth: int = 0) -> list[dict]:
         x1 = max(b["bbox"]["x1"] for b in col)
         span = x1 - x0
         if span <= 0:
-            return sorted(col, key=_by_y)
+            return _by_y(col)
         scaled = [
             {
                 **b,
@@ -345,13 +438,13 @@ def _reading_order(blocks: list[dict], _depth: int = 0) -> list[dict]:
     # 跨欄區塊（標題、跨欄圖表）依 y 分成「兩欄之前」與「其餘」。
     # 夾在兩欄中間的跨欄元素很少見，放到最後比塞進某一欄安全。
     first_y = min(b["bbox"]["y0"] for b in left + right)
-    head = sorted([b for b in spanning if b["bbox"]["y1"] <= first_y], key=_by_y)
-    tail = sorted([b for b in spanning if b["bbox"]["y1"] > first_y], key=_by_y)
+    head = _by_y([b for b in spanning if b["bbox"]["y1"] <= first_y])
+    tail = _by_y([b for b in spanning if b["bbox"]["y1"] > first_y])
 
     return head + recurse(left) + recurse(right) + tail
 
 
-def normalize_pdf(data: bytes) -> NormalizeResult:
+def normalize_pdf(data: bytes, translate=None) -> NormalizeResult:
     doc = fitz.open(stream=data, filetype="pdf")
     try:
         zoom = TARGET_DPI / PDF_BASE_DPI
@@ -372,8 +465,11 @@ def normalize_pdf(data: bytes) -> NormalizeResult:
 
             blocks: list[dict] = []
             if is_native:
-                text = page.get_text("text")
-                blocks = _text_blocks(page)
+                blocks = _text_blocks(page, translate)
+                # 文字層直接由區塊組回去，而不是另外呼叫 get_text("text")——
+                # 否則符號字型的還原只會反映在區塊上，文字層仍是原始的
+                # ASCII，兩者對不起來。
+                text = "\n".join(b["text"] for b in blocks)
             else:
                 text = None
                 # 掃描頁走影像前處理，並據此評估品質
@@ -767,23 +863,106 @@ def docx_to_pdf(data: bytes, filename: str = "doc.docx") -> bytes:
     return pdf
 
 
-def normalize(data: bytes, filename: str = "") -> NormalizeResult:
+@dataclass
+class Prepared:
+    """
+    正規化前的準備結果。
+
+    拆成獨立一步，是因為中間夾了一個**需要呼叫 AI 的**環節
+    （符號字型辨識），而正規化本身是同步的重運算。分開之後，
+    呼叫端可以把兩段各自放在該去的地方：重運算進執行緒池，
+    AI 呼叫留在事件迴圈。
+    """
+
+    kind: SourceKind
+    #: PDF/DOCX 都會轉成 PDF bytes；影像為 None
+    pdf: bytes | None
+    original: bytes
+    filename: str
+    glyphs: "GlyphReport"
+
+
+def prepare(data: bytes, filename: str = "") -> Prepared:
+    """轉檔（若需要）並盤點符號字型。同步，不呼叫 AI。"""
+    from .glyphmap import GlyphReport, scan
+
     kind = sniff(data, filename)
 
-    if kind in ("native_pdf", "scanned_pdf"):
-        return normalize_pdf(data)
-    if kind == "image":
-        return normalize_image(data)
-    if kind == "docx":
-        # 轉成 PDF 再走同一路徑，讓下游只處理一種格式。
-        result = normalize_pdf(docx_to_pdf(data, filename))
-        result.quality_note = (
-            f"Word 檔已轉為 PDF 後解析。{result.quality_note}"
-            "　若原檔的版面在 Word 裡有特殊設定，轉換後可能略有差異。"
+    if kind == "unknown":
+        raise ValueError(
+            f"無法辨識的檔案格式（前 8 位元組：{data[:8]!r}）。"
+            f"支援 PDF、JPEG、PNG、WebP、HEIC 與 DOCX。"
         )
-        return result
 
-    raise ValueError(
-        f"無法辨識的檔案格式（前 8 位元組：{data[:8]!r}）。"
-        f"支援 PDF、JPEG、PNG、WebP、HEIC 與 DOCX。"
+    if kind == "image":
+        return Prepared(kind, None, data, filename, GlyphReport())
+
+    pdf = docx_to_pdf(data, filename) if kind == "docx" else data
+
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        report = scan(doc)
+    except Exception as e:  # noqa: BLE001
+        # 字型盤點失敗不該擋住匯入——最差的結果是符號字元保持原樣。
+        log.warning("符號字型盤點失敗：%s", e)
+        report = GlyphReport()
+    finally:
+        doc.close()
+
+    return Prepared(kind, pdf, data, filename, report)
+
+
+def normalize(
+    data: bytes | Prepared,
+    filename: str = "",
+    translate=None,
+) -> NormalizeResult:
+    """
+    正規化。可以吃原始位元組（自行 prepare），或吃已經 prepare 過的結果。
+
+    吃 Prepared 的路徑才會用到符號字型的還原——那需要先問過模型。
+    """
+    if isinstance(data, Prepared):
+        prep = data
+        if translate is None and prep.glyphs.mapping:
+            from .glyphmap import translator
+
+            translate = translator(prep.glyphs)
+    else:
+        prep = None
+
+    if prep is None:
+        kind = sniff(data, filename)
+        if kind == "image":
+            return normalize_image(data)
+        if kind == "docx":
+            return _with_docx_note(normalize_pdf(docx_to_pdf(data, filename), translate))
+        if kind in ("native_pdf", "scanned_pdf"):
+            return normalize_pdf(data, translate)
+        raise ValueError(
+            f"無法辨識的檔案格式（前 8 位元組：{data[:8]!r}）。"
+            f"支援 PDF、JPEG、PNG、WebP、HEIC 與 DOCX。"
+        )
+
+    if prep.kind == "image":
+        return normalize_image(prep.original)
+
+    result = normalize_pdf(prep.pdf, translate)
+    if prep.kind == "docx":
+        result = _with_docx_note(result)
+
+    if note := prep.glyphs.note():
+        result.quality_note = f"{result.quality_note}　{note}"
+        # 有字形沒還原成功時，品質要跟著降——那代表題號或選項編號
+        # 可能是錯的，而那種錯誤在校對時不容易一眼看出來。
+        if prep.glyphs.unresolved:
+            result.quality = max(0.0, result.quality - 0.15)
+    return result
+
+
+def _with_docx_note(result: NormalizeResult) -> NormalizeResult:
+    result.quality_note = (
+        f"Word 檔已轉為 PDF 後解析。{result.quality_note}"
+        "　若原檔的版面在 Word 裡有特殊設定，轉換後可能略有差異。"
     )
+    return result

@@ -14,6 +14,9 @@ opencv-python-headless==4.10.0.84
 pillow==11.0.0
 numpy==2.1.3
 
+# 讀出版社自製符號字型的輪廓與字寬（見 pipeline/glyphmap.py）
+fonttools==4.55.3
+
 # 數學式的等價判定（用於答案比對：3/6 與 0.5 是同一個答案）
 sympy==1.13.3
 
