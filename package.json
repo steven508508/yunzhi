@@ -1,0 +1,41 @@
+{
+  "name": "yunzhi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "雲端智學 — 學測線上學習與評量系統",
+  "workspaces": [
+    "apps/web",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=apps/web",
+    "start": "npm run start --workspace=apps/web",
+    "db:generate": "prisma generate --schema packages/db/schema.prisma",
+    "db:check": "node tools/prisma-check.mjs && node tools/schema-drift.mjs",
+    "db:migrate": "prisma migrate deploy --schema packages/db/schema.prisma",
+    "db:migrate:dev": "prisma migrate dev --schema packages/db/schema.prisma",
+    "db:studio": "prisma studio --schema packages/db/schema.prisma",
+    "lint": "npm run lint --workspace=apps/web",
+    "test": "node --experimental-strip-types --test apps/web/tests/*.test.mjs",
+    "doctor": "./deploy/scripts/doctor.sh",
+    "typecheck": "npm run db:generate && tsc --noEmit --project apps/web/tsconfig.json",
+    "prebuild": "npm run db:generate",
+    "test:e2e": "./tools/e2e-import.sh",
+    "test:ai": "cd apps/ai && python3 tests/test_reading_order.py && python3 tests/test_import_api.py"
+  },
+  "devDependencies": {
+    "@prisma/prisma-schema-wasm": "5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2",
+    "@types/bcryptjs": "^2.4.6",
+    "pg": "^8.13.1",
+    "prisma": "^5.22.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1095.0",
+    "@aws-sdk/s3-request-presigner": "^3.1095.0",
+    "bullmq": "^5.81.2"
+  }
+}

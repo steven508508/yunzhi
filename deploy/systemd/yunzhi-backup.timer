@@ -1,0 +1,12 @@
+[Unit]
+Description=雲端智學 — 每日備份排程
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+# 機器在排程時間關機時，開機後補跑一次。
+# 沒有這一項，週末關機的補習班會整個週末沒有備份。
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,442 @@
+/* ═══════════════════════════════════════════════════════════════
+   雲端智學 — 設計系統
+   方向：校樣（proof sheet）
+
+   衍生自實際的東西，而不是套用通用模板：這是一套處理紙本考卷的
+   工具，所以視覺語言從印刷與校對傳統長出來，不是從 SaaS 儀表板。
+
+   刻意排除（這些是「AI 感」的主要來源）：
+     · 漸層背景與玻璃擬態
+     · 大於 4px 的圓角
+     · 陰影堆疊出來的層次
+     · 彩色底的狀態藥丸
+     · 大字距的小型全大寫標籤
+     · 介面文案中的 emoji 與星星圖示
+
+   取而代之：
+     · 髮絲線分隔，不用卡片
+     · 階層靠字級、字重、留白，不靠顏色與陰影
+     · 狀態用校對記號（✓ ？ ×）與側註，不用色塊
+     · 題目內文用宋體，因為考卷就是宋體
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── 紙與墨 ───────────────────────────────────────────────
+     暖白而非冷灰。冷灰是螢幕的預設，暖白才像紙。
+     這一個決定就讓整體氣質與一般後台系統拉開距離。 */
+  --paper:        #FBFAF7;
+  --paper-raised: #FEFEFC;
+  --paper-sunk:   #F7F5F0;
+
+  --ink:          #1C1A17;   /* 純黑在螢幕上過銳，這個閱讀舒適得多 */
+  --ink-2:        #6B655C;
+  --ink-3:        #9A9287;
+
+  --rule:         #D6D1C7;   /* 髮絲線。介面的主要分隔手段 */
+  --rule-2:       #EBE7DF;
+
+  /* ── 記號 ─────────────────────────────────────────────────
+     硃砂紅只出現在校對記號與側註，不用於任何裝飾。
+     一個畫面裡它應該只佔極小的面積。 */
+  --mark:         #8C3A2B;
+  --mark-soft:    rgba(140, 58, 43, 0.07);
+
+  --confirm:      #3A6B41;   /* 確認、通過 */
+  --select:       #F0EDE4;   /* 當前選取 */
+
+  /* 答題卷的行線，實際印刷是淡青 */
+  --grid:         #C9D8DC;
+  /* 學生筆跡：黑色墨水筆，偏冷 */
+  --pencil:       #2B3A44;
+
+  /* ── 字型 ─────────────────────────────────────────────────
+     介面用黑體、題目內文用宋體。這個分工不是裝飾——
+     它讓「這是系統的話」與「這是考卷的內容」一眼可分。 */
+  --font-ui:   "Noto Sans TC", "PingFang TC", "Microsoft JhengHei",
+               -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-doc:  "Noto Serif TC", "Songti TC", "SimSun", "MingLiU", serif;
+  --font-hand: "Xingkai TC", "Kaiti TC", "KaiTi", "DFKai-SB",
+               "Noto Serif TC", serif;
+  --font-num:  "Noto Serif TC", serif;  /* 數字用宋體，與版面一致 */
+
+  /* ── 尺度 ─────────────────────────────────────────────────
+     圓角最大 4px。超過就開始像消費級 App。 */
+  --r:    3px;
+  --r-sm: 2px;
+
+  /* 陰影只有兩級，而且都很淡。其餘一律用線。 */
+  --shadow-1: 0 1px 2px rgba(28, 26, 23, 0.05);
+  --shadow-2: 0 4px 14px rgba(28, 26, 23, 0.10);
+
+  /* ── 行高 ─────────────────────────────────────────────────
+     中文 1.75–2.0。多數系統直接套英文的 1.4，中文擠在一起
+     就是不專業，而修正它幾乎不花成本。 */
+  --lh-ui:  1.75;
+  --lh-doc: 2.0;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: var(--lh-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* 中英混排自動加間距。台灣多數系統沒做這件事，
+     而它是第一眼專業感的來源之一。 */
+  text-spacing-trim: space-all;
+}
+
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+a { color: inherit; }
+input, textarea, select { font: inherit; color: inherit; }
+
+/* ═══ 版面骨架 ═══════════════════════════════════════════════ */
+
+.yz-app    { display: flex; flex-direction: column; height: 100vh; }
+
+.yz-head {
+  flex: 0 0 auto;
+  display: flex; align-items: baseline; gap: 11px;
+  padding: 13px 22px 9px;
+  border-bottom: 1px solid var(--ink);   /* 頁首用實線，是版面的頂邊 */
+}
+.yz-head__title { font-family: var(--font-doc); font-size: 15.5px; font-weight: 600; letter-spacing: .04em; }
+.yz-head__sub   { font-size: 12.5px; color: var(--ink-2); }
+.yz-head__right { margin-left: auto; display: flex; gap: 17px; align-items: baseline; font-size: 12px; color: var(--ink-2); }
+.yz-head__num   { font-family: var(--font-num); font-size: 14.5px; color: var(--ink); }
+
+.yz-foot {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 19px;
+  padding: 6px 22px;
+  border-top: 1px solid var(--ink);
+  font-size: 11.5px; color: var(--ink-2);
+}
+
+/* ═══ 校對記號欄 ═════════════════════════════════════════════
+   狀態不用彩色藥丸，用紙本校對沿用的記號。
+   ✓ 無誤　？ 待查　× 刪除 */
+
+.yz-gutter { border-right: 1px solid var(--rule); overflow-y: auto; background: var(--paper-sunk); }
+
+.yz-mark {
+  height: 30px;
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  border-bottom: 1px solid var(--rule-2);
+  font-family: var(--font-doc); font-size: 11.5px; color: var(--ink-2);
+  cursor: pointer;
+}
+.yz-mark:hover { background: var(--select); }
+.yz-mark--current { background: var(--select); box-shadow: inset 2px 0 0 var(--ink); }
+.yz-mark__glyph { width: 12px; text-align: center; font-size: 12px; }
+.yz-mark--confirmed .yz-mark__glyph::after { content: "✓"; color: var(--confirm); }
+.yz-mark--flagged   .yz-mark__glyph::after { content: "？"; color: var(--mark); }
+.yz-mark--discarded .yz-mark__glyph::after { content: "×"; color: var(--ink-3); }
+
+/* ═══ 欄 ════════════════════════════════════════════════════ */
+
+.yz-col      { overflow-y: auto; min-width: 0; }
+.yz-col--src { border-right: 1px solid var(--rule); background: var(--paper-sunk); }
+
+.yz-colhead {
+  position: sticky; top: 0; z-index: 2; background: inherit;
+  display: flex; align-items: baseline; gap: 9px;
+  padding: 7px 20px 6px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11.5px; color: var(--ink-2);
+}
+.yz-colhead__meta { margin-left: auto; font-family: var(--font-doc); font-size: 11px; }
+.yz-colbody { padding: 18px 24px 70px; }
+
+/* ═══ 原稿與校樣 ═════════════════════════════════════════════ */
+
+.yz-scan  { font-family: var(--font-doc); font-size: 13px; line-height: 2.05; color: #3A362F; }
+.yz-proof { font-family: var(--font-doc); font-size: 14px; line-height: var(--lh-doc); }
+
+.yz-section {
+  font-weight: 700; letter-spacing: .07em;
+  border-bottom: 1px solid var(--ink);
+  padding-bottom: 4px; margin-bottom: 6px;
+}
+.yz-section__note {
+  font-family: var(--font-ui); font-size: 11.5px; color: var(--ink-2);
+  line-height: 1.8; margin-bottom: 18px;
+}
+
+/* 題目：題號懸掛在版心外，像排好的頁面 */
+.yz-item { display: grid; grid-template-columns: 34px 1fr; margin-bottom: 24px; }
+.yz-item__no { font-family: var(--font-doc); font-size: 14px; font-weight: 600; padding-top: 1px; }
+
+.yz-q { padding: 5px 8px; margin: 0 -8px; }
+.yz-q--current { background: var(--select); box-shadow: inset 2px 0 0 var(--ink); }
+
+/* 可編輯區：點線底線，像稿紙上待填的欄位，不是輸入框。
+   輸入框會讓整個畫面變成表單，而這裡要的是「一份可以改的稿」。 */
+.yz-edit {
+  border-bottom: 1px dotted transparent;
+  outline: none;
+  transition: border-color .15s, background .15s;
+}
+.yz-edit:hover  { border-bottom-color: var(--rule); }
+.yz-edit:focus  { border-bottom-color: var(--ink); background: #FFFDF6; }
+
+/* 選項：答案用印刷體的實心圓點，不是綠底藥丸 */
+.yz-opt {
+  display: flex; gap: 7px; align-items: baseline;
+  padding: 2px 8px 2px 8px; margin-left: -8px;
+  cursor: pointer;
+}
+.yz-opt:hover { background: #F4F1E8; }
+.yz-opt__label { font-family: var(--font-doc); color: var(--ink-2); flex: 0 0 auto; }
+.yz-opt--answer .yz-opt__label { color: var(--ink); font-weight: 700; }
+.yz-opt--answer::after {
+  content: "●"; margin-left: auto; font-size: 9px; align-self: center; color: var(--ink);
+}
+
+/* 選填題的格位：底線加中央對齊，就是答案卡上的樣子 */
+.yz-slot {
+  display: inline-block; min-width: 2.4em;
+  border-bottom: 1px solid var(--ink);
+  text-align: center; margin: 0 .15em;
+}
+
+/* ═══ 中繼資料與側註 ═════════════════════════════════════════ */
+
+.yz-meta {
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px solid var(--rule-2);
+  font-family: var(--font-ui); font-size: 11.5px; color: var(--ink-2);
+  display: flex; gap: 16px; flex-wrap: wrap; line-height: 1.9;
+}
+.yz-meta b { font-weight: 500; color: var(--ink); }
+
+/* AI 的疑慮寫成側註，不是黃色警示框。
+   側註是校對者在稿邊寫字的位置，語意上正確。 */
+.yz-aside {
+  margin-top: 10px; padding-left: 12px;
+  border-left: 2px solid var(--mark);
+  font-family: var(--font-ui); font-size: 12px; line-height: 1.85; color: #5C4A44;
+}
+.yz-aside__head {
+  color: var(--mark); font-size: 11px; letter-spacing: .04em; margin-bottom: 2px;
+  display: flex; align-items: baseline; gap: 8px;
+}
+.yz-aside__head em { margin-left: auto; font-style: normal; font-size: 10.5px; color: var(--ink-3); }
+.yz-aside li { margin-left: 15px; }
+
+/* 模型揭露：家長與老師對「這是誰生成的」有疑慮，
+   所以模型名稱直接寫在介面上，不藏在設定裡。 */
+.yz-attrib {
+  font-family: var(--font-doc); font-size: 11px; color: var(--ink-3);
+}
+
+/* ═══ 評分表（等第制）═════════════════════════════════════════ */
+
+.yz-band {
+  display: grid; grid-template-columns: 44px 62px 1fr;
+  border-bottom: 1px solid var(--rule-2);
+  align-items: baseline; cursor: pointer;
+}
+.yz-band:hover { background: var(--select); }
+.yz-band--on   { background: #F2EEE1; box-shadow: inset 2px 0 0 var(--ink); }
+.yz-band__grade { font-family: var(--font-doc); font-size: 14px; font-weight: 600; padding: 6px 0 6px 10px; }
+.yz-band__range { font-family: var(--font-doc); font-size: 12px; color: var(--ink-2); padding: 6px 0; }
+.yz-band__desc  { font-size: 12px; color: #4A453D; padding: 6px 10px 6px 0; line-height: 1.75; }
+
+/* AI 建議只是標記，不預填。預填會讓老師變成按確認鍵的機器，
+   而評分責任在法律與教學上都必須留在人身上。 */
+.yz-band__hint {
+  font-size: 10.5px; color: var(--mark);
+  border: 1px solid var(--mark); padding: 0 4px; margin-left: 7px; white-space: nowrap;
+}
+
+/* ═══ 手寫答題卷 ═════════════════════════════════════════════ */
+
+.yz-sheet { border: 1px solid var(--rule); background: var(--paper-raised); }
+.yz-sheet__head {
+  padding: 5px 11px; border-bottom: 1px solid var(--rule);
+  background: var(--paper-sunk);
+  font-size: 11px; color: var(--ink-2);
+  display: flex; gap: 12px; align-items: baseline;
+}
+.yz-ruled {
+  padding: 10px 14px;
+  background: repeating-linear-gradient(
+    to bottom, transparent 0, transparent 29px, var(--grid) 29px, var(--grid) 30px);
+  background-position: 0 6px;
+}
+.yz-hand {
+  font-family: var(--font-hand);
+  font-size: 15px; line-height: 30px; color: var(--pencil);
+  text-indent: 2em; letter-spacing: .04em;
+}
+/* 辨識信心低的區段：原稿與轉錄兩邊同時標出，讓老師能對照 */
+.yz-lowconf {
+  background: var(--mark-soft);
+  box-shadow: 0 1px 0 rgba(140, 58, 43, .35);
+}
+
+/* ═══ 按鈕 ═══════════════════════════════════════════════════ */
+
+.yz-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--ink);
+  font-family: var(--font-doc); font-size: 12.5px;
+  border-radius: var(--r-sm);
+}
+.yz-btn:hover { background: var(--select); }
+.yz-btn--primary { background: var(--ink); color: var(--paper); }
+.yz-btn--primary:hover { background: #000; }
+.yz-btn--quiet { border-color: var(--rule); color: var(--ink-2); }
+.yz-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.yz-kbd { font-family: var(--font-doc); color: var(--ink); font-size: 12px; }
+
+/* ═══ 表格（題庫清單這類需要掃視的畫面）═══════════════════════ */
+
+.yz-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.yz-table thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--paper);
+  text-align: left; font-weight: 600; font-size: 11px; color: var(--ink-2);
+  padding: 6px 10px; border-bottom: 1px solid var(--ink); white-space: nowrap;
+}
+.yz-table tbody td { padding: 5px 10px; border-bottom: 1px solid var(--rule-2); }
+.yz-table tbody tr:hover { background: var(--paper-sunk); }
+.yz-table tbody tr[aria-selected="true"] { background: var(--select); box-shadow: inset 2px 0 0 var(--ink); }
+.yz-table__num { font-family: var(--font-doc); text-align: right; }
+
+/* ═══ 無障礙 ═════════════════════════════════════════════════
+   規格書文件 01 §16 要求 WCAG 2.1 AA。焦點指示不能只靠顏色。 */
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+.yz-sr {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* 列印：細目表與考卷常要附在紙本後面歸檔 */
+@media print {
+  .yz-gutter, .yz-foot, .yz-btn { display: none; }
+  body { background: #fff; font-size: 11pt; }
+  .yz-col { overflow: visible; }
+}
+
+/* ═══ 面板與表單 ═════════════════════════════════════════════
+   上傳、設定、進度這類「要填東西或看狀態」的頁面。
+
+   與校對介面刻意不同：校對區要像一份可以改的稿，所以用點線
+   底線而非輸入框；這裡是真的表單，用真的欄位反而更清楚。
+   共通的是同一套紙色、同一套髮絲線、同樣不用圓角與陰影堆疊。 */
+
+.yz-panel {
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+}
+.yz-panel__head {
+  padding: 15px 20px 13px;
+  border-bottom: 1px solid var(--ink);
+}
+.yz-panel__body { padding: 16px 20px; }
+
+/* 面板內的分段。標題是髮絲線上的一行小字，不是彩色區塊。 */
+.yz-fieldset {
+  padding: 16px 20px;
+  border-top: 1px solid var(--rule);
+}
+.yz-fieldset:first-of-type { border-top: none; }
+.yz-fieldset--warn { border-left: 2px solid var(--mark); }
+
+.yz-legend {
+  font-size: 11.5px; color: var(--ink-2);
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 4px; margin-bottom: 11px;
+}
+.yz-hint {
+  font-size: 11.5px; color: var(--ink-3); line-height: 1.65;
+}
+
+/* 欄位。標籤在上、說明在下——三段式在中文裡比左右並排好讀，
+   而且不必為了對齊而給標籤一個猜出來的固定寬度。 */
+.yz-field { display: grid; gap: 4px; margin-bottom: 13px; }
+.yz-field > span:first-child { font-size: 12.5px; color: var(--ink-2); }
+.yz-field:last-child { margin-bottom: 0; }
+
+.yz-in {
+  padding: 5px 8px;
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-sm);
+  background: var(--paper);
+  font-size: 13px;
+}
+.yz-in:focus {
+  outline: none;
+  border-color: var(--ink);
+  box-shadow: inset 0 -1px 0 var(--ink);
+}
+textarea.yz-in { resize: vertical; line-height: 1.7; }
+
+/* 勾選：與說明文字對齊到第一行的基線 */
+.yz-check {
+  display: flex; gap: 9px; align-items: flex-start;
+  padding-top: 11px; margin-top: 4px;
+  border-top: 1px solid var(--rule);
+  font-size: 12.5px; line-height: 1.65;
+}
+.yz-check input { margin-top: 3px; }
+
+/* 拖放區。虛線是「這裡還沒有東西」的傳統寫法，不需要圖示。 */
+.yz-drop {
+  border: 1px dashed var(--rule-2);
+  border-radius: var(--r);
+  padding: 26px 20px;
+  text-align: center;
+  cursor: pointer;
+}
+.yz-drop:hover, .yz-drop:focus-visible { border-color: var(--ink-3); outline: none; }
+.yz-drop--over { border-color: var(--ink); background: var(--paper-sunk); }
+.yz-drop__main { font-family: var(--font-doc); font-size: 14px; }
+.yz-drop__sub  { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
+
+/* ═══ 階段進度 ═══════════════════════════════════════════════
+   不用百分比進度條。管線的階段長短差很多（自答可能是切分的
+   二十倍），百分比只會給出錯誤的預期。改成列出階段與各自
+   實際花掉的時間——那才是老師判斷「還要多久」的依據。 */
+
+.yz-steps { list-style: none; margin: 0; padding: 0; }
+.yz-step {
+  display: grid; grid-template-columns: 16px 1fr auto;
+  gap: 10px; align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-step:last-child { border-bottom: none; }
+.yz-step__glyph { font-family: var(--font-num); font-size: 12px; text-align: center; }
+.yz-step__note  { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; line-height: 1.6; }
+.yz-step__time  { font-family: var(--font-num); font-size: 12px; color: var(--ink-3); }
+
+.yz-step--pending { color: var(--ink-3); }
+.yz-step--done    .yz-step__glyph { color: var(--confirm); }
+.yz-step--failed  { color: var(--mark); }
+.yz-step--failed  .yz-step__glyph { color: var(--mark); }
+
+/* 進行中的階段用一個緩慢的脈動。轉圈的 spinner 在一個
+   要跑五分鐘的階段上只會讓人焦躁。 */
+.yz-step--running .yz-step__glyph { animation: yz-pulse 1.8s ease-in-out infinite; }
+@keyframes yz-pulse { 0%, 100% { opacity: .25 } 50% { opacity: 1 } }
+
+@media (prefers-reduced-motion: reduce) {
+  .yz-step--running .yz-step__glyph { animation: none; opacity: 1; }
+}

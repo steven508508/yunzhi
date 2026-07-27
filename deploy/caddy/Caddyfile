@@ -1,0 +1,100 @@
+# 雲端智學 — Caddy 設定
+#
+# 三種 TLS 模式由 TLS_MODE 環境變數選擇，見 .env 第 2 節。
+# Caddy 的設定檔不支援條件式，所以三種模式各寫一個 site block，
+# 由 snippet 匯入共通設定，未使用的 block 因主機名不匹配而不生效。
+
+{
+	admin :2019
+	email {$ACME_EMAIL}
+	servers {
+		# 學生作答時的長輪詢與 SSE 需要較長的寫入逾時
+		timeouts {
+			read_body 30s
+			read_header 10s
+			write 300s
+			idle 600s
+		}
+	}
+}
+
+(common) {
+	encode zstd gzip
+
+	header {
+		# 這幾條是防作弊架構（規格書文件 04）的瀏覽器層基礎，
+		# 少了它們，全螢幕鎖定與焦點偵測可以被 iframe 繞過。
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# 健康檢查不要記進 access log，否則日誌會被每 15 秒一次的
+	# 探測塞滿，真正的錯誤反而找不到。
+	@health path /api/healthz /api/readyz
+	log_skip @health
+
+	# 上傳題本可能是幾十 MB 的掃描 PDF
+	request_body {
+		max_size 200MB
+	}
+
+	# 監控介面只在啟用 monitoring profile 時存在；
+	# 沒啟用時 Caddy 會回 502，這是預期行為。
+	handle_path /grafana* {
+		reverse_proxy grafana:3000
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			health_uri /api/readyz
+			health_interval 15s
+			health_timeout 5s
+			# 一個 web 實例掛掉時把流量導到另一個，
+			# 而不是讓正在考試的學生看到 502。
+			lb_policy least_conn
+			lb_try_duration 5s
+			fail_duration 30s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
+
+# ── 模式一：公開網域，Let's Encrypt 自動簽發 ────────────────
+{$APP_DOMAIN} {
+	import common
+}
+
+# ── 模式二：內網部署 ─────────────────────────────────────────
+# TLS_MODE=internal 時，把 APP_DOMAIN 設為內網名稱或 IP。
+# Caddy 會用自己的本地 CA 簽發憑證；根憑證用
+# deploy/scripts/export-ca.sh 匯出後由 MIS 派送到學生電腦，
+# 否則瀏覽器會出現憑證警告。
+#
+# 注意：這裡安裝的是「讓瀏覽器信任本站」的根憑證，
+# 它不會、也不能用來解密任何其他網站的流量 —— 與規格書
+# 文件 08 明確否決的「TLS 攔截」是完全不同的東西。
+:443 {
+	tls internal
+	import common
+}
+
+# ── 模式三：自備憑證 ─────────────────────────────────────────
+# 憑證放在 deploy/caddy/certs/，並把上面兩個 block 註解掉。
+# https://{$APP_DOMAIN} {
+# 	tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
+# 	import common
+# }
+
+# HTTP 一律轉 HTTPS
+:80 {
+	redir https://{host}{uri} permanent
+}

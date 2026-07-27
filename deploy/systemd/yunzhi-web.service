@@ -1,0 +1,62 @@
+[Unit]
+Description=雲端智學 — 主應用
+Documentation=file:///opt/yunzhi/docs/OPERATIONS.md
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+Requires=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=yunzhi
+Group=yunzhi
+EnvironmentFile=/etc/default/yunzhi
+EnvironmentFile=/etc/yunzhi/env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+WorkingDirectory=/opt/yunzhi
+ExecStart=/usr/bin/node apps/web/.next/standalone/apps/web/server.js
+
+Restart=always
+RestartSec=5
+# 啟動失敗連續 5 次就停止重試。無限重啟會把日誌塞滿，
+# 掩蓋掉最初那一次真正有用的錯誤訊息。
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+# 優雅關閉。60 秒讓正在作答的學生把本地暫存同步上來；
+# 直接 SIGKILL 會讓那段作答只留在瀏覽器裡。
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# ── 沙箱化 ──────────────────────────────────────────────
+# 應用被入侵時，這些限制決定攻擊者能走多遠。
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadWritePaths=/var/lib/yunzhi /var/log/yunzhi
+
+LimitNOFILE=65536
+MemoryMax=1G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yunzhi-web
+
+[Install]
+WantedBy=multi-user.target

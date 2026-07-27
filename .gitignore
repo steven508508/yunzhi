@@ -1,0 +1,15 @@
+.env
+.rollback-state*
+.maintenance
+node_modules/
+.next/
+data/
+*.log
+__pycache__/
+*.pyc
+.venv/
+deploy/caddy/certs/
+deploy/caddy/maintenance/
+yunzhi-root-ca.crt
+/tmp
+*.tsbuildinfo

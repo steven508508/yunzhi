@@ -1,0 +1,63 @@
+# 雲端智學 — 告警規則
+#
+# 每一條都對應一種「會讓補習班停止營運」的情況。
+# 刻意不設太多規則：告警疲勞會讓真正重要的那一條被忽略。
+groups:
+  - name: yunzhi
+    rules:
+      - alert: 服務不可用
+        expr: up{job=~"yunzhi.*"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.job }} 已停止回應超過 2 分鐘"
+          runbook: "docs/DISASTER-RECOVERY.md 情況一"
+
+      - alert: 資料庫連線數逼近上限
+        expr: sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.85
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "連線數已達上限 85%，交卷尖峰會被拒"
+          runbook: "docs/OPERATIONS.md 容量規劃"
+
+      - alert: 磁碟即將寫滿
+        expr: (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 0.85
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "根分割區已用超過 85%"
+          description: "磁碟寫滿會讓考試中斷，且 PostgreSQL 無法寫入 WAL。"
+
+      # WAL 歸檔失敗是靜默的，而後果是磁碟被慢慢撐爆。
+      # 沒有這條告警，通常要到磁碟滿了才發現。
+      - alert: WAL歸檔失敗
+        expr: increase(pg_stat_archiver_failed_count[15m]) > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "PostgreSQL WAL 歸檔失敗"
+          description: "RPO 承諾失效，且 WAL 會持續累積直到磁碟寫滿。檢查歸檔目錄權限。"
+
+      - alert: 備份未執行
+        expr: time() - yunzhi_last_backup_timestamp_seconds > 93600
+        for: 1h
+        labels: {severity: critical}
+        annotations:
+          summary: "超過 26 小時沒有成功的備份"
+          runbook: "docs/OPERATIONS.md"
+
+      - alert: 還原演練過期
+        expr: time() - yunzhi_last_restore_drill_timestamp_seconds > 7948800
+        labels: {severity: warning}
+        annotations:
+          summary: "超過 92 天未執行還原演練"
+          description: "未驗證的備份等於沒有備份。執行 ./deploy/scripts/verify-restore.sh"
+
+      - alert: AI服務不可用
+        expr: up{job="yunzhi-ai"} == 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "AI 服務已停止 15 分鐘"
+          description: "考試、客觀題評分、既有解析不受影響（降級設計）。僅 AI 功能不可用。"

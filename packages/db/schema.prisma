@@ -1,0 +1,1178 @@
+// 雲端智學 — 資料庫 Schema
+//
+// 本檔涵蓋「基礎層」：租戶、身分、權限、稽核、系統設定、AI 用量。
+// 教學層（題庫、組卷、作答、評分、能力分析、錯題、作業）與營運層
+// 的完整 schema 見規格書文件 02 與 10，依路線圖分階段加入。
+//
+// 三條貫穿全域的規則：
+//   1. 所有租戶相關的表都帶 tenantId 並建複合索引。第一階段只有
+//      單一租戶，成本幾乎為零，但省下的是日後啟用列級安全時的
+//      大規模改表。
+//   2. 任何涉及成績、題目、權限、金額的異動都寫 AuditLog，
+//      且 AuditLog 只能新增不能修改。
+//   3. 時間一律存 UTC，顯示層依 TZ 轉換。
+
+generator client {
+  provider = "prisma-client-js"
+  // musl 目標是給 Docker 映像裡的 alpine 基底用的；native 給原生安裝。
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  // datasource 的 extensions 需要這個 preview flag，少了它
+  // `prisma generate` 會在部署當下才失敗。
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector, pg_trgm]
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 租戶與學年
+// ═══════════════════════════════════════════════════════════════
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  // 各科滿分、級分門檻、AI 配額、退費規則版本等機構層級設定
+  settings  Json     @default("{}")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  academicYears AcademicYear[]
+  classes       Class[]
+  auditLogs     AuditLog[]
+  subjects      Subject[]
+
+  @@map("tenants")
+}
+
+model AcademicYear {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String // 「115學年度」
+  startDate DateTime
+  endDate   DateTime
+  isCurrent Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  classes Class[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isCurrent])
+  @@map("academic_years")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 身分與權限
+// ═══════════════════════════════════════════════════════════════
+
+enum UserStatus {
+  PENDING_CONSENT // 未成年，等待法定代理人同意
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum SystemRole {
+  STUDENT
+  GUARDIAN
+  TEACHER
+  SUBJECT_LEAD // 學科召集人
+  SCHOOL_ADMIN // 校務管理員
+  SYS_ADMIN
+  // 營運模組（M14 起）會新增 FRONT_DESK（行政人員／櫃檯）。
+  // 它的職權與上述都不重疊：能收費、登出缺席、排課，
+  // 但看不到成績與作答內容。規格未寫完之前先不加，
+  // 因為新增角色會牽動整個權限矩陣與稽核設計。
+}
+
+enum ClassRole {
+  STUDENT
+  TEACHER
+  ASSISTANT // 助教
+  COUNSELOR // 升學輔導職權
+}
+
+model User {
+  id           String     @id @default(cuid())
+  tenantId     String
+  username     String // 學號或教師代號
+  email        String?
+  displayName  String
+  passwordHash String?
+  status       UserStatus @default(ACTIVE)
+  systemRole   SystemRole @default(STUDENT)
+
+  // 未成年判定與家長同意（民法第 77、79 條；非個資法）
+  birthDate     DateTime?
+  guardianEmail String?
+  consentAt     DateTime?
+
+  // 無障礙設定。作答場次建立時會快照一份，
+  // 事後改設定不影響已開始的考試。
+  a11yProfile Json?
+
+  // 登入安全
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  passwordChangedAt DateTime?
+  mustChangePassword Boolean  @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships ClassMembership[]
+  sessions    Session[]
+  guardianOf  GuardianLink[]    @relation("Guardian")
+  wardOf      GuardianLink[]    @relation("Student")
+  auditLogs   AuditLog[]
+
+  // 題庫層的反向關聯。全部是 SetNull —— 老師離職時題目與校對
+  // 記錄要留著，只是不再指向一個已刪除的帳號。
+  subjectTeaching     ClassSubjectTeacher[] @relation("SubjectTeaching")
+  authoredQuestions   Question[]            @relation("QuestionAuthor")
+  declaredImports     ImportJob[]           @relation("ImportRightsDeclarer")
+  createdImports      ImportJob[]           @relation("ImportCreator")
+  reviewedCandidates  ImportCandidate[]     @relation("CandidateReviewer")
+  declaredExplanations Explanation[]        @relation("ExplanationDeclarer")
+  resolvedDuplicates  DuplicateGroup[]      @relation("DuplicateResolver")
+  verifiedSources     OfficialSourceFetch[] @relation("OfficialSourceVerifier")
+
+  @@unique([tenantId, username])
+  @@unique([tenantId, email])
+  @@index([tenantId, status])
+  @@index([tenantId, systemRole])
+  @@map("users")
+}
+
+model GuardianLink {
+  id         String    @id @default(cuid())
+  guardianId String
+  studentId  String
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  guardian User @relation("Guardian", fields: [guardianId], references: [id], onDelete: Cascade)
+  student  User @relation("Student", fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([guardianId, studentId])
+  @@index([studentId])
+  @@map("guardian_links")
+}
+
+enum ClassType {
+  HOMEROOM // 行政班
+  GROUP // 教學群組
+}
+
+model Class {
+  id             String    @id @default(cuid())
+  tenantId       String
+  academicYearId String
+  name           String // 「三年甲班」或「數A加強班」
+  type           ClassType @default(HOMEROOM)
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant          Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  academicYear    AcademicYear          @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  memberships     ClassMembership[]
+  subjectTeachers ClassSubjectTeacher[]
+
+  @@unique([tenantId, academicYearId, name])
+  @@index([tenantId, active])
+  @@map("classes")
+}
+
+model ClassMembership {
+  id       String    @id @default(cuid())
+  classId  String
+  userId   String
+  role     ClassRole
+  // 導師。跨科目，負責催繳與班務（訪談第 14 題的「催」）。
+  isHomeroom Boolean @default(false)
+  joinedAt DateTime  @default(now())
+  leftAt   DateTime?
+
+  class Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, userId, role])
+  @@index([userId, leftAt])
+  @@map("class_memberships")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Session（Auth.js 的資料庫 session）
+//
+// 用資料庫 session 而非純 JWT，理由是考試場景需要「立刻登出
+// 某個帳號」這個能力 —— 發現代考時，JWT 要等到過期才失效。
+// ═══════════════════════════════════════════════════════════════
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expires])
+  @@map("sessions")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 稽核
+//
+// 只新增不修改。資料庫層以觸發器強制（見 migration），
+// 應用層沒有 update 與 delete 的路徑。
+// 保存五年（規格書文件 01 §16）。
+// ═══════════════════════════════════════════════════════════════
+
+enum AuditCategory {
+  AUTH // 登入、登出、密碼變更、帳號鎖定
+  USER // 帳號與權限異動
+  QUESTION // 題目建立、修訂、下架
+  GRADE // 成績異動、重新計分
+  EXAM // 任務派發、場次作廢
+  BILLING // 繳費、退費試算（營運模組）
+  SYSTEM // 設定變更、備份還原、升級
+  SECURITY // 誠信事件、異常存取
+}
+
+model AuditLog {
+  id        String        @id @default(cuid())
+  tenantId  String
+  category  AuditCategory
+  action    String // 「user.password_reset」「grade.recalculate」
+  actorId   String?
+  actorIp   String?
+  targetType String? // 「User」「Question」
+  targetId  String?
+  // 變更前後值。敏感欄位（密碼雜湊、金鑰）在寫入前遮蔽。
+  before    Json?
+  after     Json?
+  metadata  Json?
+  createdAt DateTime      @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, category, createdAt])
+  @@index([tenantId, targetType, targetId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 系統設定與版本
+// ═══════════════════════════════════════════════════════════════
+
+model SystemSetting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+
+  @@map("system_settings")
+}
+
+// 記錄每一次 schema 遷移與應用升級，供 rollback.sh 判斷
+// 「回滾到上一版之後，資料庫要不要一起降版」。
+model DeploymentRecord {
+  id            String   @id @default(cuid())
+  appVersion    String
+  schemaVersion String
+  action        String // install / upgrade / rollback
+  startedAt     DateTime @default(now())
+  finishedAt    DateTime?
+  succeeded     Boolean?
+  backupPath    String? // 升級前自動備份的位置
+  notes         String?
+
+  @@index([startedAt])
+  @@map("deployment_records")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AI 用量與成本
+//
+// 每一次模型呼叫都記一列。用途有三：成本歸因（哪個功能最貴）、
+// 預算控管（超過月度上限時降級）、以及事後追溯（某題的解析
+// 是哪個模型、哪個提示詞版本生成的）。
+// ═══════════════════════════════════════════════════════════════
+
+enum AiPurpose {
+  IMPORT_EXTRACT // 題本結構化
+  IMPORT_SOLVE // AI 自答
+  IMPORT_ANNOTATE // 知識點標註
+  IMPORT_REWRITE // 匯入解析的 AI 改寫
+  GRADING // 非選題評分
+  EXPLANATION // 解析生成
+  TUTOR // 智慧老師
+  ERROR_TAG // 錯因分類
+  QUALITY_CHECK // 題目品質異常偵測
+  EMBEDDING
+  OTHER
+}
+
+enum AiTier {
+  HIGH
+  MID
+  LIGHT
+  EMBEDDING
+}
+
+model AiUsageLog {
+  id           String    @id @default(cuid())
+  tenantId     String
+  purpose      AiPurpose
+  tier         AiTier
+  provider     String // anthropic / openai / mock
+  model        String
+  baseUrl      String? // 自訂閘道時記錄實際端點，供事後追溯
+  inputTokens  Int       @default(0)
+  outputTokens Int       @default(0)
+  // 以設定的單價估算，僅供成本歸因參考，不是帳單。
+  estimatedCost Decimal? @db.Decimal(12, 6)
+  latencyMs    Int?
+  succeeded    Boolean   @default(true)
+  errorCode    String?
+  retryCount   Int       @default(0)
+  refType      String? // 「Question」「TutorSession」
+  refId        String?
+  promptVersion String?
+  createdAt    DateTime  @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, purpose, createdAt])
+  @@index([refType, refId])
+  @@map("ai_usage_logs")
+}
+
+// 月度預算的即時累計。每次呼叫後 upsert，
+// 避免每次都對 AiUsageLog 做全表 sum。
+model AiBudgetCounter {
+  id           String   @id @default(cuid())
+  tenantId     String
+  yearMonth    String // "2026-07"
+  inputTokens  BigInt   @default(0)
+  outputTokens BigInt   @default(0)
+  callCount    Int      @default(0)
+  updatedAt    DateTime @updatedAt
+
+  @@unique([tenantId, yearMonth])
+  @@map("ai_budget_counters")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 通知（T0，六處功能的共同相依）
+//
+// 設計成單一匯流層而不是每個模組各接一次 LINE API。
+// 沒有這一層，批次催繳、錯題到期、成績發布、家長週報、
+// 到班離班通知會各自實作重試與免打擾，最後沒有一個地方
+// 能回答「這位家長今天收到幾則通知」。
+// ═══════════════════════════════════════════════════════════════
+
+enum NotifyChannel {
+  IN_APP
+  EMAIL
+  LINE
+  SMS
+}
+
+enum NotifyStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  SUPPRESSED // 免打擾時段或使用者偏好而未送出
+}
+
+model NotificationTemplate {
+  id        String   @id @default(cuid())
+  tenantId  String
+  key       String // 「assignment.due_soon」「attendance.checkin」
+  channel   NotifyChannel
+  subject   String?
+  body      String // 支援 {{變數}} 插值
+  active    Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, key, channel])
+  @@map("notification_templates")
+}
+
+model Notification {
+  id          String        @id @default(cuid())
+  tenantId    String
+  recipientId String
+  channel     NotifyChannel
+  templateKey String
+  payload     Json // 插值用的變數
+  status      NotifyStatus  @default(QUEUED)
+  scheduledAt DateTime      @default(now())
+  sentAt      DateTime?
+  readAt      DateTime?
+  failReason  String?
+  retryCount  Int           @default(0)
+  // 去重鍵。同一個事件在重試或多次觸發時只送一次，
+  // 避免家長在一分鐘內收到五則相同的到班通知。
+  dedupeKey   String?
+  createdAt   DateTime      @default(now())
+
+  @@unique([tenantId, dedupeKey])
+  @@index([recipientId, status, scheduledAt])
+  @@index([tenantId, status, scheduledAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  // 各 templateKey 的渠道開關
+  channels  Json     @default("{}")
+  // 免打擾時段，例如 {"start":"22:00","end":"07:00"}
+  quietHours Json?
+  lineUserId String? // LINE 綁定，櫃檯報名時掃碼完成
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_preferences")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 題庫層
+//
+// 對應遷移 20260728000000_question_bank。遷移是手寫 SQL，這裡的
+// 模型只是讓 Prisma Client 有型別可用 —— 兩者一旦不同步，
+// 執行期會出現「欄位不存在」這種很難查的錯誤，所以任何一邊改了
+// 都要同步另一邊，並跑 `prisma migrate diff` 確認沒有偏移。
+//
+// 幾個刻意的選擇：
+//   · tenantId 大多是純欄位而非關聯 —— 遷移裡只有 subjects 對
+//     tenants 建了外鍵，其餘表靠應用層與日後的列級安全把關。
+//     這裡照實反映，不憑空補出資料庫沒有的外鍵。
+//   · embedding 用 Unsupported。pgvector 的型別 Prisma 不認識，
+//     檢索一律走 $queryRaw。
+// ═══════════════════════════════════════════════════════════════
+
+enum QuestionType {
+  SINGLE_CHOICE // 單選題
+  MULTI_CHOICE // 多選題，部分給分 (n-2k)/n
+  FILL_SLOT // 選填題，答案填入答案卡編號格位
+  FILL_TEXT
+  SHORT_ANSWER
+  ESSAY
+  TRANSLATION
+  TRUE_FALSE
+}
+
+enum QuestionStatus {
+  DRAFT
+  PENDING_REVIEW
+  PUBLISHED
+  RETIRED
+}
+
+enum SourceType {
+  OFFICIAL_PAST // 歷屆試題，著作權法第 9 條不受保護
+  TEACHER_ORIGINAL
+  SCHOOL_EXAM
+  PUBLISHER_SCAN
+  AI_GENERATED
+}
+
+enum LicenseScope {
+  PUBLIC
+  TENANT_EXPORTABLE
+  TENANT_NO_EXPORT
+  INTERNAL_USE_ONLY
+}
+
+enum BloomLevel {
+  REMEMBER
+  UNDERSTAND
+  APPLY
+  ANALYZE
+  EVALUATE
+  CREATE
+}
+
+enum BloomLevelLegacy {
+  KNOWLEDGE
+  COMPREHENSION
+  APPLICATION
+  ANALYSIS
+  SYNTHESIS
+  EVALUATION
+}
+
+enum ImportStatus {
+  QUEUED
+  NORMALIZING
+  SEGMENTING
+  EXTRACTING
+  SOLVING
+  ANNOTATING
+  DEDUPING
+  READY_FOR_REVIEW
+  COMMITTING
+  COMMITTED
+  FAILED
+}
+
+enum ImportFileRole {
+  QUESTION_BOOK
+  ANSWER_KEY
+  EXPLANATION_BOOK
+  RUBRIC
+  UNKNOWN
+}
+
+enum CandidateState {
+  PENDING
+  CONFIRMED
+  FLAGGED
+  DISCARDED
+}
+
+enum TextbookNodeType {
+  VOLUME
+  THEME
+  CHAPTER
+  SECTION
+  LESSON
+}
+
+enum ExplanationOrigin {
+  AI_GENERATED
+  TEACHER_WRITTEN
+  OFFICIAL_CEEC
+  AI_REWRITTEN
+  VERBATIM_IMPORT
+}
+
+enum RightsBasis {
+  OWNED
+  LICENSED
+  OFFICIAL_PUBLIC
+  UNVERIFIED
+}
+
+enum ExplanationDisplay {
+  FULL
+  SUMMARY_ONLY
+  HIDDEN
+}
+
+model Subject {
+  id            String   @id @default(cuid())
+  tenantId      String
+  code          String // MATH_A / CHINESE / ENGLISH / SCIENCE / SOCIAL
+  name          String
+  // 學測滿分：社會 144、自然 128、其餘 100
+  gsatFullScore Int?
+  order         Int      @default(0)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  tenant          Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  curriculumNodes CurriculumNode[]
+  knowledgePoints KnowledgePoint[]
+  questionGroups  QuestionGroup[]
+  questions       Question[]
+  importJobs      ImportJob[]
+  editions        TextbookEdition[]
+  classTeachers   ClassSubjectTeacher[]
+
+  @@unique([tenantId, code])
+  @@map("subjects")
+}
+
+model CurriculumNode {
+  id        String @id @default(cuid())
+  tenantId  String
+  subjectId String
+  parentId  String?
+  code      String // 108 課綱官方編碼，如 S-10-1
+  title     String
+  version   String @default("108")
+  order     Int    @default(0)
+
+  subject       Subject                  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  parent        CurriculumNode?          @relation("CurriculumTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children      CurriculumNode[]         @relation("CurriculumTree")
+  kpLinks       KpCurriculumLink[]
+  textbookLinks TextbookCurriculumLink[]
+
+  @@unique([subjectId, code, version])
+  @@index([parentId, order])
+  @@map("curriculum_nodes")
+}
+
+model KnowledgePoint {
+  id          String   @id @default(cuid())
+  tenantId    String
+  subjectId   String
+  name        String
+  description String?
+  // 遺忘衰減率。程序性知識衰減快，概念性較慢。
+  decayRate   Float    @default(0.05)
+  gsatWeight  Float    @default(1.0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // pgvector。維度依 EMBEDDING_DIM，預設 bge-m3 的 1024。
+  embedding Unsupported("vector(1024)")?
+
+  subject         Subject                  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  curriculumLinks KpCurriculumLink[]
+  questions       QuestionKnowledgePoint[]
+  prerequisites   KpPrerequisite[]         @relation("KpSelf")
+  requiredBy      KpPrerequisite[]         @relation("KpPrereq")
+
+  @@unique([subjectId, name])
+  @@index([tenantId, subjectId])
+  @@map("knowledge_points")
+}
+
+model KpCurriculumLink {
+  knowledgePointId String
+  curriculumNodeId String
+
+  knowledgePoint KnowledgePoint @relation(fields: [knowledgePointId], references: [id], onDelete: Cascade)
+  curriculumNode CurriculumNode @relation(fields: [curriculumNodeId], references: [id], onDelete: Cascade)
+
+  @@id([knowledgePointId, curriculumNodeId])
+  @@map("kp_curriculum_links")
+}
+
+// 前置關係 DAG。供智慧老師回溯與能力診斷。
+model KpPrerequisite {
+  kpId       String
+  prereqKpId String
+  strength   Float   @default(1.0)
+  verifiedBy String?
+
+  kp     KnowledgePoint @relation("KpSelf", fields: [kpId], references: [id], onDelete: Cascade)
+  prereq KnowledgePoint @relation("KpPrereq", fields: [prereqKpId], references: [id], onDelete: Cascade)
+
+  @@id([kpId, prereqKpId])
+  @@map("kp_prerequisites")
+}
+
+model Publisher {
+  id     String  @id @default(cuid())
+  name   String
+  active Boolean @default(true)
+
+  editions TextbookEdition[]
+
+  @@map("publishers")
+}
+
+model TextbookEdition {
+  id                String @id @default(cuid())
+  tenantId          String
+  publisherId       String
+  subjectId         String
+  curriculumVersion String @default("108")
+  adoptedYears      Int[]  @default([])
+
+  publisher Publisher      @relation(fields: [publisherId], references: [id], onDelete: Restrict)
+  subject   Subject        @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  nodes     TextbookNode[]
+
+  @@unique([tenantId, publisherId, subjectId, curriculumVersion])
+  @@map("textbook_editions")
+}
+
+model TextbookNode {
+  id        String           @id @default(cuid())
+  editionId String
+  parentId  String?
+  type      TextbookNodeType
+  label     String
+  order     Int              @default(0)
+
+  edition         TextbookEdition          @relation(fields: [editionId], references: [id], onDelete: Cascade)
+  parent          TextbookNode?            @relation("TextbookTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children        TextbookNode[]           @relation("TextbookTree")
+  curriculumLinks TextbookCurriculumLink[]
+  questionLinks   QuestionTextbookLink[]
+
+  @@index([editionId, parentId, order])
+  @@map("textbook_nodes")
+}
+
+model TextbookCurriculumLink {
+  textbookNodeId   String
+  curriculumNodeId String
+  coverage         Float  @default(1.0)
+
+  textbookNode   TextbookNode   @relation(fields: [textbookNodeId], references: [id], onDelete: Cascade)
+  curriculumNode CurriculumNode @relation(fields: [curriculumNodeId], references: [id], onDelete: Cascade)
+
+  @@id([textbookNodeId, curriculumNodeId])
+  @@map("textbook_curriculum_links")
+}
+
+// 題組：共用前導敘述。學測的混合題全部是這個結構。
+model QuestionGroup {
+  id             String   @id @default(cuid())
+  tenantId       String
+  subjectId      String
+  stimulus       String // 前導敘述／閱讀素材
+  stimulusAssets Json?
+  label          String? // 「37-39 題為題組」
+  createdAt      DateTime @default(now())
+
+  subject   Subject    @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  questions Question[]
+
+  @@index([tenantId, subjectId])
+  @@map("question_groups")
+}
+
+model Question {
+  id        String @id @default(cuid())
+  tenantId  String
+  subjectId String
+
+  // 版本控制：familyId 跨版本穩定，id 是版本列的主鍵。
+  // 作答記錄指向 id，因此天然版本化。
+  familyId     String
+  version      Int     @default(1)
+  inheritStats Boolean @default(true)
+
+  groupId  String?
+  subLabel String? // 混合題子題：「（a）」「（b）」，全形
+
+  type           QuestionType
+  content        String // 題幹，內含 $LaTeX$
+  contentAssets  Json?
+  score          Float        @default(0)
+  // 多選題的部分給分規則。存規則而非寫死，各科不同。
+  scoringRule    Json?
+  answerKeys     Int[]        @default([])
+  answerSlots    Json?
+  answerText     String?
+
+  difficulty         Float?
+  irtDifficulty      Float?
+  irtDiscrimination  Float?
+  irtGuessing        Float?
+  responseCount      Int    @default(0)
+  correctRate        Float?
+
+  bloomLevel       BloomLevel?
+  bloomLevelLegacy BloomLevelLegacy?
+  estTimeSeconds   Int?
+
+  sourceType        SourceType
+  sourceRef         String? // 「115學測數學A第12題」
+  licenseScope      LicenseScope
+  sourceImportJobId String?
+
+  status       QuestionStatus @default(DRAFT)
+  qualityFlags Json?
+
+  embedding Unsupported("vector(1024)")?
+
+  createdBy String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  retiredAt DateTime?
+
+  subject         Subject                  @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  group           QuestionGroup?           @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  author          User?                    @relation("QuestionAuthor", fields: [createdBy], references: [id], onDelete: SetNull)
+  options         QuestionOption[]
+  knowledgePoints QuestionKnowledgePoint[]
+  textbookLinks   QuestionTextbookLink[]
+  rubrics         Rubric[]
+  explanations    Explanation[]
+  duplicateOf     DuplicateMember[]
+  fromCandidates  ImportCandidate[]        @relation("CandidateQuestion")
+  dupCandidates   ImportCandidate[]        @relation("CandidateDuplicate")
+
+  @@unique([familyId, version])
+  @@index([tenantId, subjectId, status])
+  @@index([groupId])
+  @@index([sourceType])
+  @@map("questions")
+}
+
+// 選項獨立成表而非 JSON 陣列：選項數不固定（數學 5、英文 4），
+// 且需要逐選項統計（哪個誘答項最多人選）。
+model QuestionOption {
+  id          String @id @default(cuid())
+  questionId  String
+  order       Int // 1..n，對應 (1)(2)(3)(4)(5)
+  label       String
+  content     String
+  assets      Json?
+  selectCount Int    @default(0)
+
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([questionId, order])
+  @@map("question_options")
+}
+
+model QuestionKnowledgePoint {
+  questionId       String
+  knowledgePointId String
+  weight           Float   @default(1.0)
+  confirmedBy      String?
+
+  question       Question       @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  knowledgePoint KnowledgePoint @relation(fields: [knowledgePointId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, knowledgePointId])
+  @@map("question_knowledge_points")
+}
+
+model QuestionTextbookLink {
+  questionId     String
+  textbookNodeId String
+
+  question     Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  textbookNode TextbookNode @relation(fields: [textbookNodeId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, textbookNodeId])
+  @@map("question_textbook_links")
+}
+
+// 評分量表。結構直接對應大考中心的評分原則：
+//   國寫   → BAND      單一維度多等第（A+ 25–22、A 21–18…）
+//   英作文 → DIMENSION 四維度各 5 分
+//   中譯英 → DEDUCTION 扣分制
+model Rubric {
+  id         String   @id @default(cuid())
+  tenantId   String
+  questionId String?
+  name       String
+  totalScore Float
+  mode       String   @default("BAND")
+  // 評分原則的描述文字受著作權保護（文件 16 §3）。
+  // 內部閱卷可呈現，不得散布或匯出給學生。
+  sourceRef    String?
+  internalOnly Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  question   Question?          @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  dimensions RubricDimension[]
+  bands      RubricBand[]
+
+  @@map("rubrics")
+}
+
+model RubricDimension {
+  id         String  @id @default(cuid())
+  rubricId   String
+  name       String // 「內容」「組織」
+  nameEn     String?
+  maxScore   Float
+  descriptor String?
+  order      Int     @default(0)
+
+  rubric Rubric       @relation(fields: [rubricId], references: [id], onDelete: Cascade)
+  bands  RubricBand[]
+
+  @@map("rubric_dimensions")
+}
+
+model RubricBand {
+  id          String  @id @default(cuid())
+  rubricId    String
+  dimensionId String?
+  grade       String // 'A+' 'A' 'B+' … '0'
+  scoreMax    Float
+  scoreMin    Float
+  descriptor  String
+  order       Int     @default(0)
+
+  rubric    Rubric           @relation(fields: [rubricId], references: [id], onDelete: Cascade)
+  dimension RubricDimension? @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+
+  @@index([rubricId, order])
+  @@map("rubric_bands")
+}
+
+// ─────────────────────────────────────────────────────────────
+// 匯入管線
+// ─────────────────────────────────────────────────────────────
+
+model ImportJob {
+  id        String       @id @default(cuid())
+  tenantId  String
+  subjectId String
+  title     String
+  status    ImportStatus @default(QUEUED)
+
+  sourceType   SourceType
+  licenseScope LicenseScope
+  // 權利聲明：誰聲明的、聲明了什麼。責任歸屬明確。
+  rightsDeclaredBy String?
+  rightsBasis      String?
+  rightsNote       String?
+
+  totalPages      Int?
+  totalCandidates Int  @default(0)
+  confirmedCount  Int  @default(0)
+  flaggedCount    Int  @default(0)
+
+  // 階段進度。埋在 stageDetail 的 JSONB 裡查起來太痛，
+  // 而「卡在哪一階段、跑多久、花多少」是維運每天要看的。
+  stageStartedAt     DateTime?
+  lastCompletedStage String?
+  attemptCount       Int       @default(0)
+  aiCostTwd          Float     @default(0)
+
+  // 校對節奏。驗收標準是 50 題 20 分鐘。
+  reviewStartedAt DateTime?
+  reviewSeconds   Int       @default(0)
+
+  error       String?
+  stageDetail Json?
+  createdBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  committedAt DateTime?
+
+  subject    Subject           @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  declarer   User?             @relation("ImportRightsDeclarer", fields: [rightsDeclaredBy], references: [id], onDelete: SetNull)
+  creator    User?             @relation("ImportCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  files      ImportFile[]
+  pages      ImportPage[]
+  candidates ImportCandidate[]
+
+  @@index([tenantId, status])
+  @@index([createdAt])
+  @@map("import_jobs")
+}
+
+model ImportFile {
+  id         String         @id @default(cuid())
+  jobId      String
+  role       ImportFileRole @default(UNKNOWN)
+  fileName   String
+  mimeType   String
+  sizeBytes  BigInt
+  storageKey String
+  pageCount  Int?
+  // 掃描件與照片的品質評估，決定要提示老師逐題確認的程度
+  qualityScore Float?
+  qualityNote  String?
+  // 內容指紋。同一份講義被兩位老師各傳一次時認得出來 ——
+  // 省下的不只是儲存空間，是第二次的 AI 費用與第二次的校對工時。
+  sha256       String?
+  uploadedAt   DateTime @default(now())
+
+  job   ImportJob    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  pages ImportPage[]
+
+  @@index([jobId])
+  @@index([sha256])
+  @@map("import_files")
+}
+
+/// 正規化後的頁面。第 1 階段產出，後續各階段與校對介面共用。
+model ImportPage {
+  id         String @id @default(cuid())
+  jobId      String
+  fileId     String
+  index      Int // 該檔案內的頁碼，從 1 起算
+  width      Int
+  height     Int
+  storageKey String
+  // 原生 PDF 才有。比 OCR 準得多，但版面資訊要靠座標推斷。
+  textLayer    String?
+  quality      Float    @default(1.0)
+  qualityNotes Json     @default("[]")
+  // 版面切割結果（第 2 階段）。每頁一份，避免整份文件一大坨。
+  blocks       Json?
+  createdAt    DateTime @default(now())
+
+  job  ImportJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  file ImportFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([fileId, index])
+  @@index([jobId])
+  @@index([jobId, quality])
+  @@map("import_pages")
+}
+
+// 匯入候選題：校對介面操作的對象。確認後才寫入 questions。
+model ImportCandidate {
+  id         String  @id @default(cuid())
+  jobId      String
+  order      Int
+  questionNo String? // 原稿上的題號，可能是「37-39」
+  subLabel   String?
+  groupKey   String? // 同一題組的候選共用此鍵
+
+  type        QuestionType?
+  content     String?
+  stimulus    String?
+  options     Json? // [{order,label,content}]
+  answerKeys  Int[]         @default([])
+  answerSlots Json?
+  answerText  String?
+  score       Float?
+
+  // 信心與扣分理由。校對者靠這個決定「要不要細看」，
+  // 是 20 分鐘校完 50 題的關鍵。
+  confidence        Float @default(0)
+  confidenceReasons Json  @default("[]")
+
+  // 答案來源：題本附的、獨立答案卷對齊的、或 AI 自答
+  answerOrigin    String?
+  selfConsistency Float?
+  solveTrace      Json?
+
+  kpSuggestions Json?
+  sourceBbox    Json? // 原稿座標，供左右連動
+  sourcePage    Int?
+
+  state      CandidateState @default(PENDING)
+  reviewedBy String?
+  reviewedAt DateTime?
+  reviewNote String?
+  questionId String?
+
+  duplicateOfId  String?
+  duplicateScore Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  job         ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  reviewer    User?     @relation("CandidateReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  question    Question? @relation("CandidateQuestion", fields: [questionId], references: [id], onDelete: SetNull)
+  duplicateOf Question? @relation("CandidateDuplicate", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+
+  @@unique([jobId, order])
+  @@index([jobId, state])
+  @@index([jobId, confidence])
+  @@map("import_candidates")
+}
+
+model Explanation {
+  id           String             @id @default(cuid())
+  tenantId     String
+  questionId   String
+  origin       ExplanationOrigin
+  rightsBasis  RightsBasis
+  licenseScope LicenseScope
+  displayMode  ExplanationDisplay @default(FULL)
+  isPrimary    Boolean            @default(false)
+
+  // 分層結構：結論、步驟、誘答項剖析、延伸
+  layers Json @default("{}")
+  // 匯入的原文。不直接呈現給學生，僅作為 AI 改寫的依據。
+  rawBody      String?
+  groundedOnId String?
+
+  sourceRef     String?
+  declaredBy    String?
+  modelUsed     String?
+  promptVersion String?
+  takedownAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  question   Question      @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  declarer   User?         @relation("ExplanationDeclarer", fields: [declaredBy], references: [id], onDelete: SetNull)
+  groundedOn Explanation?  @relation("ExplanationGrounding", fields: [groundedOnId], references: [id], onDelete: SetNull)
+  rewrites   Explanation[] @relation("ExplanationGrounding")
+
+  @@index([questionId])
+  @@map("explanations")
+}
+
+model DuplicateGroup {
+  id         String    @id @default(cuid())
+  tenantId   String
+  subjectId  String
+  resolvedBy String?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  resolver User?             @relation("DuplicateResolver", fields: [resolvedBy], references: [id], onDelete: SetNull)
+  members  DuplicateMember[]
+
+  @@map("duplicate_groups")
+}
+
+model DuplicateMember {
+  groupId    String
+  questionId String
+  similarity Float
+  isKeeper   Boolean @default(false)
+
+  group    DuplicateGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  question Question       @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, questionId])
+  @@map("duplicate_members")
+}
+
+// 科目老師：這個人教這個班的這一科。
+// 訪談第 14 題：派任與批改是「科目或班級老師」，催繳是「班級老師」，
+// 而「有時候班級老師就是那一科的老師」—— 兩種職權必須分得開。
+model ClassSubjectTeacher {
+  id         String   @id @default(cuid())
+  classId    String
+  subjectId  String
+  userId     String
+  // 主授或協同。一科三位老師（訪談第 1 題）需要區分。
+  isPrimary  Boolean  @default(true)
+  assignedAt DateTime @default(now())
+
+  class   Class   @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  user    User    @relation("SubjectTeaching", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, subjectId, userId])
+  @@index([userId])
+  @@map("class_subject_teachers")
+}
+
+// 官方資料的年度取得記錄（文件 16）
+model OfficialSourceFetch {
+  id           String  @id @default(cuid())
+  sourceUrl    String
+  docType      String // PAPER / ANSWER_KEY / RUBRIC
+  academicYear Int
+  subjectCode  String?
+  sha256       String
+
+  fetchedAt DateTime @default(now())
+  // 驗證結果。順序見文件 16 §4：
+  // 機械不變量 → 跨文件交叉 → 跨年度比對 → 獨立重抽比對 → 人工
+  checksPassed Json     @default("[]")
+  checksFailed Json     @default("[]")
+  verifiedBy   String?
+  verifiedAt   DateTime?
+
+  verifier User? @relation("OfficialSourceVerifier", fields: [verifiedBy], references: [id], onDelete: SetNull)
+
+  @@unique([sourceUrl, sha256])
+  @@map("official_source_fetches")
+}

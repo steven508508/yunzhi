@@ -1,0 +1,46 @@
+[Unit]
+Description=雲端智學 — AI 服務
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yunzhi
+Group=yunzhi
+EnvironmentFile=/etc/default/yunzhi
+EnvironmentFile=/etc/yunzhi/env
+Environment=HF_HOME=/var/lib/yunzhi/models
+WorkingDirectory=/opt/yunzhi/apps/ai
+ExecStart=/opt/yunzhi/apps/ai/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 2 --no-access-log
+
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=180
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# 題本解析可能跑很久，啟動時載入嵌入模型也要時間
+TimeoutStartSec=180
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/yunzhi /var/log/yunzhi
+
+LimitNOFILE=16384
+# AI 服務是最可能吃爆記憶體的元件。設上限讓它被單獨砍掉，
+# 而不是讓 OOM killer 去挑 PostgreSQL —— 後者等於全系統停擺。
+MemoryMax=4G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yunzhi-ai
+
+[Install]
+WantedBy=multi-user.target

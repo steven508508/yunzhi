@@ -1,0 +1,18 @@
+[Unit]
+Description=雲端智學 — 每日備份
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/default/yunzhi
+WorkingDirectory=/opt/yunzhi
+ExecStart=/opt/yunzhi/deploy/scripts/backup.sh --quiet
+# 備份跑太久多半代表磁碟或資料庫有問題，讓它失敗比讓它卡住好
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yunzhi-backup

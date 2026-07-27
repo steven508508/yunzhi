@@ -1,0 +1,21 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+httpx==0.28.0
+pydantic==2.10.2
+python-multipart==0.0.17
+
+# 物件儲存。用 boto3 而非 minio 套件：同一份程式同時支援 MinIO
+# 與 AWS S3，授權他校自建時不必改碼。
+boto3==1.35.71
+
+# 題本解析（規格書文件 03 第 2 節）
+pymupdf==1.24.14
+opencv-python-headless==4.10.0.84
+pillow==11.0.0
+numpy==2.1.3
+
+# 數學式的等價判定（用於答案比對：3/6 與 0.5 是同一個答案）
+sympy==1.13.3
+
+# 本地嵌入模型（EMBEDDING_PROVIDER=local）
+# sentence-transformers==3.3.1

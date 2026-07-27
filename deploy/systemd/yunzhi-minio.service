@@ -1,0 +1,24 @@
+[Unit]
+Description=雲端智學 — 物件儲存
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yunzhi
+Group=yunzhi
+EnvironmentFile=/etc/yunzhi/env
+Environment=MINIO_ROOT_USER=%i
+ExecStart=/usr/local/bin/minio server /var/lib/yunzhi/objects --address 127.0.0.1:9000 --console-address 127.0.0.1:9001
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/yunzhi
+LimitNOFILE=65536
+SyslogIdentifier=yunzhi-minio
+
+[Install]
+WantedBy=multi-user.target

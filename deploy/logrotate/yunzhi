@@ -1,0 +1,14 @@
+# 雲端智學 — 日誌輪替（原生安裝）
+# 磁碟寫滿是自架系統最常見的當機原因，而日誌是成長最穩定的來源。
+/var/log/yunzhi/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su yunzhi yunzhi
+    create 0640 yunzhi yunzhi
+    maxsize 100M
+}
