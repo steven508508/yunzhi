@@ -20,9 +20,19 @@ os.environ.setdefault("AI_PROVIDER", "mock")
 os.environ.setdefault("S3_BUCKET", "test")
 os.environ.setdefault("S3_ENDPOINT", "http://localhost:9000")
 
-SAMPLE = Path(
-    os.getenv("WORKSHEET_SAMPLE", "/home/claude/samples/講義-數學1-4-1直線方程式.pdf")
-)
+#: 真實講義的路徑。有著作權，不進版控；找不到就跳過，不讓 CI 失敗。
+#: 多份用 os.pathsep 分隔，第一份會被當成「主樣本」做細部檢查。
+SAMPLES = [
+    Path(p)
+    for p in os.getenv(
+        "WORKSHEET_SAMPLES",
+        "/home/claude/samples/講義-數學1-4-1直線方程式.pdf"
+        + os.pathsep
+        + "/home/claude/samples/講義-學生版-4-3圓與直線.pdf",
+    ).split(os.pathsep)
+    if p
+]
+SAMPLE = SAMPLES[0]
 
 import storage  # noqa: E402
 
@@ -42,15 +52,16 @@ client = TestClient(main.app)
 client.__enter__()
 
 
-def _run():
+def _run(sample: Path = None):
+    sample = sample or SAMPLE
     _FAKE.clear()
-    _FAKE["src/worksheet.pdf"] = SAMPLE.read_bytes()
+    _FAKE["src/worksheet.pdf"] = sample.read_bytes()
 
     r = client.post(
         "/v1/import/normalize",
         json={
             "source_key": "src/worksheet.pdf",
-            "file_name": SAMPLE.name,
+            "file_name": sample.name,
             "page_key_prefix": "job/pages",
         },
     )
@@ -123,6 +134,75 @@ def test_real_worksheet():
     # 頁首頁尾不該出現在題幹裡
     for e in ex:
         assert "互動式教學講義" not in e["stem"], f"頁首漏進題幹：{e['label']}"
+
+
+def test_every_sample_parses():
+    """
+    每一份樣本都要走得完，而且結果要合理。
+    細部斷言只對主樣本做——其餘的驗「不會壞掉、數量級對」就夠了，
+    否則每加一份樣本就要改一次測試，那會讓人不想加樣本。
+    """
+    for sample in SAMPLES:
+        if not sample.exists():
+            print(f"  · 跳過：{sample.name}")
+            continue
+
+        norm, segd = _run(sample)
+        assert norm["kind"] == "native_pdf", sample.name
+        assert segd["vision_pages"] == 0, f"{sample.name} 不該用到視覺模型"
+        assert segd["genre"] == "worksheet", sample.name
+        assert len(segd["exercises"]) >= 20, f"{sample.name} 題目單位太少"
+
+        # 教用版才有答案墨色。有的話，詳解的覆蓋率要夠高——
+        # 教用版的價值就在詳解。
+        if segd["answer_ink"]:
+            ex = segd["exercises"]
+            with_sol = sum(1 for e in ex if e["explanation"])
+            assert with_sol / len(ex) >= 0.8, (
+                f"{sample.name}：只有 {with_sol}/{len(ex)} 題抓到詳解"
+            )
+
+
+def test_answer_ink_is_not_hardcoded():
+    """
+    同一家出版社的不同章節，答案墨色不完全一樣（實測 #EC008C 與
+    #E4007F）。偵測必須是真的偵測，不能是寫死的色票。
+    """
+    inks = set()
+    for sample in SAMPLES:
+        if not sample.exists():
+            continue
+        _, segd = _run(sample)
+        if segd["answer_ink"]:
+            inks.add(segd["answer_ink"])
+
+    if len(SAMPLES) >= 2 and len(inks) >= 2:
+        assert len(inks) >= 2, "兩份講義的答案墨色應該不同，卻偵測成同一個"
+
+
+def test_glyph_cache_pays_off_across_documents():
+    """
+    第二份講義應該大量命中第一份建立的字形對應。
+    這是整個設計的重點：**同一家出版社只要問一次模型**。
+    """
+    if len(SAMPLES) < 2 or not all(s.exists() for s in SAMPLES[:2]):
+        print("  · 跳過：需要兩份樣本")
+        return
+
+    from pipeline.glyphmap import load_cache
+    from pipeline.normalize import prepare
+
+    if not load_cache():
+        print("  · 跳過：字形快取是空的")
+        return
+
+    prep = prepare(SAMPLES[1].read_bytes(), SAMPLES[1].name)
+    cache = load_cache()
+    hits = sum(1 for u in prep.glyphs.uses if u.key in cache)
+    assert prep.glyphs.uses, "第二份應該也偵測得到符號字型"
+    assert hits / len(prep.glyphs.uses) >= 0.5, (
+        f"快取只命中 {hits}/{len(prep.glyphs.uses)}，跨文件重用沒有生效"
+    )
 
 
 def test_glyph_restoration_changes_the_text():

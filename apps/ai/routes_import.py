@@ -508,10 +508,11 @@ def build_router(get_provider) -> APIRouter:
                         stem=stem,
                         explanation=u.explanation_text(),
                         answer=u.answer,
-                        # 只有教用版才抓填空答案。學生版的空格之間
-                        # 是真的空白，抽出來會是空的，不會產生假答案。
+                        # 優先用顏色（零猜測）；沒有顏色資訊時才退回
+                        # 文字啟發式，而那條路只在確定是教用版時走。
                         inline_answers=(
-                            seg.extract_inline_answers(stem) if answer_ink else []
+                            u.inline_answers()
+                            or (seg.extract_inline_answers(stem) if answer_ink else [])
                         ),
                     )
                 )

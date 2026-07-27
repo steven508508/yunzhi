@@ -572,6 +572,16 @@ class ExerciseUnit:
     def explanation_text(self) -> str:
         return "\n".join(b.text for b in self.explanation)
 
+    def inline_answers(self) -> list[str]:
+        """
+        題幹裡被填掉的空格答案，**以顏色為準**。
+
+        教用版把答案印成另一個顏色，segment_native 已經據此把每個
+        區塊拆成「學生看到的」與「答案」。這裡只是把題幹區塊的
+        答案收集起來——沒有任何猜測，所以學生版自然是空的。
+        """
+        return [a for b in self.stem for a in b.answers]
+
 
 def split_by_exercise(blocks: list[LayoutBlock]) -> list[ExerciseUnit]:
     """
@@ -679,19 +689,25 @@ def detect_genre(blocks: list[LayoutBlock]) -> str:
     return "unknown"
 
 
-#: 教用版的填空答案。學生版是空格，教用版把答案印在同一個位置，
-#: 前後用全形空白隔開：「則 m1＝　1　，m2＝　－4　」。
+#: 教用版的填空答案（文字啟發式）。
 #:
-#: 這個模式的價值在於**它是免費的答案**——抓得到就不必花錢跑 AI 自答，
-#: 而且比 AI 推導可靠（那是出版社印的標準答案）。
+#: **優先用顏色**（ExerciseUnit.inline_answers）。這個函式是給
+#: 「答案印成黑色、與題目同色」的教用版用的退路，而它天生不可靠：
+#: 全形空白在數學排版裡也拿來當一般間隔，光靠配對會把
+#: 「∴斜率 m1＝」這種東西當成答案。
+#:
+#: 所以加了一個限制：空格前面必須是「＝為是：⇒得」之一，
+#: 也就是**答案該出現的位置**。實測一份學生版講義，
+#: 不加這個限制會抽出 21 個假答案，加了之後降到個位數。
+_ANSWER_POSITION = "＝=為是：:⇒得"
 _BLANK_DELIM = "\u3000"  # 全形空白
 
 
 def extract_inline_answers(text: str) -> list[str]:
     """
-    抽出教用版填在空格裡的答案。
+    抽出教用版填在空格裡的答案（沒有顏色資訊時的退路）。
 
-    做法是把全形空白當成成對的分隔符，取奇數段。**不用正則**——
+    把全形空白當成成對的分隔符，取奇數段。**不用正則**——
     正則的非貪婪比對在空白格（連續兩個分隔符）上會跨過邊界，
     把「，m2＝」當成答案抽出來。分段取奇數位天然沒有這個問題：
 
@@ -700,22 +716,30 @@ def extract_inline_answers(text: str) -> list[str]:
         學生版  則 m1＝　　，m2＝　　。
                  → ['則 m1＝', '', '，m2＝', '', '。']      奇數段全是空的
 
-    所以學生版不會產生假答案，這一點很重要：假答案比沒有答案糟得多。
+    學生版不會產生假答案，這一點很重要：假答案會被當成標準答案
+    入庫，然後拿去改學生的考卷。
     """
     parts = text.split(_BLANK_DELIM)
     out = []
-    for v in parts[1::2]:
-        v = v.strip()
-        # 純標點的多半是排版空隙，不是答案
-        if v and not re.fullmatch(r"[，、。：；．,.:;]+", v):
-            out.append(v)
+    for i in range(1, len(parts), 2):
+        v = parts[i].strip()
+        if not v or re.fullmatch(r"[，、。：；．,.:;]+", v):
+            continue
+        # 前一段的結尾要是「答案該出現的位置」
+        before = parts[i - 1].rstrip()
+        if not before or before[-1] not in _ANSWER_POSITION:
+            continue
+        out.append(v)
     return out
 
 
 # ─────────────────────────────────────────────────────────────────
 # 教用版的答案墨色
 #
-# 教用版講義把答案與詳解印成另一個顏色（實測翰林用 #EC008C 洋紅）。
+# 教用版講義把答案與詳解印成另一個顏色（實測翰林兩份講義分別是
+# #EC008C 與 #E4007F——同一家出版社不同章節都不完全一樣，所以
+# 不能寫死顏色值，只能偵測）。
+#
 # 這是分離「試題」與「解析」**最可靠的訊號**——比任何文字特徵都準，
 # 因為它是排版時就決定的，不依賴我們猜對「解」字在哪。
 #
@@ -724,7 +748,7 @@ def extract_inline_answers(text: str) -> list[str]:
 # 標成不受保護——那是這個系統最不該犯的錯。
 #
 # 附帶的好處是，同一份教用版可以同時產出學生版：黑字是題目，
-# 洋紅是答案，各自存到該去的地方。
+# 答案墨色是解答，各自存到該去的地方。
 # ─────────────────────────────────────────────────────────────────
 
 #: 答案墨色至少要佔多少比例的文字。低於此值多半只是強調用色。
