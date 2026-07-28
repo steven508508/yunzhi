@@ -37,6 +37,8 @@ from pipeline.normalize import Prepared, normalize, prepare
 from pipeline.prompts import PROMPT_VERSION
 from pipeline.schemas import (
     AnnotateResult,
+    BBox,
+    BlockType,
     LayoutBlock,
     QuestionType,
     SegmentResult,
@@ -180,10 +182,14 @@ def _normalize_sync(req: NormalizeRequest, prep: Prepared, t0: float) -> Normali
     """
     result = normalize(prep)
 
-    # 附圖。只有 PDF 走得到——影像來源整張就是一張圖，
-    # 沒有「圖在哪裡」的問題。
+    # 附圖從 PDF 的繪圖物件聚出來。
+    #
+    # 只在**頁數沒有變**的時候做：掃描頁的前處理會把一張翻拍攤開
+    # 書本的影像切成兩頁，那時候輸出頁碼與 PDF 頁碼對不起來，
+    # 照著 pno+1 掛圖會把圖掛到別頁去。掃描頁本來也沒有繪圖物件，
+    # 圖改由視覺模型在切分階段回報（見 _crop_vision_figures）。
     figures_by_page: dict[int, list[dict]] = {}
-    if prep.pdf:
+    if prep.pdf and len(result.pages) == _pdf_page_count(prep.pdf):
         import fitz
 
         doc = fitz.open(stream=prep.pdf, filetype="pdf")
@@ -362,6 +368,11 @@ class SegmentResponse(BaseModel):
     #: 試卷走 sections，講義走 exercises。兩者互斥。
     genre: str = "unknown"
     exercises: list[ExerciseOut] = Field(default_factory=list)
+    #: 掃描頁由視覺模型回報、在這一階段裁出來的附圖，{頁碼: [圖]}。
+    #: 原生 PDF 的圖在正規化階段就切好了，不會出現在這裡。
+    #: 講義的圖已經掛在 exercises[].assets 上，這裡是給試卷用的——
+    #: 試卷走 sections，而 sections 沒有掛圖的地方。
+    figures: dict[int, list[dict]] = Field(default_factory=dict)
     answer_ink: str | None = None
     vision_pages: int = 0
     usage: Usage = Field(default_factory=Usage)
@@ -499,6 +510,101 @@ def _assets_for(unit, figures_by_page: dict[int, list[dict]]) -> list[dict]:
     return out
 
 
+def _pdf_page_count(pdf: bytes) -> int:
+    import fitz
+
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        return doc.page_count
+    finally:
+        doc.close()
+
+
+#: 圖的 bbox 至少要有這麼大才裁。太小的多半是模型把一個項目符號
+#: 或一個色塊當成圖了，裁出來是一塊沒有意義的碎片。
+_MIN_FIG_SIDE = 0.06
+
+
+def _crop_vision_figures(
+    results: list[SegmentResult],
+    by_index: dict[int, SegmentPage],
+    method: dict[int, str],
+) -> dict[int, list[dict]]:
+    """
+    把視覺模型回報的 FIGURE 區塊從頁面影像裁出來，存進物件儲存。
+
+    回傳 {頁碼: [圖]}，形狀與原生 PDF 那條路一致，讓 `_assets_for`
+    不必分辨圖是怎麼來的。
+    """
+    out: dict[int, list[dict]] = {}
+    counter: dict[int, int] = {}
+
+    for result in results:
+        for b in result.blocks:
+            if b.type is not BlockType.FIGURE:
+                continue
+            page_no = b.bbox.page
+            if not method.get(page_no, "").startswith("vision"):
+                continue  # 原生頁的圖已經由繪圖物件精確切好了
+            page = by_index.get(page_no)
+            if not page or not page.storage_key:
+                continue
+
+            w = b.bbox.x1 - b.bbox.x0
+            h = b.bbox.y1 - b.bbox.y0
+            if w < _MIN_FIG_SIDE or h < _MIN_FIG_SIDE:
+                continue
+
+            idx = counter.get(page_no, 0)
+            counter[page_no] = idx + 1
+            key = f"{page.storage_key.rsplit('.', 1)[0]}-fig-{idx:02d}.png"
+            try:
+                data = _crop_png(storage.get_bytes(page.storage_key), b.bbox)
+                storage.put_bytes(key, data, "image/png")
+            except Exception as e:  # noqa: BLE001
+                log.warning("第 %d 頁第 %d 張圖裁切失敗：%s", page_no, idx, e)
+                continue
+
+            out.setdefault(page_no, []).append(
+                {
+                    "key": key,
+                    "bbox": {
+                        "x0": b.bbox.x0, "y0": b.bbox.y0,
+                        "x1": b.bbox.x1, "y1": b.bbox.y1,
+                    },
+                    "labels": [b.text.strip()] if b.text.strip() else [],
+                    "strokes": 0,
+                    "origin": "vision",
+                }
+            )
+    return out
+
+
+#: 裁切時往外多留一點。模型給的框常常剛好貼著圖形，而座標軸的
+#: 標籤畫在框外——貼齊裁的話標籤會被切掉。
+_FIG_PAD = 0.012
+
+
+def _crop_png(png: bytes, bbox: BBox) -> bytes:
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("頁面影像無法解碼")
+    h, w = img.shape[:2]
+    x0 = max(0, int((bbox.x0 - _FIG_PAD) * w))
+    y0 = max(0, int((bbox.y0 - _FIG_PAD) * h))
+    x1 = min(w, int((bbox.x1 + _FIG_PAD) * w))
+    y1 = min(h, int((bbox.y1 + _FIG_PAD) * h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        raise ValueError("裁切範圍太小")
+    ok, buf = cv2.imencode(".png", img[y0:y1, x0:x1])
+    if not ok:
+        raise ValueError("裁切後的影像無法編碼")
+    return buf.tobytes()
+
+
 def build_router(get_provider) -> APIRouter:
     """
     把 provider 注入各端點。
@@ -575,10 +681,24 @@ def build_router(get_provider) -> APIRouter:
         merged = seg.merge_across_pages(ordered)
         genre = seg.detect_genre(merged)
 
+        # 掃描頁的附圖從視覺模型回報的 FIGURE 區塊裁出來。
+        #
+        # 原生 PDF 的圖是從繪圖物件聚出來的（figures.py），掃描頁沒有
+        # 繪圖物件，只有像素。試過純影像的作法——遮掉文字行、把剩下的
+        # 墨聚類——地理那兩頁抓得很準，但英文那兩頁抓出 15 個全是誤判
+        # （密排的英文行沒被遮乾淨，剩下的墨連成一片看起來就像圖）。
+        # 誤判的圖會讓學生看到一塊沒有意義的裁切，比沒有圖更糟。
+        #
+        # 而視覺模型這一趟**本來就要呼叫**（切分要用），順手讓它回報
+        # 圖的位置是零額外成本，而且它知道那是不是一張圖。
+        vision_figs = _crop_vision_figures(ordered, by_index, method)
+
         # 講義才切題目單位。試卷走 sections，兩條路不重疊。
         exercises: list[ExerciseOut] = []
         if genre == "worksheet":
             figures_by_page = {p.index: p.figures for p in req.pages if p.figures}
+            for page_no, items in vision_figs.items():
+                figures_by_page.setdefault(page_no, []).extend(items)
             for u in seg.split_by_exercise(merged):
                 # 出處標籤要在這裡就從題幹拿掉：留著會讓重複題偵測
                 # 把「同一題不同年份標籤」看成兩題，也會讓學生作答時
@@ -621,6 +741,7 @@ def build_router(get_provider) -> APIRouter:
             sections=sections,
             genre=genre,
             exercises=exercises,
+            figures=vision_figs,
             answer_ink=answer_ink,
             vision_pages=sum(1 for m in method.values() if m == "vision"),
             # 視覺切分的用量無法逐次取得（segment_scanned 內部走
