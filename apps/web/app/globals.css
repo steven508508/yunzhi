@@ -554,3 +554,17 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
   border-top: 1px solid var(--rule);
 }
 .yz-actions__spacer { margin-left: auto; }
+
+/* ── 一般頁面的版面（班級、知識點、之後的組卷與成績）─────────── */
+
+.yz-panel { max-width: 940px; margin: 0 auto; padding: 26px 24px 80px; }
+.yz-panel__head { margin-bottom: 22px; }
+.yz-panel__head h1 { font-family: var(--font-doc); font-size: 18px; font-weight: 600; }
+.yz-panel__sub { margin-top: 6px; font-size: 12.5px; line-height: 1.85; color: var(--ink-2); }
+
+/* 卡片其實不是卡片——只有一條上緣線與內距。校樣的方向不用陰影。 */
+.yz-card { border-top: 1px solid var(--ink); padding-top: 16px; }
+.yz-card__title { font-family: var(--font-doc); font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+
+.yz-muted { color: var(--ink-3); font-size: 11.5px; margin-left: 4px; }
+.yz-warn  { color: #B76E00; }

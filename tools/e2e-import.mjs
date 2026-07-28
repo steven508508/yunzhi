@@ -287,6 +287,101 @@ async function mainScoped(fixture) {
     assert.equal(outside.length, 0, '沒設租戶卻查得到資料——fail open，最糟的一種預設');
   });
 
+  // ── 班級與名冊（B0.3）─────────────────────────────────────
+
+  section('班級與名冊');
+
+  await test('同一學年度不能有兩個同名班級', async () => {
+    const year = await prisma.academicYear.findFirst({ where: { tenantId: tenant.id } });
+    const a = await prisma.class.create({
+      data: { tenantId: tenant.id, academicYearId: year.id, name: '三年丙班' },
+    });
+    assert.ok(a.id);
+    await assert.rejects(
+      prisma.class.create({
+        data: { tenantId: tenant.id, academicYearId: year.id, name: '三年丙班' },
+      }),
+      /unique|duplicate/i,
+      '同名班級擋不住的話，派任務時會派到錯的班',
+    );
+    await prisma.class.deleteMany({ where: { id: a.id } });
+  });
+
+  await test('學生帳號預設不能登入，直到家長同意', async () => {
+    // 個資法第 15 條：蒐集未成年人的個人資料需法定代理人同意。
+    // 沒有同意紀錄，整個資料庫的合法性都有疑問——所以預設擋住，
+    // 而不是預設放行再補簽。
+    const s = await prisma.user.create({
+      data: {
+        tenantId: tenant.id,
+        username: 'S-consent-1',
+        displayName: '待同意學生',
+        systemRole: 'STUDENT',
+        status: 'PENDING_CONSENT',
+        passwordHash: '$2a$12$notarealhashnotarealhashnotarealhashnotarealhashnotar',
+      },
+    });
+    assert.equal(s.status, 'PENDING_CONSENT');
+    assert.equal(s.consentAt, null);
+
+    const after = await prisma.user.update({
+      where: { id: s.id },
+      data: { consentAt: new Date(), status: 'ACTIVE' },
+    });
+    assert.ok(after.consentAt, '同意之後才會有時間戳');
+    assert.equal(after.status, 'ACTIVE');
+    await prisma.user.deleteMany({ where: { id: s.id } });
+  });
+
+  await test('同一位學生重複加入同一個班不會產生第二筆', async () => {
+    // 名冊匯入兩次是常態（櫃檯改了一列再匯一次）。
+    // 每次都新增一筆 membership 的話，人數會愈匯愈多。
+    const year = await prisma.academicYear.findFirst({ where: { tenantId: tenant.id } });
+    const k = await prisma.class.create({
+      data: { tenantId: tenant.id, academicYearId: year.id, name: '重複測試班' },
+    });
+    const s = await prisma.user.create({
+      data: {
+        tenantId: tenant.id, username: 'S-dup-1', displayName: '重複測試',
+        systemRole: 'STUDENT', status: 'PENDING_CONSENT',
+        passwordHash: '$2a$12$notarealhashnotarealhashnotarealhashnotarealhashnotar',
+      },
+    });
+    await prisma.classMembership.create({
+      data: { classId: k.id, userId: s.id, role: 'STUDENT' },
+    });
+    await assert.rejects(
+      prisma.classMembership.create({
+        data: { classId: k.id, userId: s.id, role: 'STUDENT' },
+      }),
+      /unique|duplicate/i,
+      '沒有唯一鍵的話，匯入兩次名冊人數就會變兩倍',
+    );
+    const n = await prisma.classMembership.count({ where: { classId: k.id } });
+    assert.equal(n, 1);
+    await prisma.classMembership.deleteMany({ where: { classId: k.id } });
+    await prisma.user.deleteMany({ where: { id: s.id } });
+    await prisma.class.deleteMany({ where: { id: k.id } });
+  });
+
+  await test('加不進別家補習班的班級（名冊也受隔離）', async () => {
+    // class_memberships 沒有 tenantId，靠 classes 間接隔離。
+    // 這一類表最容易被漏掉，因為它們看起來與租戶無關。
+    const otherClass = await withoutTenantScope('驗證用：在隔壁租戶建一個班', async () => {
+      const y = await prisma.academicYear.create({
+        data: {
+          tenantId: other.tenant.id, name: '隔壁115',
+          startDate: new Date('2026-08-01'), endDate: new Date('2027-07-31'),
+        },
+      });
+      return prisma.class.create({
+        data: { tenantId: other.tenant.id, academicYearId: y.id, name: '隔壁的班' },
+      });
+    });
+    const seen = await prisma.class.findFirst({ where: { id: otherClass.id } });
+    assert.equal(seen, null, '看得到隔壁補習班的班級');
+  });
+
   // ── 資料庫層的授權約束 ─────────────────────────────────────
 
   section('資料庫層的授權約束');

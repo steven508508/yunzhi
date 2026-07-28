@@ -31,7 +31,7 @@ import type { FormHTMLAttributes, ReactNode } from 'react';
 
 import { Note } from '@/components/Feedback';
 
-export type FormProps = Omit<FormHTMLAttributes<HTMLFormElement>, 'onSubmit'> & {
+export type FormProps = Omit<FormHTMLAttributes<HTMLFormElement>, 'onSubmit' | 'children'> & {
   /**
    * 送出時做什麼。丟出的錯誤會被接住並顯示在表單頂端。
    * 回傳值忽略——要導頁就在裡面自己導。
