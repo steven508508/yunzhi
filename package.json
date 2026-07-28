@@ -33,6 +33,7 @@
   "devDependencies": {
     "@prisma/prisma-schema-wasm": "5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2",
     "@types/bcryptjs": "^2.4.6",
+    "esbuild": "^0.28.1",
     "pg": "^8.13.1",
     "prisma": "^5.22.0"
   },

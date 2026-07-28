@@ -310,6 +310,10 @@ input, textarea, select { font: inherit; color: inherit; }
 .yz-table tbody tr:hover { background: var(--paper-sunk); }
 .yz-table tbody tr[aria-selected="true"] { background: var(--select); box-shadow: inset 2px 0 0 var(--ink); }
 .yz-table__num { font-family: var(--font-doc); text-align: right; }
+/* thead th 的 text-align:left 特異度比 .yz-table__num 高，所以數字欄的
+   表頭要單獨指定，否則標題靠左而數值靠右，兩者對不齊——
+   而數字欄存在的理由就是為了對得齊。 */
+.yz-table thead th.yz-table__num { text-align: right; }
 
 /* ═══ 無障礙 ═════════════════════════════════════════════════
    規格書文件 01 §16 要求 WCAG 2.1 AA。焦點指示不能只靠顏色。 */
@@ -440,3 +444,113 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
 @media (prefers-reduced-motion: reduce) {
   .yz-step--running .yz-step__glyph { animation: none; opacity: 1; }
 }
+
+/* ═══ 元件庫（B0.2）═════════════════════════════════════════════
+   下面這一段是給「接下來三十個畫面」用的通用零件。原本每個畫面
+   自己刻，而被省掉的永遠是同樣那幾樣：標籤沒接上、錯誤只有顏色、
+   空表格看起來像壞掉。
+
+   風格延續上面的校樣方向：髮絲線、無卡片、無陰影堆疊、
+   顏色只表達狀態。 */
+
+/* ── 表單欄位 ─────────────────────────────────────────────── */
+
+.yz-field { margin-bottom: 16px; }
+.yz-label {
+  display: block;
+  font-size: 12.5px; font-weight: 500; color: var(--ink);
+  margin-bottom: 5px;
+}
+.yz-label__req { color: var(--mark); margin-left: 2px; }
+
+.yz-field__hint {
+  margin-top: 5px;
+  font-size: 11.5px; line-height: 1.7; color: var(--ink-3);
+}
+/* 錯誤不只用顏色——前面加一個校對記號，色盲的人也讀得到。
+   WCAG 1.4.1：資訊不得只靠顏色傳達。 */
+.yz-field__err {
+  margin-top: 5px;
+  font-size: 11.5px; line-height: 1.7; color: var(--mark);
+}
+.yz-field__err::before { content: "× "; font-family: var(--font-doc); }
+.yz-field--error .yz-in { border-color: var(--mark); background: var(--mark-soft); }
+
+.yz-check .yz-field__hint,
+.yz-check .yz-field__err { display: block; }
+
+/* ── 狀態（載入／空／錯誤／無權限）───────────────────────────
+   四種都用同一個外框，靠文字區分。用四種顏色的圖示反而讓人
+   要先學一套視覺語彙才看得懂。 */
+
+.yz-state {
+  padding: 34px 24px;
+  text-align: center;
+  border: 1px dashed var(--rule-2);
+  border-radius: var(--r);
+}
+.yz-state__main { font-family: var(--font-doc); font-size: 14px; color: var(--ink-2); }
+.yz-state__sub  {
+  margin-top: 7px;
+  font-size: 12px; line-height: 1.8; color: var(--ink-3);
+  max-width: 46em; margin-left: auto; margin-right: auto;
+}
+.yz-state__act  { margin-top: 16px; display: flex; gap: 8px; justify-content: center; }
+.yz-state--error { border-style: solid; border-color: var(--mark); background: var(--mark-soft); }
+.yz-state--error .yz-state__main { color: var(--mark); }
+
+/* ── 行內提醒 ─────────────────────────────────────────────── */
+
+.yz-note {
+  padding: 8px 11px;
+  margin-bottom: 14px;
+  border-left: 2px solid var(--rule);
+  font-size: 12.5px; line-height: 1.75; color: var(--ink-2);
+  background: var(--paper-sunk);
+}
+.yz-note--warn  { border-left-color: #B76E00; }
+.yz-note--error { border-left-color: var(--mark); color: var(--mark); background: var(--mark-soft); }
+.yz-note--error::before { content: "× "; font-family: var(--font-doc); }
+.yz-note--warn::before  { content: "！"; font-family: var(--font-doc); margin-right: 2px; }
+
+/* ── 危險動作 ─────────────────────────────────────────────── */
+
+.yz-btn--danger { border-color: var(--mark); color: var(--mark); }
+.yz-btn--danger:hover { background: var(--mark-soft); }
+
+/* ── 對話框 ───────────────────────────────────────────────── */
+
+.yz-dialog {
+  border: 1px solid var(--ink);
+  border-radius: var(--r);
+  background: var(--paper-raised);
+  color: var(--ink);
+  padding: 0;
+  max-width: 34em; width: calc(100vw - 32px);
+  box-shadow: var(--shadow-2);
+}
+.yz-dialog::backdrop { background: rgba(28, 26, 23, 0.28); }
+.yz-dialog__body { padding: 20px 22px 18px; }
+.yz-dialog__title {
+  font-family: var(--font-doc); font-size: 15px; font-weight: 600;
+  padding-bottom: 10px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-dialog__content { font-size: 13px; line-height: var(--lh-ui); color: var(--ink-2); }
+.yz-dialog__foot {
+  display: flex; gap: 8px; justify-content: flex-end;
+  margin-top: 18px; padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+
+/* ── 表單版面 ─────────────────────────────────────────────── */
+
+.yz-row { display: grid; gap: 0 16px; grid-template-columns: 1fr 1fr; }
+@media (max-width: 620px) { .yz-row { grid-template-columns: 1fr; } }
+
+.yz-actions {
+  display: flex; gap: 8px; align-items: center;
+  margin-top: 20px; padding-top: 16px;
+  border-top: 1px solid var(--rule);
+}
+.yz-actions__spacer { margin-left: auto; }

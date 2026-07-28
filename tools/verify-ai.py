@@ -18,9 +18,20 @@
 
 # 怎麼用
 
-    export AI_PROVIDER=anthropic
-    export AI_API_KEY=sk-ant-...          # 不會被印出來也不會寫進報告
+    # 先跑預檢（二十秒、幾乎不花錢）
+    python3 tools/ai-preflight.py
+
+    # 過了再跑這一支
     python3 tools/verify-ai.py --pages 6
+
+環境變數（接第三方 OpenAI 相容閘道時）：
+
+    export AI_PROVIDER=openai
+    export AI_BASE_URL=https://你的端點/v1     # 注意結尾的 /v1
+    export AI_API_KEY=...                      # 不會被印出來也不會寫進報告
+    export AI_MODEL_HIGH=你的模型名稱
+    export AI_MODEL_MID=你的模型名稱
+    export AI_MODEL_LIGHT=你的模型名稱
 
 預設只跑每份講義的前 6 頁。**先跑少的**——第一次跑完先看數字合不合
 理，再決定要不要花錢跑整份。每一頁的成本會即時印出來。

@@ -339,8 +339,77 @@ class AnthropicProvider(BaseProvider):
 
 
 class OpenAIProvider(BaseProvider):
+    """
+    OpenAI 協定。**也用來接第三方相容閘道**，而那才是麻煩的地方。
+
+    「OpenAI 相容」不是一個規格，是一個大致的方向。同樣是
+    `/v1/chat/completions`，不同的閘道與不同世代的模型對參數的
+    要求會互相矛盾：
+
+      · 舊模型吃 `max_tokens`；新一代的推理模型只吃
+        `max_completion_tokens`，給 `max_tokens` 直接 400。
+      · 舊模型吃任意 `temperature`；推理模型只接受預設值，
+        給 0.0 直接 400。
+      · 有些閘道不認得 image_url 的 `detail` 欄位。
+
+    這些全部是 400，而且只有在**真的送出請求之後**才知道。要求使用者
+    自己去查「我的閘道屬於哪一種」是不合理的——他們手上通常只有
+    一個網址、一把金鑰、一個模型名稱。
+
+    所以這裡做**參數協商**：先送最通用的形狀，被 400 拒絕而且錯誤訊息
+    指名了某個參數時，調整形狀重送一次，並把結論記下來，之後不再試錯。
+    """
+
     name = "openai"
     default_base_url = "https://api.openai.com/v1"
+
+    def __init__(self, cfg: ProviderConfig) -> None:
+        super().__init__(cfg)
+        #: 協商出來的參數形狀。None 代表還沒問過。
+        self._token_param: str | None = None
+        self._send_temperature: bool | None = None
+        self._image_detail: bool | None = None
+
+    def _body(self, model, messages, max_tokens, temperature) -> dict[str, Any]:
+        body: dict[str, Any] = {"model": model, "messages": messages}
+        body[self._token_param or "max_tokens"] = max_tokens
+        if self._send_temperature is not False:
+            body["temperature"] = temperature
+        return body
+
+    def _renegotiate(self, detail: str) -> bool:
+        """
+        看 400 的錯誤訊息決定要不要換一種形狀重試。回傳有沒有改變。
+
+        比對的是參數名稱而不是完整訊息——各家閘道的措辭都不同，
+        但都會提到出問題的那個參數叫什麼。
+        """
+        low = detail.lower()
+        changed = False
+        if "max_completion_tokens" in low and self._token_param != "max_completion_tokens":
+            self._token_param = "max_completion_tokens"
+            log.info("上游要求用 max_completion_tokens，已切換")
+            changed = True
+        elif "max_tokens" in low and self._token_param not in (None, "max_tokens"):
+            self._token_param = "max_tokens"
+            changed = True
+        if "temperature" in low and self._send_temperature is not False:
+            self._send_temperature = False
+            log.info("上游不接受自訂 temperature，之後不再送出")
+            changed = True
+        if "detail" in low and self._image_detail is not False:
+            self._image_detail = False
+            log.info("上游不認得 image_url.detail，之後不再送出")
+            changed = True
+        return changed
+
+    def _image_part(self, img: bytes) -> dict[str, Any]:
+        url = f"data:{_image_mime(img)};base64,{base64.b64encode(img).decode()}"
+        image_url: dict[str, Any] = {"url": url}
+        if self._image_detail is not False:
+            # 版面分析要看得清題號與選項標記，不能用低解析模式
+            image_url["detail"] = "high"
+        return {"type": "image_url", "image_url": image_url}
 
     async def _call(
         self, *, model, system, user, max_tokens, temperature, images=None
@@ -353,41 +422,39 @@ class OpenAIProvider(BaseProvider):
             messages.append({"role": "system", "content": system})
 
         if images:
-            parts: list[dict[str, Any]] = [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{_image_mime(img)};base64,{base64.b64encode(img).decode()}",
-                        # 版面分析要看得清題號與選項標記，不能用低解析模式
-                        "detail": "high",
-                    },
-                }
-                for img in images
-            ]
+            parts: list[dict[str, Any]] = [self._image_part(img) for img in images]
             parts.append({"type": "text", "text": user})
             messages.append({"role": "user", "content": parts})
         else:
             messages.append({"role": "user", "content": user})
 
-        try:
-            r = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "authorization": f"Bearer {self.cfg.api_key}",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-            )
-        except httpx.HTTPError as e:
-            raise RetryableError(f"連線失敗：{e}") from e
+        # 最多協商兩次：換 token 參數、換 temperature。再不行就是真的錯了。
+        r = None
+        for _ in range(3):
+            try:
+                r = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "authorization": f"Bearer {self.cfg.api_key}",
+                        "content-type": "application/json",
+                    },
+                    json=self._body(model, messages, max_tokens, temperature),
+                )
+            except httpx.HTTPError as e:
+                raise RetryableError(f"連線失敗：{e}") from e
 
-        if r.status_code != 200:
-            raise self._classify(r.status_code, r.text)
+            if r.status_code != 400:
+                break
+            if not self._renegotiate(r.text):
+                break
+            if images:
+                # detail 可能剛剛被關掉，訊息要重建
+                parts = [self._image_part(img) for img in images]
+                parts.append({"type": "text", "text": user})
+                messages[-1] = {"role": "user", "content": parts}
+
+        if r is None or r.status_code != 200:
+            raise self._classify(r.status_code if r else 0, r.text if r else "")
 
         data = r.json()
         choices = data.get("choices") or []
