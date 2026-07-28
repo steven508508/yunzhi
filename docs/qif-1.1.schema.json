@@ -1,0 +1,1245 @@
+{
+  "$defs": {
+    "Answer": {
+      "description": "一題的答案。**只記原稿印了什麼。**\n\n五個欄位互斥使用，由題型決定該用哪一個——分成五欄而不是一個\n自由字串，是因為下游要拿它自動改考卷。改考卷的邏輯不該去猜\n「(B)」跟「B」跟「2」是不是同一件事。",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/AnswerSource",
+          "default": "NONE"
+        },
+        "keys": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Keys",
+          "type": "array"
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/$defs/AnswerSlot"
+          },
+          "title": "Slots",
+          "type": "array"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "grid": {
+          "items": {
+            "$ref": "#/$defs/GridCell"
+          },
+          "title": "Grid",
+          "type": "array"
+        }
+      },
+      "title": "Answer",
+      "type": "object"
+    },
+    "AnswerSlot": {
+      "description": "學測選填題的答案格位。答案卡上的格子有編號（⑬⑭）。",
+      "properties": {
+        "slot": {
+          "title": "Slot",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "value"
+      ],
+      "title": "AnswerSlot",
+      "type": "object"
+    },
+    "AnswerSource": {
+      "description": "**只有兩種。** 系統推導的答案不進這個格式——那是自答階段的\n產物，帶著投票次數與一致率，存在候選題上。\n\n混在一起之後，半年後沒有人分得出「這個答案是題本印的還是\n系統猜的」，而那兩者的可信度差了一個量級。",
+      "enum": [
+        "PRINTED",
+        "NONE"
+      ],
+      "title": "AnswerSource",
+      "type": "string"
+    },
+    "Asset": {
+      "description": "圖、表、音檔、影音連結。**全文件唯一 id**，內容用 `![[a:id]]` 參照。\n\n表格也算資產而不是直接寫進題幹：表格常常被兩題共用（地理那份\n「西班牙流感死亡人數」表就是），而且它需要獨立的替代文字。",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/AssetKind"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        },
+        "alt": {
+          "default": "",
+          "title": "Alt",
+          "type": "string"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "table_markdown": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table Markdown"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "storage_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Storage Key"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "placement"
+      ],
+      "title": "Asset",
+      "type": "object"
+    },
+    "AssetKind": {
+      "enum": [
+        "FIGURE",
+        "TABLE",
+        "AUDIO",
+        "VIDEO_LINK",
+        "QR",
+        "OTHER"
+      ],
+      "title": "AssetKind",
+      "type": "string"
+    },
+    "BBox": {
+      "description": "原稿座標，供校對介面左右連動。單位為頁面寬高的比例（0–1）。",
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "x0": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "X0",
+          "type": "number"
+        },
+        "y0": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Y0",
+          "type": "number"
+        },
+        "x1": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Y1",
+          "type": "number"
+        }
+      },
+      "required": [
+        "page",
+        "x0",
+        "y0",
+        "x1",
+        "y1"
+      ],
+      "title": "BBox",
+      "type": "object"
+    },
+    "Confidence": {
+      "properties": {
+        "score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Score",
+          "type": "number"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/$defs/ConfidenceReason"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "score"
+      ],
+      "title": "Confidence",
+      "type": "object"
+    },
+    "ConfidenceReason": {
+      "description": "扣分理由。**必須具體到校對者知道要看哪裡。**\n\n不合格：「辨識信心較低」\n合格：  「選項 (3) 的指數字跡黏連，未能確定是 6 或 8」",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "minLength": 4,
+          "title": "Detail",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity",
+          "default": "warn"
+        }
+      },
+      "required": [
+        "code",
+        "detail"
+      ],
+      "title": "ConfidenceReason",
+      "type": "object"
+    },
+    "CustomTypeRef": {
+      "description": "出版社專屬的題型。\n\n出版社常有自己設計的題型：翰林的「觀念速記」、南一的「圖表解碼」、\n龍騰的某種雙欄配對。它們**呈現方式獨特，但作答方式幾乎一定是\n標準的那幾種之一**——這一點讓它變得可處理：系統不必懂那個題型\n的教學設計，只要知道學生要怎麼答、怎麼給分。\n\n流程是「問老師一次，之後記住」：\n\n  1. 模型遇到不認得的題型 → `kind=OTHER` ＋ 一筆 unsupported_content\n  2. 校對介面把裁下來的原圖與模型的猜測拿給老師看，問這是什麼、\n     學生要怎麼答、有沒有取得出版社授權\n  3. 老師確認後存成租戶層級的題型定義\n  4. 下一次同一種題型出現，定義會放進提示詞，模型就認得了，\n     `kind` 填 PUBLISHER_CUSTOM 並帶上 `custom_type`\n\n**授權要記在這裡而不是只記在匯入工作上。** 題型會被反覆使用，\n而「這個題型我們有沒有權利用」是題型層級的事實，不是某一次\n匯入的事實。",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "answer_mode": {
+          "$ref": "#/$defs/QuestionKind",
+          "default": "SHORT_ANSWER"
+        },
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CustomTypeRef",
+      "type": "object"
+    },
+    "DocumentMeta": {
+      "properties": {
+        "subject": {
+          "$ref": "#/$defs/SubjectCode",
+          "default": "UNKNOWN"
+        },
+        "genre": {
+          "$ref": "#/$defs/Genre",
+          "default": "UNKNOWN"
+        },
+        "edition": {
+          "$ref": "#/$defs/Edition",
+          "default": "UNKNOWN"
+        },
+        "language": {
+          "default": "unknown",
+          "enum": [
+            "zh-Hant",
+            "en",
+            "mixed",
+            "unknown"
+          ],
+          "title": "Language",
+          "type": "string"
+        },
+        "textbook": {
+          "$ref": "#/$defs/TextbookRef"
+        },
+        "page_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Page Count",
+          "type": "integer"
+        },
+        "source_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source File"
+        }
+      },
+      "title": "DocumentMeta",
+      "type": "object"
+    },
+    "DocumentStats": {
+      "description": "校對介面第一眼要看的數字。由組裝階段算出來，不是模型填的。",
+      "properties": {
+        "questions": {
+          "default": 0,
+          "title": "Questions",
+          "type": "integer"
+        },
+        "with_printed_answer": {
+          "default": 0,
+          "title": "With Printed Answer",
+          "type": "integer"
+        },
+        "with_explanation": {
+          "default": 0,
+          "title": "With Explanation",
+          "type": "integer"
+        },
+        "with_assets": {
+          "default": 0,
+          "title": "With Assets",
+          "type": "integer"
+        },
+        "groups": {
+          "default": 0,
+          "title": "Groups",
+          "type": "integer"
+        },
+        "materials": {
+          "default": 0,
+          "title": "Materials",
+          "type": "integer"
+        },
+        "unsupported": {
+          "default": 0,
+          "title": "Unsupported",
+          "type": "integer"
+        },
+        "mean_confidence": {
+          "default": 0.0,
+          "title": "Mean Confidence",
+          "type": "number"
+        }
+      },
+      "title": "DocumentStats",
+      "type": "object"
+    },
+    "Edition": {
+      "description": "教用版印答案與詳解，學生版不印。這個差別決定了整份的價值。",
+      "enum": [
+        "TEACHER",
+        "STUDENT",
+        "UNKNOWN"
+      ],
+      "title": "Edition",
+      "type": "string"
+    },
+    "Explanation": {
+      "description": "原稿的詳解。**與題幹分開存。**\n\n試題依著作權法第 9 條不受保護，詳解受保護。把它寫進題幹等於\n把一份受保護的內容標成不受保護。",
+      "properties": {
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "stated_answer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stated Answer"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "title": "Explanation",
+      "type": "object"
+    },
+    "Genre": {
+      "description": "原稿的體例。決定下游怎麼切、怎麼呈現。",
+      "enum": [
+        "EXAM",
+        "WORKSHEET",
+        "MATERIAL",
+        "ANSWER_KEY",
+        "SOLUTION",
+        "MIXED",
+        "UNKNOWN"
+      ],
+      "title": "Genre",
+      "type": "string"
+    },
+    "GridCell": {
+      "description": "社會科非選的作答格：第 row 列勾第 col 欄。",
+      "properties": {
+        "row": {
+          "title": "Row",
+          "type": "string"
+        },
+        "col": {
+          "title": "Col",
+          "type": "string"
+        }
+      },
+      "required": [
+        "row",
+        "col"
+      ],
+      "title": "GridCell",
+      "type": "object"
+    },
+    "Group": {
+      "description": "題組。共用的素材放在這裡，子題只放自己的部分。\n\n這是原本的格式最大的缺口：學測有大量題組（閱讀測驗、克漏字、\n圖表題、實驗題），把共用敘述複製到每一題裡的話，重複題偵測會\n把整組看成互相重複，而學生在第二題看到的是同一段又讀一次。",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/GroupKind",
+          "default": "MIXED"
+        },
+        "lead": {
+          "default": "",
+          "title": "Lead",
+          "type": "string"
+        },
+        "stimulus": {
+          "default": "",
+          "title": "Stimulus",
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        }
+      },
+      "required": [
+        "id",
+        "placement"
+      ],
+      "title": "Group",
+      "type": "object"
+    },
+    "GroupKind": {
+      "description": "題組共用的是什麼。",
+      "enum": [
+        "PASSAGE",
+        "CLOZE",
+        "DATA",
+        "EXPERIMENT",
+        "SCENARIO",
+        "MIXED"
+      ],
+      "title": "GroupKind",
+      "type": "string"
+    },
+    "Issue": {
+      "description": "這份原稿裡有問題、或格式吃不下的東西。\n\n`raw` 是這整個設計的安全閥：**對不上任何型別的內容不允許塞進\n任何一個型別**，而是原樣留在這裡。硬塞的代價不是資料難看，\n是沒有人會發現——一張五線譜被當成表格塞進題幹，出來的是一串\n亂碼；一個獨有題型被當成單選題，選項是空的而答案指向不存在的\n選項。兩者都會安靜地進到題庫。",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity",
+          "default": "warn"
+        },
+        "detail": {
+          "minLength": 4,
+          "title": "Detail",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "question_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Question Id"
+        },
+        "raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw"
+        },
+        "raw_asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Asset Id"
+        }
+      },
+      "required": [
+        "code",
+        "detail"
+      ],
+      "title": "Issue",
+      "type": "object"
+    },
+    "Material": {
+      "description": "講義的觀念頁：文法表格、公式整理、例句對照、「使用時機」說明。\n\n不是題目，但也不是垃圾——智慧老師要在學生卡住時「退回去補前置\n觀念」，而那些內容就是教材。同一份 PDF 裡本來就有。",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        },
+        "asset_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Asset Ids",
+          "type": "array"
+        },
+        "topic_hints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Topic Hints",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "body",
+        "placement"
+      ],
+      "title": "Material",
+      "type": "object"
+    },
+    "Option": {
+      "properties": {
+        "order": {
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Order",
+          "type": "integer"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "order",
+        "label",
+        "content"
+      ],
+      "title": "Option",
+      "type": "object"
+    },
+    "Placement": {
+      "description": "這個東西在原稿的哪裡。校對介面的左右連動靠它。",
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "continues": {
+          "default": false,
+          "title": "Continues",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "page"
+      ],
+      "title": "Placement",
+      "type": "object"
+    },
+    "Provenance": {
+      "description": "這一題從哪裡來。",
+      "properties": {
+        "exam": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exam"
+        },
+        "national_correct_rate": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "National Correct Rate"
+        },
+        "related_raw": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Raw",
+          "type": "array"
+        },
+        "badges": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Badges",
+          "type": "array"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "Question": {
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Number"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "sub_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sub Label"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        },
+        "kind": {
+          "$ref": "#/$defs/QuestionKind"
+        },
+        "stem": {
+          "minLength": 1,
+          "title": "Stem",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/Option"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "answer": {
+          "$ref": "#/$defs/Answer"
+        },
+        "scoring": {
+          "$ref": "#/$defs/Scoring"
+        },
+        "explanation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Explanation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "asset_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Asset Ids",
+          "type": "array"
+        },
+        "topic_hints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Topic Hints",
+          "type": "array"
+        },
+        "custom_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CustomTypeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "stem",
+        "placement",
+        "confidence"
+      ],
+      "title": "Question",
+      "type": "object"
+    },
+    "QuestionKind": {
+      "description": "題型。**這一組要涵蓋五科**，所以比資料庫既有的列舉多幾項。\n\n加的那幾項都是實際看得到的：社會科的作答格（MATCHING）、\n國文的排序題（ORDERING）、數學的計算證明（CALCULATION）、\n英聽（LISTENING）。OTHER 是逃生口，用它的時候一定要附 issue。",
+      "enum": [
+        "SINGLE_CHOICE",
+        "MULTI_CHOICE",
+        "TRUE_FALSE",
+        "FILL_SLOT",
+        "FILL_BLANK",
+        "MATCHING",
+        "ORDERING",
+        "SHORT_ANSWER",
+        "CALCULATION",
+        "ESSAY",
+        "TRANSLATION",
+        "LISTENING",
+        "PUBLISHER_CUSTOM",
+        "OTHER"
+      ],
+      "title": "QuestionKind",
+      "type": "string"
+    },
+    "Scoring": {
+      "description": "配分與給分規則。",
+      "properties": {
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "partial_credit": {
+          "default": false,
+          "title": "Partial Credit",
+          "type": "boolean"
+        },
+        "expected_count": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Count"
+        },
+        "word_limit": {
+          "anyOf": [
+            {
+              "maximum": 5000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Word Limit"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "sig_figs": {
+          "anyOf": [
+            {
+              "maximum": 15,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sig Figs"
+        },
+        "rubric_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rubric Raw"
+        }
+      },
+      "title": "Scoring",
+      "type": "object"
+    },
+    "Section": {
+      "description": "節。試卷是「一、單選題（占 30 分）」，講義是「考古題大搜查」\n「綜合演練」。兩者形狀完全不同，但作用一樣：交代這一段的體例。",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        },
+        "default_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuestionKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "default_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Score"
+        },
+        "total_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Score"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "placement"
+      ],
+      "title": "Section",
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "info",
+        "warn",
+        "error"
+      ],
+      "title": "Severity",
+      "type": "string"
+    },
+    "SubjectCode": {
+      "description": "科目。\n\n**學測的「自然」與「社會」是合科考卷，但補習班是分科教的。**\n化學老師傳的是化學講義、地理老師傳的是地理講義；訪談時說的\n「每科三位老師、七個班」指的就是分科。只留 SCIENCE 一個值的話，\n化學老師的題目會跟生物的混在同一個題庫裡，而他要組一份化學\n小考時篩不出來。\n\n所以分科與合科並存：SCIENCE／SOCIAL 給學測合科試卷用，\n其餘給日常的分科講義用。",
+      "enum": [
+        "CHINESE",
+        "ENGLISH",
+        "MATH_A",
+        "MATH_B",
+        "SOCIAL",
+        "SCIENCE",
+        "HISTORY",
+        "GEOGRAPHY",
+        "CIVICS",
+        "PHYSICS",
+        "CHEMISTRY",
+        "BIOLOGY",
+        "EARTH_SCIENCE",
+        "ELECTIVE",
+        "UNKNOWN"
+      ],
+      "title": "SubjectCode",
+      "type": "string"
+    },
+    "TextbookRef": {
+      "description": "教科書索引：出版社 × 冊次 × 章節。\n\n這是台灣老師實際使用的第一層索引（文件 11），而它**就印在每一頁\n的頁首**——「4-1 直線方程式及其圖形」「單元 1 地理技能」\n「13 代名詞」。不收下來的話，日後要靠人一本一本補。",
+      "properties": {
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "book": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Book"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "chapter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chapter"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        }
+      },
+      "title": "TextbookRef",
+      "type": "object"
+    }
+  },
+  "description": "一份原稿被理解之後的標準形狀。**這是存進系統的東西。**\n\n下游只認這個形狀，永遠不必知道原稿是哪一家出版社、哪一科、\n教用版還是學生版、原生 PDF 還是手機拍的。",
+  "properties": {
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "document": {
+      "$ref": "#/$defs/DocumentMeta"
+    },
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/Asset"
+      },
+      "title": "Assets",
+      "type": "array"
+    },
+    "sections": {
+      "items": {
+        "$ref": "#/$defs/Section"
+      },
+      "title": "Sections",
+      "type": "array"
+    },
+    "groups": {
+      "items": {
+        "$ref": "#/$defs/Group"
+      },
+      "title": "Groups",
+      "type": "array"
+    },
+    "questions": {
+      "items": {
+        "$ref": "#/$defs/Question"
+      },
+      "title": "Questions",
+      "type": "array"
+    },
+    "materials": {
+      "items": {
+        "$ref": "#/$defs/Material"
+      },
+      "title": "Materials",
+      "type": "array"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/Issue"
+      },
+      "title": "Issues",
+      "type": "array"
+    },
+    "stats": {
+      "$ref": "#/$defs/DocumentStats"
+    }
+  },
+  "title": "雲端智學題目交換格式 v1.1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunzhi.local/schema/qif-1.1.json"
+}

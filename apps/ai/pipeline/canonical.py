@@ -52,7 +52,14 @@ from .schemas import BBox
 
 #: 格式版本。**改欄位就要動它。**
 #: 主版本變動代表不相容（欄位改名、語意改變），次版本代表只加欄位。
-SCHEMA_VERSION = "1.0"
+#:
+#: 1.1 —— 拿兩份真實的自然科講義（南易物理、翰林化學）打過之後補的
+#:        三個欄位，三個都是「原稿印在紙上、而我們原本丟掉」的東西：
+#:        `Scoring.expected_count`（「應選 3 項」）、
+#:        `Provenance.related_raw`（「相關題型：單元練習 3.、7.」）、
+#:        `Provenance.badges`（「素養題」）。
+#:        只加欄位，1.0 產出的文件照樣有效。
+SCHEMA_VERSION = "1.1"
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -171,8 +178,36 @@ _SUPERSCRIPT = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-"
 #: 乘號的各種寫法，含全形空白。
 _UNIT_MULT = re.compile(r"[·⋅∙*×・\s]+")
 
-#: 一個因式：符號（含希臘字母、度、歐姆、百分比）加上可有可無的指數。
-_UNIT_FACTOR = re.compile(r"([A-Za-zΑ-Ωα-ω°Ω%‰Å]+)\^?([+-]?\d+)?")
+#: 一個因式：符號（含希臘字母、度、歐姆、百分比、中文單位）加上
+#: 可有可無的指數。
+_UNIT_FACTOR = re.compile(r"([A-Za-zΑ-Ωα-ω°Ω%‰Å一-鿿]+)\^?([+-]?\d+)?")
+
+#: 中文單位名稱 → SI 符號。
+#:
+#: 同一份講義裡兩種寫法混用是常態，不是例外。南易《EZ 講義 物理》
+#: 第 3 章裡，範例 5 寫「負 2 米/秒² 的定值加速度」，它正下方的
+#: 類題 5 就寫「多少 m/s²」——**同一頁、同一個概念、兩種單位系統**。
+#:
+#: 不對應的話，學生寫「m/s²」而答案存「米/秒²」會被判錯，而那是
+#: 排版差異不是物理錯誤。
+#:
+#: 刻意不收的：
+#:   · 「度」——角度、溫度、電度（千瓦時）都叫度，對不出唯一解
+#:   · 「尺」「里」——台尺與台里是舊制，與公尺公里差很多
+#:   · 「兩」「斤」——同上
+#: 對不出來的寧可回報看不懂，也不要猜一個。
+_CJK_UNITS = {
+    "公里": "km", "公尺": "m", "米": "m", "公分": "cm", "厘米": "cm",
+    "公釐": "mm", "毫米": "mm", "微米": "μm", "奈米": "nm",
+    "公噸": "t", "公斤": "kg", "千克": "kg", "公克": "g", "克": "g",
+    "毫克": "mg", "微克": "μg",
+    "公升": "L", "毫升": "mL", "立方公尺": "m3", "立方公分": "cm3",
+    "秒": "s", "毫秒": "ms", "微秒": "μs", "分鐘": "min", "小時": "hr",
+    "牛頓": "N", "焦耳": "J", "瓦特": "W", "瓦": "W", "帕": "Pa",
+    "巴斯卡": "Pa", "大氣壓": "atm", "伏特": "V", "安培": "A",
+    "歐姆": "Ω", "庫侖": "C", "赫茲": "Hz", "卡": "cal", "大卡": "kcal",
+    "莫耳": "mol", "百萬分點": "ppm",
+}
 
 
 def normalize_unit(raw: str | None) -> str:
@@ -212,8 +247,16 @@ def normalize_unit(raw: str | None) -> str:
             m = _UNIT_FACTOR.fullmatch(tok)
             if not m:
                 return "?" + " ".join(raw.split())
-            sym = m.group(1)
-            factors[sym] = factors.get(sym, 0) + sign * int(m.group(2) or 1)
+            sym = _CJK_UNITS.get(m.group(1), m.group(1))
+            exp = sign * int(m.group(2) or 1)
+            # 「立方公尺」對到 `m3`，指數要乘進去而不是黏在符號上。
+            if sym[-1].isdigit() and not sym[:-1].isdigit():
+                sym, exp = sym[:-1], exp * int(sym[-1])
+            if any("一" <= c <= "鿿" for c in sym):
+                # 認不得的中文單位。**不要猜。** 猜錯的代價是宣稱兩個
+                # 不同的答案等價，而那會讓學生被判錯。
+                return "?" + " ".join(raw.split())
+            factors[sym] = factors.get(sym, 0) + exp
 
     out = []
     for sym in sorted(k for k, v in factors.items() if v):
@@ -531,6 +574,13 @@ class Scoring(BaseModel):
     score: float | None = Field(default=None, ge=0, le=100)
     #: 多選題的部分給分。學測是「答錯 k 個選項者，得 (n-2k)/n 的分數」。
     partial_credit: bool = False
+    #: 多選題印在題號旁的「（應選 3 項）」。
+    #:
+    #: **這是一個免費的正確性檢查。** 原稿自己說了應該選幾個，
+    #: 所以抽出來的答案數量對不上就一定是抽錯了——不必問模型、
+    #: 不必自答、不必老師看。南易《EZ 講義 物理》的多選題每一題
+    #: 都印，而少了這一欄，那個事實就白白丟掉。
+    expected_count: int | None = Field(default=None, ge=1, le=20)
     #: 非選題的字數限制（國寫、英文作文）
     word_limit: int | None = Field(default=None, ge=1, le=5000)
     #: 答案的單位。理化常標，而「答對數字但沒寫單位」是不是給分
@@ -580,6 +630,20 @@ class Provenance(BaseModel):
     #: 大考中心公布的**全國**答對率（0–1）。校準過的實測難度。
     #: **只在原稿印了才填，絕對不可推估。**
     national_correct_rate: float | None = Field(default=None, ge=0, le=1)
+    #: 原稿印的相關題目指引，原文照收：
+    #:   「〈相關題型：單元練習 3.、7.〉」（南易物理，每個範例都印）
+    #:   例題框右上角的「2 1.」（翰林化學，指向習題編號）
+    #:
+    #: **這是出版社替我們做好的題目關聯。** 智慧老師要在學生答錯時
+    #: 說「這個觀念這裡還有兩題可以練」，靠的就是它，而編輯已經
+    #: 一題一題標好了。
+    #:
+    #: 存原文不存 id：那些指引指向的是「這一本裡的第幾題」，要等
+    #: 整份匯入完才解得開。現在不收，之後就只能重讀一次 PDF。
+    related_raw: list[str] = Field(default_factory=list)
+    #: 題目旁的分類標籤原文：「素養題」「跨科」「實驗題」「經典」。
+    #: 108 課綱之後「素養題」是老師實際會拿來篩選的維度。
+    badges: list[str] = Field(default_factory=list)
 
 
 class TextbookRef(BaseModel):
@@ -853,6 +917,12 @@ _REF_TAIL = r"(?=[\s、，。：；）)\]】]|$|所|中|之|的|可|為|列|資�
 _FIGURE_MENTION = re.compile(
     r"(?:如|依|由|見|參[考見]|據|根據)[右左上下本該]?[圖表]"
     r"|[右左上下附]圖"
+    # 「圖中 4 秒的位置為 8 公尺」「圖中 PQ 代表切線」——物理的讀值題
+    # 大量這樣寫。實測兩份數學講義上「圖中」只出現 2 次，兩次都是
+    # 真的在指圖，零誤報。
+    # 「表中」**不收**：「代表中國」「代表中央」會誤報，而那在歷史與
+    # 公民很常見。少抓一點好過多吵一點。
+    r"|圖中"
     r"|[右左上下附]表" + _REF_TAIL +
     r"|圖\s*[一二三四五六七八九十\d]+" + _REF_TAIL +
     r"|表\s*[一二三四五六七八九十\d]+" + _REF_TAIL
@@ -969,6 +1039,23 @@ def validate_document(doc: ImportDocument) -> list[Issue]:
                     f"任何圖表。學生會看到一句「如圖」與一片空白",
                     severity=Severity.ERROR, question_id=q.id,
                     page=q.placement.page)
+
+        # ── 原稿說「應選 3 項」而答案只有 2 個 ──────────────────
+        #
+        # 免費的正確性檢查：原稿自己說了應該選幾個。對不上就一定是
+        # 抽錯了，不必問模型也不必老師看。**只在原稿印了答案時才比**
+        # ——沒印答案的學生版本來就沒有東西可以對。
+        if (
+            q.scoring.expected_count
+            and q.answer.source is AnswerSource.PRINTED
+            and q.answer.keys
+            and len(q.answer.keys) != q.scoring.expected_count
+        ):
+            add("answer_count_mismatch",
+                f"題目 {q.id} 原稿印著「應選 {q.scoring.expected_count} 項」，"
+                f"但抽到的答案有 {len(q.answer.keys)} 個。"
+                f"其中一邊讀錯了，而這一題現在不能用",
+                severity=Severity.ERROR, question_id=q.id, page=q.placement.page)
 
         # ── 單位看不看得懂 ──────────────────────────────────────
         #

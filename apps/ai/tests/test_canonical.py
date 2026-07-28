@@ -691,6 +691,105 @@ def test_a_unit_we_cannot_read_says_so_instead_of_pretending():
     assert ok.questions[0].scoring.unit_canonical == "m·s^-2"
 
 
+def test_chinese_unit_names_match_their_si_symbols():
+    """
+    南易《EZ 講義 物理》第 3 章：範例 5 寫「負 2 米/秒² 的定值加速度」，
+    正下方的類題 5 就寫「多少 m/s²」——**同一頁、同一個概念、
+    兩種單位系統**。不對應的話，學生寫 m/s² 會被判錯。
+    """
+    from pipeline.canonical import normalize_unit, same_unit
+
+    for a, b in (
+        ("米/秒²", "m/s^2"),
+        ("公尺/秒", "m/s"),
+        ("公里/小時", "km/hr"),
+        ("公斤·米/秒²", "kg·m/s^2"),
+        ("牛頓", "N"),
+        ("莫耳/公升", "mol/L"),
+        ("立方公分", "cm3"),
+    ):
+        assert same_unit(a, b), f"{a} 應等於 {b}（{normalize_unit(a)} vs {normalize_unit(b)}）"
+
+    # 字首仍然不換算
+    assert not same_unit("公里", "公尺")
+    # 認不得的中文單位要回報看不懂，**不要猜**。「度」是角度、溫度、
+    # 電度，對不出唯一解；猜錯的代價是宣稱兩個不同的答案等價。
+    for unknown in ("度", "台尺", "每公升 3 大卡"):
+        assert normalize_unit(unknown).startswith("?"), unknown
+
+
+def test_expected_count_catches_a_misread_answer_key():
+    """
+    「（應選 3 項）」是原稿自己說的，所以答案數量對不上一定有一邊
+    讀錯了。**這是一個免費的檢查**——不必問模型、不必自答、
+    不必老師看。南易的多選題每一題都印。
+    """
+    from pipeline.canonical import Scoring
+
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.MULTI_CHOICE, n=5,
+          scoring=Scoring(score=4, expected_count=3, partial_credit=True),
+          answer=Answer(source=AnswerSource.PRINTED, keys=[1, 4])),
+    ]))
+    bad = [i for i in doc.issues if i.code == "answer_count_mismatch"]
+    assert bad and bad[0].severity is Severity.ERROR, doc.issues
+    assert "應選 3 項" in bad[0].detail
+
+    ok = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.MULTI_CHOICE, n=5,
+          scoring=Scoring(score=4, expected_count=3, partial_credit=True),
+          answer=Answer(source=AnswerSource.PRINTED, keys=[1, 3, 4])),
+    ]))
+    assert not [i for i in ok.issues if i.code == "answer_count_mismatch"], ok.issues
+
+
+def test_expected_count_does_not_fire_on_a_student_edition():
+    """
+    學生版沒印答案，沒有東西可以對。在那裡報錯只是噪音，
+    而噪音吃掉的是校對時間。
+    """
+    from pipeline.canonical import Scoring
+
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.MULTI_CHOICE, n=5,
+          scoring=Scoring(expected_count=3), answer=Answer()),
+    ]))
+    assert not [i for i in doc.issues if i.code == "answer_count_mismatch"], doc.issues
+
+
+def test_printed_cross_references_are_kept():
+    """
+    「〈相關題型：單元練習 3.、7.〉」——**出版社的編輯已經一題一題
+    標好了題目關聯**，而智慧老師要在學生答錯時說「這個觀念這裡還有
+    兩題可以練」，靠的就是它。
+
+    存原文不存 id：那些指引指向「這一本裡的第幾題」，要等整份匯入
+    完才解得開。現在不收，之後就只能重讀一次 PDF。
+    """
+    got = q("q1", provenance=Provenance(
+        related_raw=["單元練習 3.", "單元練習 7."], badges=["素養題"]))
+    assert got.provenance.related_raw == ["單元練習 3.", "單元練習 7."]
+    assert got.provenance.badges == ["素養題"]
+
+
+def test_a_graph_reading_question_without_its_graph_is_caught():
+    """
+    南易《EZ 講義 物理》3-2 單元練習第 4、5 題：「圖中 4 秒的位置為
+    8 公尺」「圖中 PQ 代表切線」——共用一張 x–t 圖，題幹用「圖中」
+    指它。
+
+    實測兩份數學講義上「圖中」只出現 2 次，兩次都是真的在指圖，
+    零誤報。所以這個詞收得起。
+    """
+    doc = finalize(ImportDocument(
+        document=DocumentMeta(subject=SubjectCode.PHYSICS),
+        questions=[q("q1", QuestionKind.SINGLE_CHOICE,
+                     stem="圖中 4 秒的位置為 8 公尺，5 秒的位置為 15 公尺，"
+                          "則 4～5 秒的平均速度為多少公尺/秒？")],
+    ))
+    assert [i for i in doc.issues if i.code == "figure_missing"], doc.issues
+
+
 def test_physics_maps_to_the_combined_science_paper():
     """物理是分科教的，但學測考的是合科自然。組模擬卷時要湊得起來。"""
     from pipeline.canonical import PARENT_SUBJECT

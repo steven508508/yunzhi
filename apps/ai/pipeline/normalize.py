@@ -107,36 +107,113 @@ def sniff(data: bytes, filename: str = "") -> SourceKind:
 _CHARS_PER_SQIN = 2.5
 
 
-def _page_has_real_text(page: fitz.Page) -> bool:
+# ── 文字層讀不讀得懂 ─────────────────────────────────────────────
+#
+# **有文字層不等於文字層是對的。**
+#
+# 出版社常把內文嵌成自訂子集字型，而子集重新編號之後又聲明成標準
+# 編碼。抽出來的是合法的 Unicode，只是**錯的字**：
+#
+#     實際印的：均勻的混合物，稱為溶液。
+#     抽出來的：⛯⊣䘬㶟⎰䈑炻䧙䁢㹞㵚ˤ
+#
+# 翰林《互動式教學講義·化學(全)》整份都是這樣，而且不會報錯——
+# 頁面渲染完全正常，只有文字層是壞的。系統若相信它，就會拿
+# 「⛯⊣䘬㶟⎰䈑」當題幹存進題庫，而**沒有任何跡象**。
+#
+# 判準用兩個獨立訊號，都在真材料上量過：
+#
+#                        Ext-A 比例   常用字比例
+#   數學講義（正常）        0.0%        20.4%
+#   數學講義（正常）        0.0%        22.4%
+#   化學講義（壞掉）       27.7%         7.5%
+#   化學最壞的一頁         47.1%         1.1%
+#
+# Ext-A（U+3400–U+4DBF）是幾乎完美的判準：兩份正常講義的 11730 個
+# 漢字裡**一個都沒有**。高中教材不會用到擴充區的字，連文言文也不會。
+# 常用字比例當第二道：真正的中文散文一定有一堆「的是在有不為」，
+# 位移過的亂碼一個也沒有。
+
+#: 中文裡最常見的字。真中文一定有一堆，位移過的亂碼一個也沒有。
+_COMMON_HAN = set(
+    "的是在有不為和與了之一二三大小上下中人年月日時分以到說會可"
+    "也就要對能而所後多然於其此則者如用者被把從向由使得所"
+)
+
+#: 判定需要的最少漢字數。太短的頁面（只有頁碼與標題）統計沒有意義。
+_LEGIBILITY_MIN_HAN = 120
+#: 擴充區 A 的比例上限。實測正常 0.0%、壞掉 27.7–47.1%。
+_EXT_A_MAX = 0.05
+#: 常用字比例下限。實測正常最差的一頁 15.9%、壞掉 1.1–1.8%。
+_COMMON_MIN = 0.06
+
+
+def text_legibility(text: str) -> tuple[bool, str | None]:
     """
-    區分原生 PDF 與掃描 PDF。
+    這段文字讀不讀得懂？回傳（可信, 不可信的理由）。
+
+    漢字太少時一律回「可信」——**不確定就不要指控**。數學與英文的
+    頁面本來就沒幾個中文字，把它們判成亂碼會讓整份檔案白花一次
+    視覺模型的錢。
+    """
+    han = [c for c in text if 0x3400 <= ord(c) <= 0x9FFF]
+    if len(han) < _LEGIBILITY_MIN_HAN:
+        return True, None
+
+    ext_a = sum(1 for c in han if 0x3400 <= ord(c) <= 0x4DBF) / len(han)
+    if ext_a > _EXT_A_MAX:
+        return False, (
+            f"文字層有 {ext_a:.0%} 是中日韓擴充區的罕用字。"
+            f"高中教材不會用到那些字，這代表出版社的自訂字型對不回 Unicode，"
+            f"抽出來的是亂碼"
+        )
+
+    common = sum(1 for c in han if c in _COMMON_HAN) / len(han)
+    if common < _COMMON_MIN:
+        return False, (
+            f"文字層裡「的是在有不為」這類常用字只占 {common:.0%}（正常中文約兩成）。"
+            f"這代表抽出來的字是錯的，雖然每個字本身都合法"
+        )
+
+    return True, None
+
+
+def _page_has_real_text(page: fitz.Page) -> tuple[bool, str | None]:
+    """
+    區分原生 PDF 與掃描 PDF。回傳（有可用文字層, 不可用的理由）。
 
     掃描件也可能有文字層（掃描軟體跑過 OCR），但那個文字層的品質
     通常不如我們自己跑——所以判準不是「有沒有文字」，而是
-    「文字量是否與頁面尺寸相稱」。
+    「文字量是否與頁面尺寸相稱」，**以及讀不讀得懂**。
 
     用「每平方英寸字元數」而非「面積覆蓋率」：後者對排版稀疏的頁面
     會誤判，而題本裡確實有那種頁面（作文題只有一段引導文字）。
     """
     text = page.get_text("text").strip()
     if len(text) < 40:
-        return False
+        return False, None
 
     # PDF 單位是 point，72 pt = 1 inch
     sq_inches = abs(page.rect.width * page.rect.height) / (72 * 72)
     if sq_inches <= 0:
-        return False
+        return False, None
 
+    enough = False
     density = len(text) / sq_inches
     if density >= _CHARS_PER_SQIN:
-        return True
+        enough = True
+    else:
+        # 密度不足時退而看結構：有多個文字塊且分布在頁面各處，
+        # 仍可能是排版稀疏的原生頁面（例如整頁一張圖加兩行說明）。
+        blocks = page.get_text("blocks")
+        enough = len(blocks) >= 3 and len(text) >= 120
+    if not enough:
+        return False, None
 
-    # 密度不足時退而看結構：有多個文字塊且分布在頁面各處，
-    # 仍可能是排版稀疏的原生頁面（例如整頁一張圖加兩行說明）。
-    blocks = page.get_text("blocks")
-    if len(blocks) >= 3 and len(text) >= 120:
-        return True
-    return False
+    # 字夠多，但讀不讀得懂是另一回事。讀不懂就當成沒有文字層——
+    # 走影像判讀那條路，讓模型看圖。那比拿亂碼當題幹好得多。
+    ok, why = text_legibility(text)
+    return (True, None) if ok else (False, why)
 
 
 def _is_cjk(ch: str) -> bool:
@@ -480,18 +557,76 @@ def _reading_order(blocks: list[dict], _depth: int = 0) -> list[dict]:
     return head + recurse(left) + recurse(right) + tail
 
 
+#: 一張圖要蓋掉這麼多頁面，才算「這一頁就是一張掃描圖」。
+_SCAN_COVER = 0.5
+#: 向量繪圖指令多過這個數，就不可能是掃描件。
+#: 實測：真掃描件 0 個；物理講義（文字轉外框）每頁 590–2086 個。
+_SCAN_MAX_DRAWINGS = 50
+
+
+def _page_is_raster_scan(page: fitz.Page) -> bool:
+    """
+    這一頁「本身就是一張點陣圖」嗎？
+
+    **沒有文字層不等於是掃描件。** 出版社為了防拷貝，常把整份講義的
+    文字轉成向量外框——抽不到一個字，但頁面是原生向量的，渲染出來
+    邊緣銳利、完全水平、光照均勻。
+
+    這個區別很重要，因為照片前處理（歪斜校正、光照補償、方向判定、
+    書縫切頁）是為**手機拍的紙本**設計的，套到一張乾淨的向量頁上
+    只會出事。實測南易《EZ 講義 物理(全)》第 3 章 36 頁：
+
+      · 1 頁被判成上下顛倒並**真的旋轉了 180°** —— 那一頁就毀了
+      · 26 頁被標「對比度偏低，可能是淡墨或影本多次複印」 ——
+        其實是版面本來就大量使用粉彩底色
+      · 5 頁「方向無法判定」
+
+    一份出版社直接給的 PDF，34 筆警告沒有一筆是真的。而校對介面
+    要老師看那些警告。
+    """
+    if len(page.get_drawings()) > _SCAN_MAX_DRAWINGS:
+        return False
+    area = abs(page.rect.width * page.rect.height)
+    if area <= 0:
+        return False
+    for img in page.get_images(full=True):
+        for r in page.get_image_rects(img[0]) or []:
+            if abs(r.width * r.height) / area >= _SCAN_COVER:
+                return True
+    return False
+
+
 def normalize_pdf(data: bytes, translate=None) -> NormalizeResult:
     doc = fitz.open(stream=data, filetype="pdf")
     try:
         zoom = TARGET_DPI / PDF_BASE_DPI
         matrix = fitz.Matrix(zoom, zoom)
 
+        # ── 先整份判一次文字層讀不讀得懂 ─────────────────────────
+        #
+        # **這個判斷屬於檔案，不屬於頁面。** 出版社整份用同一組字型，
+        # 所以字型對不回 Unicode 是全書的事。逐頁判的話，字太少的
+        # 那幾頁（整頁表格、只有標題的章名頁）會通過檢查，然後把
+        # 夾在裡面的亂碼送下去——實測 44 頁的化學講義有 3 頁這樣漏掉。
+        #
+        # 整份一起看還有一個好處：樣本大，判斷穩。
+        doc_ok, doc_why = text_legibility("".join(p.get_text("text") for p in doc))
+
         pages: list[PageOut] = []
         native_count = 0
+        illegible = 0
+        illegible_why: str | None = doc_why
+        outlined = 0
 
         for page in doc:
-            is_native = _page_has_real_text(page)
+            is_native, why = _page_has_real_text(page)
+            if is_native and not doc_ok:
+                # 整份的文字層壞掉，這一頁再乾淨也不能信。
+                is_native, why = False, doc_why
             native_count += int(is_native)
+            if why:
+                illegible += 1
+                illegible_why = illegible_why or why
 
             pix = page.get_pixmap(matrix=matrix, alpha=False)
 
@@ -513,10 +648,30 @@ def normalize_pdf(data: bytes, translate=None) -> NormalizeResult:
                 )
                 continue
 
+            # 沒有文字層，但頁面是向量的（文字被轉成外框防拷貝）。
+            # 渲染結果本來就乾淨——不歪、不暗、不可能上下顛倒、
+            # 也不可能是攤開的兩頁。照片前處理套上去只會製造假警告，
+            # 最壞的情況是把一頁轉 180° 轉壞。**什麼都不做才是對的。**
+            if not _page_is_raster_scan(page):
+                # 「文字被轉成外框」與「文字層是亂碼」是兩件事，分開數。
+                # 混在一起講的話，訊息會自相矛盾——說抽不到文字，
+                # 又說抽出來的是亂碼。
+                if not why:
+                    outlined += 1
+                pages.append(
+                    PageOut(index=len(pages), width=pix.width, height=pix.height,
+                            png=pix.tobytes("png"), text_layer=None,
+                            quality=1.0,
+                            quality_notes=[why] if why else [])
+                )
+                continue
+
             # 掃描頁走影像前處理，並據此評估品質。前處理可能把一張
             # 攤開的書切成兩頁，所以 PDF 的頁數不一定等於輸出頁數，
             # index 要用累計值而不是迴圈變數。
             pngs, quality, notes = _enhance_scan(pix.tobytes("png"))
+            if why:
+                notes = [why, *notes]
             for png in pngs:
                 img = _to_cv(png)
                 h, w = img.shape[:2]
@@ -537,11 +692,35 @@ def normalize_pdf(data: bytes, translate=None) -> NormalizeResult:
         extra = f"　其中 {split} 頁是從攤開的書本切出來的。" if split > 0 else ""
         if kind == "native_pdf":
             note = f"原生 PDF，{native_count}/{source_total} 頁有可用文字層，辨識準確率高。"
+        elif illegible >= (source_total - native_count) * 0.8:
+            # 整份的文字層都是亂碼。**這是最需要講清楚的一種**：
+            # 老師上傳的是一份看起來完全正常的 PDF，而系統要告訴他
+            # 「裡面的字我讀不出來」。不解釋的話那句話沒有道理。
+            note = (
+                f"原生 PDF，但文字層是亂碼（{illegible}/{source_total} 頁）。"
+                f"{illegible_why}。"
+                f"頁面本身完全正常，已全部改用影像判讀。"
+            )
+        elif outlined >= (source_total - native_count) * 0.8:
+            # 整份幾乎都是「向量頁但完全沒有文字」。這是出版社防拷貝的
+            # 做法（文字轉成外框），不是掃描件——影像品質其實是最好的
+            # 一種。
+            note = (
+                f"原生 PDF，但文字被轉成外框（{outlined}/{source_total} 頁），"
+                f"抽不到文字層。影像品質良好，全部交由模型判讀。"
+            )
         else:
             note = (
                 f"掃描 PDF（{source_total - native_count}/{source_total} 頁無文字層），"
                 f"品質評分 {quality:.2f}。準確率取決於掃描品質，建議抽樣確認。{extra}"
             )
+            if illegible:
+                # 只有一部分頁面壞掉時補一句就好——整份壞掉的情況
+                # 上面那一支已經完整交代過了。
+                note += (
+                    f"　⚠ 另有 {illegible} 頁的文字層是亂碼（{illegible_why}），"
+                    f"已改用影像判讀。"
+                )
 
         return NormalizeResult(
             kind=kind,

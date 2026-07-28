@@ -277,3 +277,31 @@ if __name__ == "__main__":
             traceback.print_exc(limit=2)
     print(f"\n{len(fns) - failed}/{len(fns)} 通過")
     sys.exit(1 if failed else 0)
+
+
+def test_worksheet_group_lead_covers_the_publisher_wording():
+    """
+    南易《EZ 講義 物理》3-2 單元練習：
+
+      ◎ 右圖所示，為某質點沿直線運動的位置－時間關係圖，
+        試回答下列 3.～5. 題：
+
+    學測試卷寫「第 37 題至第 39 題為題組」，講義寫「試回答下列 N.～M. 題」
+    ——形狀完全不同。認不出來的話，第 4、5 題會跟共用的 x–t 圖分家，
+    而那兩題的題幹寫著「圖中 4 秒的位置為…」，沒有圖就是不能作答的題目。
+    """
+    from pipeline.segment import _GROUP_LEAD
+
+    for s in (
+        "◎ 右圖所示，為某質點沿直線運動的位置－時間關係圖，試回答下列 3.～5. 題：",
+        "試回答下列 3.～5. 題",
+        "回答下列 9～10 題",
+        "請回答第 12 題至第 14 題",
+        "第 37 題至第 39 題為題組",
+        "請問 9～10 題",
+    ):
+        assert _GROUP_LEAD.search(s), f"認不出題組指示語：{s}"
+
+    # 不該把單獨一題的敘述當成題組
+    for s in ("下列敘述何者正確？", "3. 如右圖所示，小鐵球由左側斜面滑下", "請回答問題"):
+        assert not _GROUP_LEAD.search(s), f"誤判成題組：{s}"
