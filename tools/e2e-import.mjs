@@ -382,6 +382,54 @@ async function mainScoped(fixture) {
     assert.equal(seen, null, '看得到隔壁補習班的班級');
   });
 
+  // ── 知識點圖譜（B0.4）──────────────────────────────────────
+
+  section('知識點圖譜');
+
+  await test('同一科不能有兩個同名知識點', async () => {
+    // 同名知識點會讓能力分析分裂成兩份，而症狀是「明明練了很多，
+    // 掌握度卻上不去」——沒有人會聯想到是知識點重複。
+    const a = await prisma.knowledgePoint.create({
+      data: { tenantId: tenant.id, subjectId: subject.id, name: '等差級數的求和' },
+    });
+    await assert.rejects(
+      prisma.knowledgePoint.create({
+        data: { tenantId: tenant.id, subjectId: subject.id, name: '等差級數的求和' },
+      }),
+      /unique|duplicate/i,
+    );
+    await prisma.knowledgePoint.deleteMany({ where: { id: a.id } });
+  });
+
+  await test('前置關係存得下來，而且同一對不會重複', async () => {
+    const base = await prisma.knowledgePoint.create({
+      data: { tenantId: tenant.id, subjectId: subject.id, name: '乘法公式' },
+    });
+    const adv = await prisma.knowledgePoint.create({
+      data: { tenantId: tenant.id, subjectId: subject.id, name: '因式分解' },
+    });
+    await prisma.kpPrerequisite.create({ data: { kpId: adv.id, prereqKpId: base.id } });
+    await assert.rejects(
+      prisma.kpPrerequisite.create({ data: { kpId: adv.id, prereqKpId: base.id } }),
+      /unique|duplicate|primary key/i,
+    );
+    const n = await prisma.kpPrerequisite.count({ where: { kpId: adv.id } });
+    assert.equal(n, 1);
+    await prisma.kpPrerequisite.deleteMany({ where: { kpId: adv.id } });
+    await prisma.knowledgePoint.deleteMany({ where: { id: adv.id } });
+    await prisma.knowledgePoint.deleteMany({ where: { id: base.id } });
+  });
+
+  await test('看不到別家補習班的知識點', async () => {
+    const otherKp = await withoutTenantScope('驗證用：在隔壁租戶建一個知識點', () =>
+      prisma.knowledgePoint.create({
+        data: { tenantId: other.tenant.id, subjectId: other.subject.id, name: '隔壁的知識點' },
+      }),
+    );
+    const seen = await prisma.knowledgePoint.findFirst({ where: { id: otherKp.id } });
+    assert.equal(seen, null, '知識點是能力分析的座標系，跨租戶看得到就是分析資料外洩');
+  });
+
   // ── 資料庫層的授權約束 ─────────────────────────────────────
 
   section('資料庫層的授權約束');
