@@ -154,7 +154,13 @@ overdue() {
 }
 
 log "備份排程啟動：每日 $(printf '%02d:%02d' "${BACKUP_HOUR}" "${BACKUP_MIN}")"
-touch /tmp/backup-daemon-alive
+# 寫**時間戳**而不是 touch 一個空檔。healthcheck 算的是
+# `$(date +%s) - $(cat /tmp/backup-daemon-alive)`，空檔會讓它變成
+# `$(( 1785... -  ))`——那是算術語法錯誤，不是「不新鮮」。
+# 全新安裝時第一件事就是補跑一次備份（下面的 overdue），那段時間
+# 可能好幾分鐘，容器會被標成 unhealthy，而裝機的人看到的是
+# 「backup 服務有問題」——實際上它正在正常工作。
+date +%s > /tmp/backup-daemon-alive
 
 # 開機時先確認有沒有漏掉的。關機一晚就少一份備份是不能接受的，
 # 而 RPO 15 分鐘的承諾建立在「每天真的有備份」之上。

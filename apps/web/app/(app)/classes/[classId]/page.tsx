@@ -2,10 +2,12 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { isHomeroomOf } from '@/lib/auth';
+import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
 import { Denied, Empty, Note } from '@/components/Feedback';
 import { Table } from '@/components/Table';
+import ConsentButton from './ConsentButton';
 import RosterImport from './RosterImport';
 
 export const dynamic = 'force-dynamic';
@@ -19,6 +21,16 @@ export default async function ClassPage({
 }) {
   const { classId } = await params;
   return scopedPage(async (user) => {
+    // 下面的成員檢查對學生是**通過**的（他確實在這個班裡），
+    // 所以角色要先擋一次，否則學生看得到全班的家長信箱與帳號狀態。
+    if (!mayUse(user.systemRole, '/classes')) {
+      return (
+        <main className="yz-panel">
+          <Denied what="班級名冊" why="名冊含全班同學與家長的聯絡資料，只有老師與管理員看得到。" />
+        </main>
+      );
+    }
+
     const klass = await prisma.class.findFirst({
       where: { id: classId },
       include: { academicYear: { select: { name: true } } },
@@ -91,6 +103,10 @@ export default async function ClassPage({
               cell: (m: Row) =>
                 m.user.consentAt ? (
                   <span title={m.user.consentAt.toLocaleDateString('zh-TW')}>已取得</span>
+                ) : mayEdit ? (
+                  // 沒有這顆按鈕的話，匯入名冊建出來的帳號永遠登不進去，
+                  // 而系統裡沒有任何方式可以解決——那是一條死路。
+                  <ConsentButton studentId={m.user.id} studentName={m.user.displayName} />
                 ) : (
                   <span className="yz-warn">未取得</span>
                 ),

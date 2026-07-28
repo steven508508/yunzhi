@@ -1,0 +1,28 @@
+# Grafana 資料來源。
+#
+# docker-compose.yml 把 deploy/monitoring/grafana-provisioning 掛進
+# Grafana 的 /etc/grafana/provisioning。**那個目錄原本不存在**，而
+# Docker 對不存在的 bind 來源是「幫你建一個空目錄」而不是報錯 ——
+# 於是 Grafana 的預設 provisioning 目錄被一個空目錄蓋掉，啟動不會
+# 失敗，只是一個資料來源都沒有：所有面板都畫不出東西，而畫面上
+# 只寫「No data」，看起來像是 Prometheus 沒在收資料。
+#
+# 主機名是 compose 的服務名，兩者都在 internal 網路上。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: yunzhi-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  # loki 與 prometheus 同屬 --profile monitoring，一起啟停。
+  - name: Loki
+    uid: yunzhi-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false

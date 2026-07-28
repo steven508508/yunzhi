@@ -78,3 +78,19 @@ export const PATCH = scopedRoute<{ jobId: string }>(async (req: NextRequest, { u
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
 });
+
+/**
+ * 與 PATCH 同一件事，只是給 `navigator.sendBeacon` 用。
+ *
+ * **sendBeacon 一定是 POST，沒有選項可以改。** 校對介面在
+ * `beforeunload` 時用它把還沒存的變更送出去（見 Review.tsx），
+ * 而這個路由原本只有 GET 與 PATCH——於是每一次都是 405，
+ * 最多八秒的校對成果加上關閉分頁當下所有未存的變更全部靜靜丟掉。
+ *
+ * 那正是那段程式的註解說它要防止的事。
+ *
+ * 瀏覽器不保證 beacon 送得出去，所以這裡的行為必須與 PATCH 完全
+ * 一致而且可以重複送——同一批變更送兩次的結果要跟送一次一樣。
+ * `saveCandidates` 是依 id 更新，本來就滿足。
+ */
+export const POST = PATCH;

@@ -236,9 +236,18 @@ export async function commitJob(
               c.nationalCorrectRate == null
                 ? undefined
                 : 1 - c.nationalCorrectRate,
-            // 一律 DRAFT。校對確認的是「抽取正確」，不是
-            // 「可以拿去考學生」——後者要科目老師另外發布。
-            status: 'DRAFT',
+            // 校對確認的是「抽取正確」，不是「可以拿去考學生」——
+            // 後者要科目老師另外發布。所以入庫是 PENDING_REVIEW
+            // 而不是 PUBLISHED。
+            //
+            // **原本寫 DRAFT，而題庫頁只列 PUBLISHED 與 PENDING_REVIEW。**
+            // 症狀是：老師按下「寫進題庫」，畫面回報「已寫入 2 題」，
+            // 然後點到題庫看到「題庫是空的」。題目其實都在資料庫裡，
+            // 只是永遠不會出現——而整個 repo 沒有任何一行程式會把
+            // DRAFT 改成別的狀態，所以那是一條死路。
+            //
+            // 這是整條核心動線（匯入 → 校對 → 題庫）唯一的斷點。
+            status: 'PENDING_REVIEW',
             createdBy: userId,
           },
           select: { id: true },

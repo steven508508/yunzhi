@@ -742,7 +742,23 @@ async function mainScoped(fixture) {
     assert.ok(q, '沒有任何題目入庫');
     assert.equal(q.sourceType, 'OFFICIAL_PAST');
     assert.equal(q.licenseScope, 'PUBLIC');
-    assert.equal(q.status, 'DRAFT', '入庫是草稿，發布是另一個決定');
+    // **這一行原本斷言 DRAFT，而那把一個真的 bug 編碼成了規格。**
+    //
+    // 題庫頁只列 PUBLISHED 與 PENDING_REVIEW，而全 repo 沒有任何一行
+    // 會把 DRAFT 改成別的狀態。症狀是：老師按「寫進題庫」，畫面回報
+    // 「已寫入 2 題」，點到題庫看到「題庫是空的」——題目其實都在，
+    // 只是永遠不會出現。那是整條核心動線唯一的斷點，而測試是綠的。
+    //
+    // 所以現在驗的不是「等於某個值」，而是**真正的不變量**：
+    // 入庫之後的狀態，必須是題庫頁看得到的狀態之一。
+    const VISIBLE_IN_BANK = ['PUBLISHED', 'PENDING_REVIEW'];
+    assert.ok(
+      VISIBLE_IN_BANK.includes(q.status),
+      `入庫後的狀態是 ${q.status}，而題庫頁只顯示 ${VISIBLE_IN_BANK.join('／')}——` +
+        `老師會看到「已寫入 N 題」然後在題庫看到空的`,
+    );
+    // 但也不能直接發布：校對確認的是「抽取正確」，不是「可以拿去考學生」。
+    assert.notEqual(q.status, 'PUBLISHED', '入庫不該直接發布，那是科目老師的另一個決定');
     assert.ok(q.sourceRef?.includes('115'), `來源標註要能回頭找到原稿：${q.sourceRef}`);
     assert.ok(q.familyId, 'familyId 是跨版本的識別，不能是空的');
   });

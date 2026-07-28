@@ -60,7 +60,13 @@ export type ScopedHandler<P> = (
 export function scopedRoute<P = Record<string, never>>(handler: ScopedHandler<P>) {
   return async (
     req: NextRequest,
-    seg?: { params?: Promise<P> },
+    // 第二個參數宣告成必填，是為了對上 Next 15.5 為每個 route 產生的
+    // 型別驗證檔（`.next/types/.../route.ts`）：它要求 handler 的第二個
+    // 參數能接受 `{ params: Promise<...> }`，而 `seg?:` 會讓推導出的型別
+    // 多一個 `| undefined`，於是 `next build` 在 type-checking 階段整個
+    // 停住——**產線映像根本建不出來，而錯誤訊息完全看不出是這裡**。
+    // 執行期仍然用 `seg?.` 取值，因為非動態路由不保證拿得到這個物件。
+    seg: { params: Promise<P> },
   ): Promise<Response> => {
     const user = await requireUser();
     if (!user) {

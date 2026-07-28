@@ -38,19 +38,18 @@ cat <<'BANNER'
 BANNER
 
 # ═══════════════════════════════════════════════════════════════
-section "1／7  安裝前檢查"
-# ═══════════════════════════════════════════════════════════════
-
-if (( SKIP_PREFLIGHT )); then
-  warn "已指定 --skip-preflight，跳過環境檢查。"
-else
-  if ! "${YZ_SCRIPTS_DIR}/preflight.sh"; then
-    die "安裝前檢查未通過。修正上列失敗項後重試，或加 --skip-preflight 強制繼續（不建議）。"
-  fi
-fi
-
-# ═══════════════════════════════════════════════════════════════
-section "2／7  設定"
+section "1／7  設定"
+#
+# **設定要排在安裝前檢查之前。**
+#
+# 反過來的話，全新機器的第一次安裝一定失敗：preflight 的「設定檔」
+# 一節在 .env 不存在時是 check_fail（不是警告），於是它以 1 結束、
+# 這支腳本 die 在第一步——而下面第 2 步做的正好就是「建立 .env」。
+# 使用者照 README 打一行指令，得到的是「請先執行 cp .env.example
+# .env」，然後才發現安裝腳本本來就會做這件事。
+#
+# 順序換過來還有一個好處：preflight 判斷該不該檢查 80／443 是讀
+# .env 的 PROXY_MODE，先建好檔案它才讀得到真正的值。
 # ═══════════════════════════════════════════════════════════════
 
 if [[ ! -f "${YZ_ROOT}/.env" ]]; then
@@ -65,6 +64,18 @@ fi
 
 load_env
 require_env APP_DOMAIN APP_URL POSTGRES_PASSWORD REDIS_PASSWORD AUTH_SECRET S3_SECRET_KEY
+
+# ═══════════════════════════════════════════════════════════════
+section "2／7  安裝前檢查"
+# ═══════════════════════════════════════════════════════════════
+
+if (( SKIP_PREFLIGHT )); then
+  warn "已指定 --skip-preflight，跳過環境檢查。"
+else
+  if ! "${YZ_SCRIPTS_DIR}/preflight.sh"; then
+    die "安裝前檢查未通過。修正上列失敗項後重試，或加 --skip-preflight 強制繼續（不建議）。"
+  fi
+fi
 
 APP_VERSION="${APP_VERSION:-$(cat "${YZ_ROOT}/VERSION" 2>/dev/null || echo '0.1.0')}"
 export APP_VERSION
@@ -81,8 +92,28 @@ if [[ "${AI_PROVIDER:-mock}" == "mock" ]]; then
   dim "  ./deploy/scripts/docker-install.sh   # 重跑即可套用"
 fi
 
-# 備份目錄要在啟動前存在，否則 backup 容器會掛載出一個 root 擁有的目錄
-mkdir -p "${BACKUP_DIR:-${YZ_ROOT}/data/backups}" "${YZ_ROOT}/data/models"
+# 備份目錄要在啟動前存在，否則 backup 容器會掛載出一個 root 擁有的目錄。
+#
+# **但這一步不可以是致命的。** docs/INSTALL.md 教的是把使用者加進
+# docker 群組後**不用 sudo** 執行這支腳本，而 .env.example 的
+# BACKUP_DIR 預設是 /var/backups/yunzhi —— 一般使用者在那底下
+# mkdir 會被拒絕，common.sh 的 ERR trap 接著讓整個安裝停在這一行。
+# 全新機器上這是必然發生的，而且訊息只有一句 Permission denied。
+#
+# 建不出來時容器仍然能跑（Docker 會自己建，backup 容器是 root），
+# 真正受影響的是宿主機上手動執行的 backup.sh，所以講清楚就好。
+if ! mkdir -p "${BACKUP_DIR:-${YZ_ROOT}/data/backups}" 2>/dev/null; then
+  warn "建不出備份目錄 ${BACKUP_DIR}（權限不足）。容器仍會正常備份，"
+  warn "但宿主機上直接執行 ./deploy/scripts/backup.sh 會失敗。要修的話："
+  dim "  sudo install -d -o \"\$(id -u)\" -g \"\$(id -g)\" '${BACKUP_DIR}'"
+fi
+
+mkdir -p "${YZ_ROOT}/data/models"
+# AI 容器以 uid 10001 執行，而 bind mount 一律沿用宿主機的擁有者
+# （通常是執行安裝的那個人）。不放寬權限的話，字形對照快取
+# GLYPH_CACHE_PATH 寫不進去 —— 而 save_cache 包在 try/except 裡，
+# 不會報錯，只會讓每一份出版社講義都重新付費問一次視覺模型。
+chmod 0777 "${YZ_ROOT}/data/models"
 
 # ═══════════════════════════════════════════════════════════════
 section "3／7  建置映像"

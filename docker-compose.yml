@@ -117,6 +117,12 @@ services:
       AI_SERVICE_URL: http://ai:8000
       HOSTNAME: "0.0.0.0"
       APP_URL: ${APP_URL}
+      # **APP_DOMAIN 是必填。** apps/web/lib/env.ts 在載入時就驗證設定，
+      # 缺一項就 process.exit(78)。少了這一行的症狀特別難查：readyz
+      # 不碰 lib/env.ts，所以容器是健康的、裝機驗收全綠；等到老師第一次
+      # 上傳題本（那條路徑經過 lib/storage.ts）才把整個 web 行程帶走，
+      # 而日誌上只有一段「設定不完整」。
+      APP_DOMAIN: ${APP_DOMAIN}
       APP_VERSION: ${APP_VERSION:-dev}
       AUTH_SECRET: ${AUTH_SECRET}
       AUTH_SESSION_MAX_AGE: ${AUTH_SESSION_MAX_AGE:-43200}
@@ -127,6 +133,9 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
       AI_PRICING: ${AI_PRICING:-}
+      # 有預設值，但不傳的話 .env 裡的 LOG_LEVEL=debug 對 web 沒有作用——
+      # 而那是出事時第一個會被調的開關，調了沒反應會讓人往錯的方向找。
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       TZ: ${TZ:-Asia/Taipei}
     # PROXY_MODE=external 時對外開一個 loopback 埠給既有的 nginx 用。
     # caddy 模式下 WEB_BIND 留空，這個 mapping 就不會生效。

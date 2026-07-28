@@ -31,7 +31,9 @@ export default function LoginPage() {
         setError(data.error ?? '登入失敗');
         return;
       }
-      router.push(data.mustChangePassword ? '/password?first=1' : '/import');
+      // 一律回首頁，由首頁依角色決定要顯示什麼。以前直接送到 /import，
+      // 而那是學生看不懂、管理員也用不到的一頁。
+      router.push(data.mustChangePassword ? '/password?first=1' : '/');
       router.refresh();
     } catch {
       setError('連線失敗，請確認網路後重試');

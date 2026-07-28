@@ -2,7 +2,8 @@ import Link from 'next/link';
 
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
-import { Empty } from '@/components/Feedback';
+import { mayUse } from '@/lib/nav';
+import { Denied, Empty } from '@/components/Feedback';
 import { Table } from '@/components/Table';
 import NewClass from './NewClass';
 
@@ -12,6 +13,15 @@ const ADMIN = new Set(['SYS_ADMIN', 'SCHOOL_ADMIN']);
 
 export default async function ClassesPage() {
   return scopedPage(async (user) => {
+    // 學生自己也是班級成員，所以少了這一道，他從網址進來會看到
+    // 全班的名冊——含每個同學的家長信箱。
+    if (!mayUse(user.systemRole, '/classes')) {
+      return (
+        <main className="yz-panel">
+          <Denied what="班級名冊" why="名冊含全班同學與家長的聯絡資料，只有老師與管理員看得到。" />
+        </main>
+      );
+    }
     const isAdmin = ADMIN.has(user.systemRole);
     const [classes, years] = await Promise.all([
       prisma.class.findMany({
@@ -43,7 +53,8 @@ export default async function ClassesPage() {
         {isAdmin && years.length === 0 && (
           <Empty
             title="還沒有學年度"
-            hint="班級要掛在某個學年度底下。請先由管理員建立學年度（目前需要直接寫入資料庫，介面排在後續批次）。"
+            hint="班級要掛在某個學年度底下，所以要先有學年度才開得了班。"
+            action={<Link href="/settings/years">建立學年度</Link>}
           />
         )}
 

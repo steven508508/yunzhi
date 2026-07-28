@@ -1,0 +1,60 @@
+# 雲端智學 — 建置脈絡排除清單
+#
+# 沒有這個檔案時，`docker compose build` 會把整個目錄（含 node_modules
+# 583MB、apps/web/.next 121MB、data/ 底下的模型快取與備份）打包送給
+# Docker daemon。裝機那天的症狀是「第三步卡在 transferring context」
+# 好幾分鐘，而且**每改一行程式就重來一次**。
+#
+# 但真正會出錯的不是慢，是下面兩件：
+#
+#   一、apps/web/Dockerfile 的 builder 階段先 `COPY --from=deps
+#       /app/node_modules`，再 `COPY . .`。脈絡裡若有宿主機的
+#       node_modules，第二個 COPY 會把 alpine 裝好的那份**蓋掉**——
+#       換成一份在 glibc 機器上編出來的 Prisma engine 與原生模組。
+#       建置可能過得去，容器起來才在 musl 上找不到 .so。
+#   二、`COPY . .` 會把 .env 一起放進 builder 層。最終映像雖然沒帶，
+#       但那一層留在建置快取裡，任何拿得到映像歷史的人都讀得到
+#       資料庫密碼、AI API key 與備份加密金鑰。
+#
+# 排除規則以「這個東西進不進得了任何一個 COPY」為準，不確定就留著。
+
+# ── 相依與建置產物（映像內會自己重建）────────────────────────
+node_modules
+**/node_modules
+.next
+**/.next
+*.tsbuildinfo
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+**/.pytest_cache
+.venv
+
+# ── 機密。**這幾行是安全邊界，不要為了方便拿掉。**────────────
+.env
+.env.*
+!.env.example
+deploy/caddy/certs
+yunzhi-root-ca.crt
+
+# ── 執行期資料。可能有好幾 GB，而且映像裡一個都用不到。──────
+# data/models  嵌入模型與字形對照快取
+# data/backups 加密備份（含全體學生個資）
+data
+.rollback-state*
+
+# ── 版控與本機雜物 ──────────────────────────────────────────
+.git
+.gitignore
+*.log
+
+# ── 著作權素材。真實講義與題本樣本不進版控，也不該進映像。──
+samples
+
+# ── 只給人看的東西 ──────────────────────────────────────────
+docs
+README.md
+component-gallery.html
+component-gallery.png
+ai-verification-report.md

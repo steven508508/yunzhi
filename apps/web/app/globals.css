@@ -52,12 +52,16 @@
   /* ── 字型 ─────────────────────────────────────────────────
      介面用黑體、題目內文用宋體。這個分工不是裝飾——
      它讓「這是系統的話」與「這是考卷的內容」一眼可分。 */
-  --font-ui:   "Noto Sans TC", "PingFang TC", "Microsoft JhengHei",
+  --font-ui:   "PingFang TC", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC",
                -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-doc:  "Noto Serif TC", "Songti TC", "SimSun", "MingLiU", serif;
+  /* Noto Serif TC 在台灣的 Windows 上不存在，而它是「校樣」風格的主角。
+   把三大平台實際裝得到的宋體排前面：macOS 的宋體台、
+   Windows 的新細明體、Linux 的 Noto Serif CJK。 */
+  --font-doc:  "Songti TC", "PMingLiU", "MingLiU", "Noto Serif CJK TC",
+               "Noto Serif TC", serif;
   --font-hand: "Xingkai TC", "Kaiti TC", "KaiTi", "DFKai-SB",
                "Noto Serif TC", serif;
-  --font-num:  "Noto Serif TC", serif;  /* 數字用宋體，與版面一致 */
+  --font-num:  var(--font-doc);  /* 數字用宋體，與版面一致 */
 
   /* ── 尺度 ─────────────────────────────────────────────────
      圓角最大 4px。超過就開始像消費級 App。 */
@@ -98,7 +102,15 @@ input, textarea, select { font: inherit; color: inherit; }
 
 /* ═══ 版面骨架 ═══════════════════════════════════════════════ */
 
-.yz-app    { display: flex; flex-direction: column; height: 100vh; }
+/* 外殼：導覽列固定在上，內容區自己捲。
+   導覽列是全站共用的（見 components/Nav.tsx），所以高度由它佔掉，
+   內容區只拿剩下的——這也是 .yz-app 從 100vh 改成 100% 的原因：
+   仍然是 100vh 的話，畫面會比視窗高出一整條導覽列，
+   而校對介面那種三欄滿版的頁面會整頁跟著捲。 */
+.yz-shell      { display: flex; flex-direction: column; height: 100vh; }
+.yz-shell__main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+.yz-app    { display: flex; flex-direction: column; height: 100%; }
 
 .yz-head {
   flex: 0 0 auto;
@@ -568,3 +580,79 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
 
 .yz-muted { color: var(--ink-3); font-size: 11.5px; margin-left: 4px; }
 .yz-warn  { color: #B76E00; }
+
+/* ═══ 頂部導覽 ═══════════════════════════════════════════════
+   一條線、幾個字，沒有底色也沒有圖示。導覽列每一頁都在，
+   所以它多佔的每一分視覺重量都要乘以「所有頁面」。
+
+   目前所在用下方一條實線標示——與知識點頁的科目切換同一個手法，
+   而且不是只有顏色：粗細與線條，色盲的人也讀得到（WCAG 1.4.1）。 */
+
+.yz-nav {
+  flex: 0 0 auto;
+  display: flex; align-items: baseline; gap: 20px;
+  padding: 10px 22px 8px;
+  border-bottom: 1px solid var(--ink);
+  font-size: 12.5px;
+}
+.yz-nav__brand {
+  font-family: var(--font-doc); font-size: 15px; font-weight: 600;
+  letter-spacing: .04em; text-decoration: none;
+}
+.yz-nav__links { display: flex; gap: 17px; align-items: baseline; list-style: none; }
+.yz-nav__link {
+  color: var(--ink-2); text-decoration: none;
+  padding-bottom: 3px; border-bottom: 2px solid transparent;
+}
+.yz-nav__link:hover { color: var(--ink); }
+.yz-nav__link[aria-current="page"] {
+  color: var(--ink); font-weight: 600; border-bottom-color: var(--ink);
+}
+
+.yz-nav__right {
+  margin-left: auto;
+  display: flex; gap: 14px; align-items: baseline;
+  font-size: 12px; color: var(--ink-2);
+}
+.yz-nav__role { color: var(--ink-3); margin-left: 6px; }
+
+/* 登出仍然用 Button 元件（送出中要停用、要有 aria-busy），
+   只是在導覽列裡不該長成一個方框。 */
+.yz-nav__out {
+  border-color: transparent; padding: 0;
+  font-family: var(--font-ui); font-size: 12px; color: var(--ink-2);
+}
+.yz-nav__out:hover { background: none; color: var(--ink); text-decoration: underline; }
+
+@media (max-width: 620px) {
+  .yz-nav { flex-wrap: wrap; gap: 10px 16px; }
+  .yz-nav__right { width: 100%; margin-left: 0; }
+}
+@media print { .yz-nav { display: none; } }
+
+/* ═══ 首頁的待辦 ═════════════════════════════════════════════
+   一行一件事：數字、說明、去哪裡。不用磚塊狀的統計卡——
+   那會把「有三份題本卡著沒校完」與「題庫有 1200 題」畫成
+   一樣大，而前者要今天處理，後者只是背景資訊。 */
+
+.yz-todo { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+.yz-todo__item {
+  display: grid; grid-template-columns: 66px 1fr auto;
+  gap: 14px; align-items: baseline;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-todo__n {
+  font-family: var(--font-num); font-size: 19px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* 兩者都是 block：說明要自己成一行，而 inline 元素的 margin-top 不生效。 */
+.yz-todo__what { display: block; font-size: 13px; }
+.yz-todo__why  { display: block; font-size: 11.5px; line-height: 1.7; color: var(--ink-3); margin-top: 2px; }
+/* 需要動手的那幾列才上硃砂色。全部都紅等於全部都不紅。 */
+.yz-todo__item--act .yz-todo__n { color: var(--mark); }
+
+@media (max-width: 620px) {
+  .yz-todo__item { grid-template-columns: 52px 1fr; }
+  .yz-todo__item > :last-child { grid-column: 2; }
+}

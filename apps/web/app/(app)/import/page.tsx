@@ -1,5 +1,6 @@
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
+import { Denied } from '@/components/Feedback';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import { STATUS_LABELS } from '@/lib/importStatus';
@@ -8,6 +9,16 @@ export const dynamic = 'force-dynamic';
 
 export default async function ImportListPage() {
   return scopedPage(async (user) => {
+
+  // 藏起連結不等於擋住。匯入紀錄裡有題本檔名與權利聲明，
+  // 那是老師與行政的東西，不是學生該看的。
+  if (!mayUse(user.systemRole, '/import')) {
+    return (
+      <main className="yz-panel">
+        <Denied what="題本匯入" why="匯入是老師建立題庫的流程。" />
+      </main>
+    );
+  }
 
   const jobs = await prisma.importJob.findMany({
     where: { tenantId: user.tenantId },
@@ -18,13 +29,11 @@ export default async function ImportListPage() {
 
   return (
     <div className="yz-app">
+      {/* 姓名、登出、跨區連結都在共用導覽列上了，這裡只留這一頁自己的動作。 */}
       <header className="yz-head">
         <span className="yz-head__title">題本匯入</span>
-        <span className="yz-head__sub">{user.displayName}</span>
         <span className="yz-head__right">
           <Link href="/import/new">匯入題本</Link>
-          <Link href="/bank">題庫</Link>
-          <form action="/api/auth/logout" method="post"><button type="submit">登出</button></form>
         </span>
       </header>
 

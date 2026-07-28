@@ -1,0 +1,16 @@
+# AI 服務映像的建置脈絡排除清單。
+#
+# .dockerignore 是**跟著 context 走的**：根目錄那一份管不到這裡，
+# 因為 compose 給 ai 的 context 是 ./apps/ai。
+#
+# 這個脈絡本來就小，重點不在體積而在快取：Dockerfile 是
+# `COPY . .`，__pycache__ 與 .pytest_cache 每跑一次測試就變，
+# 於是每次建置都要從 pip install 之後的那一層整段重做。
+#
+# tests/ 刻意**不排除**：docker 模式的機器上沒有 python 環境，
+# 出事時只能進容器裡跑 tests/ 重現。
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.venv

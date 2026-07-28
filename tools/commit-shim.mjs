@@ -130,7 +130,9 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
           nationalCorrectRate: c.nationalCorrectRate,
           nationalSampleNote: c.sourceExam ? `原稿標示：${c.sourceExam}` : null,
           difficulty: c.nationalCorrectRate == null ? undefined : 1 - c.nationalCorrectRate,
-          status: 'DRAFT',
+          // 與 lib/commit.ts 同步：DRAFT 的題目永遠不會出現在題庫頁，
+          // 而全 repo 沒有任何一行會把它改成別的狀態。
+          status: 'PENDING_REVIEW',
           createdBy: userId,
         },
       });

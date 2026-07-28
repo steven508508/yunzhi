@@ -15,6 +15,25 @@
 
 BEGIN;
 
+-- ── 租戶脈絡 ────────────────────────────────────────────────
+--
+-- **這一行不是選配。** 20260736000000_tenant_isolation_rls 之後，
+-- 每一張表都 ENABLE ＋ FORCE row level security，政策比對的是
+-- `current_setting('app.tenant_id', true)`。psql 直接連進來時那個值
+-- 是 NULL，於是：
+--
+--   INSERT  → 撞 WITH CHECK，整個交易 abort，後面每一句都是
+--             「current transaction is aborted」，COMMIT 變 ROLLBACK
+--   UPDATE  → 比對不到任何一列，**0 rows 而且不報錯**
+--             （檔案最後那句 confirmedCount 就是這一種）
+--
+-- 兩種結果都是「跑完了，資料庫裡什麼都沒有」，而第二種連錯誤訊息
+-- 都沒有。設成本檔要寫入的那個租戶而不是開跨租戶模式：種子資料
+-- 本來就只屬於 demo-tenant，不需要繞過隔離，只需要說明自己是誰。
+--
+-- SET LOCAL 只在這個交易內有效，不會留在連線上影響下一個人。
+SET LOCAL app.tenant_id = 'demo-tenant';
+
 -- ── 租戶與科目 ──────────────────────────────────────────────
 INSERT INTO tenants (id, name, "updatedAt")
 VALUES ('demo-tenant', '雲端智學', now())
@@ -69,14 +88,33 @@ INSERT INTO kp_prerequisites ("kpId", "prereqKpId", strength) VALUES
 ON CONFLICT DO NOTHING;
 
 -- ── 匯入工作（待校對狀態）────────────────────────────────────
+-- 這一段撞過兩個約束，兩個都值得記下來：
+--
+--   · `rightsBasis` 原本寫的是一整句「著作權法第 9 條：…」，但那一欄
+--     受 `import_jobs_rights_basis_valid` 約束，只收
+--     OWNED / LICENSED / OFFICIAL_PUBLIC / UNVERIFIED 四個值。
+--     法條的說明屬於 `rightsNote`，不是權利基礎本身。
+--   · `rightsDeclaredBy` 被 `import_jobs_rights_declared` 要求非空。
+--     「誰聲明的」是責任歸屬，沒有它這筆匯入在法遵上說不出話。
+--
+-- 兩個都是 ERROR 不是警告，而整份種子是一個交易，所以任何一個撞上
+-- 就是**整份 ROLLBACK、一列都沒進去**。
+INSERT INTO users (id, "tenantId", username, "displayName", "systemRole", status, "updatedAt")
+VALUES ('user-demo-admin', 'demo-tenant', 'admin', '示範管理員', 'SCHOOL_ADMIN', 'ACTIVE', now())
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO import_jobs (
   id, "tenantId", "subjectId", title, status, "sourceType", "licenseScope",
-  "rightsBasis", "totalPages", "totalCandidates", "updatedAt"
+  "rightsBasis", "rightsNote", "rightsDeclaredBy", "rightsDeclaredName",
+  "totalPages", "totalCandidates", "updatedAt"
 ) VALUES (
   'job-demo-115', 'demo-tenant', 'subj-math-a',
   '115 學年度學科能力測驗　數學A考科', 'READY_FOR_REVIEW',
   'OFFICIAL_PAST', 'PUBLIC',
-  '著作權法第 9 條：依法令舉行之各類考試試題不受著作權保護', 12, 5, now()
+  'OFFICIAL_PUBLIC',
+  '著作權法第 9 條：依法令舉行之各類考試試題不受著作權保護',
+  'user-demo-admin', '示範管理員',
+  12, 5, now()
 ) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO import_files (id, "jobId", role, "fileName", "mimeType", "sizeBytes", "storageKey", "pageCount", "qualityScore")

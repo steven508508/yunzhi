@@ -1,5 +1,6 @@
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
+import { Denied } from '@/components/Feedback';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 
@@ -12,6 +13,16 @@ export default async function BankPage({
 }) {
   const sp = await searchParams;
   return scopedPage(async (user) => {
+
+  // 導覽列不畫這個連結給學生，但**把連結藏起來不等於擋住**——
+  // 學生把網址列改成 /bank 就會看到整個題庫。同一份規則要在兩邊生效。
+  if (!mayUse(user.systemRole, '/bank')) {
+    return (
+      <main className="yz-panel">
+        <Denied what="題庫" why="題庫是老師的工作區，學生看到的會是自己的任務與成績。" />
+      </main>
+    );
+  }
 
   const subjects = await prisma.subject.findMany({
     where: { tenantId: user.tenantId, active: true },
@@ -35,13 +46,13 @@ export default async function BankPage({
 
   return (
     <div className="yz-app">
+      {/* 跨區的連結與登出移到共用導覽列（components/Nav.tsx）。
+          原本那個登出是 <form> 直接送到 API，成功後畫面會停在
+          `{"ok":true}` 這行 JSON 上——cookie 清掉了，但使用者看到的
+          是一頁亂碼。 */}
       <header className="yz-head">
         <span className="yz-head__title">題庫</span>
         <span className="yz-head__sub">{questions.length} 題</span>
-        <span className="yz-head__right">
-          <Link href="/import">匯入</Link>
-          <form action="/api/auth/logout" method="post"><button type="submit">登出</button></form>
-        </span>
       </header>
 
       <div style={{ padding: '9px 22px', borderBottom: '1px solid var(--rule)', display: 'flex', gap: 14, fontSize: 12 }}>

@@ -2,8 +2,9 @@ import Link from 'next/link';
 
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
+import { mayUse } from '@/lib/nav';
 import { inspectGraph } from '@/lib/knowledge';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 import KpEditor from './KpEditor';
 
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,17 @@ export default async function KnowledgePage({
   searchParams: Promise<{ subject?: string }>;
 }) {
   const sp = await searchParams;
-  return scopedPage(async () => {
+  return scopedPage(async (user) => {
+    // 知識點圖譜是能力分析的座標系，改它會影響整科所有學生的分析結果——
+    // 學生與家長連讀都不該讀到（那等於一份教學進度表）。
+    if (!mayUse(user.systemRole, '/knowledge')) {
+      return (
+        <main className="yz-panel">
+          <Denied what="知識點圖譜" why="這是老師規劃教學與能力分析用的結構。" />
+        </main>
+      );
+    }
+
     const subjects = await prisma.subject.findMany({
       where: { active: true },
       orderBy: { order: 'asc' },
