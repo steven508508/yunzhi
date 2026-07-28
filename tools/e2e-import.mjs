@@ -285,11 +285,27 @@ async function main() {
     assert.ok(codes.includes('mock_provider'), `理由碼：${codes.join(', ')}`);
   });
 
-  await test('自答結果寫回候選題', async () => {
+  await test('原稿印了答案的題目不走 AI 自答', async () => {
+    // 整頁閱讀會把教用版印出來的答案一起讀回來，那一題就不必再花錢
+    // 自答——而且原稿印的比推導出來的可靠。自答一題要投票三到五次，
+    // 這是整條管線最貴的一段。
     const c = await prisma.importCandidate.findFirst({ where: { jobId: job.id } });
-    assert.equal(c.answerOrigin, 'AI_SOLVED');
-    assert.ok(c.selfConsistency !== null);
-    assert.ok(Array.isArray(c.solveTrace), '推導過程應保留給老師對照');
+    assert.equal(c.answerOrigin, 'SOURCE_PRINTED');
+    assert.ok(c.answerKeys.length > 0, '原稿的答案沒有被收下來');
+    assert.equal(c.selfConsistency, null, '不該為它跑自答');
+  });
+
+  await test('原稿沒印答案時才走 AI 自答', async () => {
+    const c = await prisma.importCandidate.findFirst({ where: { jobId: job.id } });
+    await prisma.importCandidate.update({
+      where: { id: c.id },
+      data: { answerOrigin: null, answerKeys: [] },
+    });
+    await runImport(prisma, job.id, { fromStage: 'SOLVING' });
+    const after = await prisma.importCandidate.findFirst({ where: { id: c.id } });
+    assert.equal(after.answerOrigin, 'AI_SOLVED');
+    assert.ok(after.selfConsistency !== null);
+    assert.ok(Array.isArray(after.solveTrace), '推導過程應保留給老師對照');
   });
 
   await test('沒有知識點時，標註階段略過而非失敗', async () => {

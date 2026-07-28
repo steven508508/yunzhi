@@ -33,6 +33,7 @@ from pipeline import segment as seg
 from pipeline import stages
 from pipeline import figures as figmod
 from pipeline import glyphmap
+from pipeline import reading
 from pipeline.normalize import Prepared, normalize, prepare
 from pipeline.prompts import PROMPT_VERSION
 from pipeline.schemas import (
@@ -41,6 +42,7 @@ from pipeline.schemas import (
     BlockType,
     LayoutBlock,
     QuestionType,
+    ReadResult,
     SegmentResult,
     StructuredQuestion,
 )
@@ -390,6 +392,71 @@ class SegmentResponse(BaseModel):
 _VISION_CONCURRENCY = 3
 
 
+# ─────────────────────────────────────────────────────────────────
+# 階段二之一：整頁閱讀（模型為主）
+#
+# 取代「規則切分 → 模型結構化」兩段。規則路徑仍然照跑，但改當
+# 交叉驗證——理由與設計見 pipeline/reading.py 的檔頭。
+# ─────────────────────────────────────────────────────────────────
+
+
+class ReadPageIn(BaseModel):
+    index: int
+    storage_key: str
+    #: 原生 PDF 才有。只當字元比對用，衝突時以影像為準。
+    text_blocks: list[dict] = Field(default_factory=list)
+
+
+class ReadRequest(BaseModel):
+    pages: list[ReadPageIn] = Field(min_length=1)
+    only_pages: list[int] = Field(default_factory=list)
+    #: 交叉驗證用的規則切分結果。呼叫端把 /segment 的 blocks 傳進來，
+    #: 沒傳就只做閱讀不做比對。
+    rule_blocks: list[dict] = Field(default_factory=list)
+    tier: str = "MID"
+
+
+class ReadQuestionOut(BaseModel):
+    page: int
+    question_no: str | None = None
+    sub_label: str | None = None
+    group_key: str | None = None
+    label: str | None = None
+    type: str
+    content: str
+    options: list[dict] = Field(default_factory=list)
+    answer_slots: list[dict] = Field(default_factory=list)
+    printed_answer_keys: list[int] = Field(default_factory=list)
+    printed_answer_text: str | None = None
+    explanation: str | None = None
+    score: float | None = None
+    has_figure: bool = False
+    figure_alt: str | None = None
+    source_bbox: dict | None = None
+    source_exam: str | None = None
+    national_correct_rate: float | None = None
+    continues_to_next: bool = False
+    confidence: float = 0.0
+    confidence_reasons: list[dict] = Field(default_factory=list)
+
+
+class ReadResponse(BaseModel):
+    method: dict[int, str]
+    genre: str = "unknown"
+    questions: list[ReadQuestionOut] = Field(default_factory=list)
+    blocks: list[LayoutBlock] = Field(default_factory=list)
+    #: 講義的觀念頁。不是題目，但智慧老師要用它補前置觀念。
+    materials: list[dict] = Field(default_factory=list)
+    figures: dict[int, list[dict]] = Field(default_factory=dict)
+    #: 模型自己說不確定的地方，逐頁彙整。
+    unsure: list[str] = Field(default_factory=list)
+    #: 與規則路徑不一致的地方。會變成候選題上的存疑理由。
+    disagreements: list[dict] = Field(default_factory=list)
+    failed_pages: list[str] = Field(default_factory=list)
+    usage: Usage = Field(default_factory=Usage)
+    elapsed_ms: int = 0
+
+
 
 # ─────────────────────────────────────────────────────────────────
 # 其餘階段的請求／回應模型
@@ -625,6 +692,152 @@ def build_router(get_provider) -> APIRouter:
         return await _normalize_impl(req, get_provider)
 
     # ── 切分 ────────────────────────────────────────────────────
+
+    # ── 整頁閱讀 ────────────────────────────────────────────────
+
+    @r.post("/read", response_model=ReadResponse)
+    async def _read(req: ReadRequest) -> ReadResponse:  # noqa: ANN202
+        t0 = time.perf_counter()
+        provider_obj = _provider_or_503(get_provider)
+
+        wanted = set(req.only_pages) if req.only_pages else None
+        pages = [p for p in req.pages if wanted is None or p.index in wanted]
+        if not pages:
+            raise HTTPException(400, detail="沒有要判讀的頁面")
+
+        by_index = {p.index: p for p in req.pages}
+        results: dict[int, ReadResult] = {}
+        method: dict[int, str] = {}
+        failed: list[str] = []
+        usage = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+
+        sem = asyncio.Semaphore(_VISION_CONCURRENCY)
+
+        async def one(p: ReadPageIn) -> None:
+            nxt = by_index.get(p.index + 1)
+            try:
+                async with sem:
+                    image = storage.get_bytes(p.storage_key)
+                    nxt_image = (
+                        storage.get_bytes(nxt.storage_key)
+                        if nxt and nxt.storage_key
+                        else None
+                    )
+                    out, u = await reading.read_page(
+                        provider_obj,
+                        page_index=p.index,
+                        image=image,
+                        next_image=nxt_image,
+                        text_blocks=p.text_blocks,
+                        tier=req.tier,
+                    )
+                results[p.index] = out
+                method[p.index] = "model"
+                usage["calls"] += 1
+                usage["input_tokens"] += u.get("input_tokens", 0)
+                usage["output_tokens"] += u.get("output_tokens", 0)
+            except Exception as e:  # noqa: BLE001
+                # 單頁失敗不該讓整份失敗。校對介面會顯示「第 N 頁
+                # 未能判讀」，老師可以只重跑那一頁或手動補。
+                log.error("第 %d 頁判讀失敗：%s", p.index, e)
+                results[p.index] = ReadResult()
+                method[p.index] = f"failed: {type(e).__name__}"
+                failed.append(f"第 {p.index} 頁（{type(e).__name__}）")
+
+        await asyncio.gather(*(one(p) for p in pages))
+
+        ordered = [results[p.index] for p in sorted(pages, key=lambda x: x.index)]
+
+        questions: list[ReadQuestionOut] = []
+        blocks: list[LayoutBlock] = []
+        materials: list[dict] = []
+        unsure: list[str] = []
+        genres: list[str] = []
+
+        for p in sorted(pages, key=lambda x: x.index):
+            res = results[p.index]
+            blocks.extend(res.blocks)
+            unsure.extend(f"第 {p.index} 頁：{u}" for u in res.unsure)
+            if res.genre != "unknown":
+                genres.append(res.genre)
+            for m in res.materials:
+                materials.append({
+                    "page": p.index,
+                    "title": m.title,
+                    "body": m.body,
+                    "bbox": m.bbox.model_dump() if m.bbox else None,
+                })
+            for q in res.questions:
+                questions.append(
+                    ReadQuestionOut(
+                        page=p.index,
+                        question_no=q.question_no,
+                        sub_label=q.sub_label,
+                        group_key=q.group_key,
+                        label=q.label,
+                        type=q.type.value,
+                        content=q.content,
+                        options=[o.model_dump() for o in q.options],
+                        answer_slots=[s.model_dump() for s in q.answer_slots],
+                        printed_answer_keys=q.printed_answer_keys,
+                        printed_answer_text=q.printed_answer_text,
+                        explanation=q.explanation,
+                        score=q.score,
+                        has_figure=q.has_figure,
+                        figure_alt=q.figure_alt,
+                        source_bbox=q.source_bbox.model_dump() if q.source_bbox else None,
+                        source_exam=q.source_exam,
+                        national_correct_rate=q.national_correct_rate,
+                        continues_to_next=q.continues_to_next,
+                        confidence=q.confidence,
+                        confidence_reasons=[r_.model_dump() for r_ in q.confidence_reasons],
+                    )
+                )
+
+        # 模型回報的 FIGURE 區塊裁成實際的圖檔
+        vision_figs = _crop_vision_figures(
+            ordered,
+            {i: SegmentPage(index=p.index, storage_key=p.storage_key)
+             for i, p in by_index.items()},
+            {i: "vision" for i in method},
+        )
+
+        # ── 交叉驗證 ────────────────────────────────────────────
+        disagreements: list[dict] = []
+        if req.rule_blocks:
+            try:
+                rule = [LayoutBlock.model_validate(b) for b in req.rule_blocks]
+                all_q = [q for res in ordered for q in res.questions]
+                disagreements = reading.cross_check(all_q, rule)
+            except Exception as e:  # noqa: BLE001
+                # 比對本身壞掉不該讓整份匯入失敗——它是第二意見，
+                # 不是主線。但要留下痕跡，否則沒有人會發現比對沒跑。
+                log.warning("交叉驗證失敗：%s", e)
+                disagreements = [{
+                    "scope": "job", "code": "crosscheck_failed", "severity": "info",
+                    "detail": f"規則交叉驗證未能執行（{type(e).__name__}），本次只有模型的結果。",
+                }]
+
+        return ReadResponse(
+            method=method,
+            genre=max(set(genres), key=genres.count) if genres else "unknown",
+            questions=questions,
+            blocks=blocks,
+            materials=materials,
+            figures=vision_figs,
+            unsure=unsure,
+            disagreements=disagreements,
+            failed_pages=failed,
+            usage=Usage(
+                calls=usage["calls"],
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                provider=provider_obj.name,
+                model=provider_obj.model_for(req.tier),
+                prompt_version=PROMPT_VERSION,
+            ),
+            elapsed_ms=int((time.perf_counter() - t0) * 1000),
+        )
 
     @r.post("/segment", response_model=SegmentResponse)
     async def _segment(req: SegmentRequest) -> SegmentResponse:  # noqa: ANN202

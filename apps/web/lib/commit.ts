@@ -25,6 +25,21 @@ import type { Prisma } from '@prisma/client';
 /** 允許原文收錄解析的權利基礎。其餘一律走 AI 改寫。 */
 const VERBATIM_OK = new Set(['OWNED', 'LICENSED', 'OFFICIAL_PUBLIC']);
 
+/**
+ * 原文收錄的解析可以散布到哪裡。
+ *
+ * 題目與解析的著作權地位不同，所以散布範圍不能共用一個值：
+ * 歷屆**試題**依著作權法第 9 條不受保護，可以 PUBLIC；同一份講義
+ * 裡的**詳解**是出版社寫的，受保護，不可以。
+ *
+ * 資料庫有 CHECK 擋著（explanations_verbatim_not_public），但擋下來
+ * 的形式是整題入庫失敗——與其讓老師看到一個看不懂的約束違反訊息，
+ * 不如在這裡就把範圍降到合法的最大值，並在 sourceRef 旁留下痕跡。
+ */
+function explanationScope(questionScope: string): never {
+  return (questionScope === 'PUBLIC' ? 'TENANT_NO_EXPORT' : questionScope) as never;
+}
+
 export type CommitResult = {
   committed: number;
   skipped: number;
@@ -234,7 +249,13 @@ export async function commitJob(
                 questionId: question.id,
                 origin: 'VERBATIM_IMPORT',
                 rightsBasis: (job.rightsBasis ?? 'OWNED') as never,
-                licenseScope: job.licenseScope,
+                // **解析的散布範圍不能直接沿用題目的。**
+                //
+                // 一份「歷屆試題」的題目可以是 PUBLIC——試題依著作權法
+                // 第 9 條不受保護。但同一份講義裡的**詳解是出版社寫的**，
+                // 它受保護。照抄 job.licenseScope 的結果是把一段受保護的
+                // 內容標成公開，而那正是這整套權利模型要防的事。
+                licenseScope: explanationScope(job.licenseScope),
                 displayMode: 'FULL',
                 isPrimary: true,
                 layers: { steps: [c.explanationRaw.trim()] },

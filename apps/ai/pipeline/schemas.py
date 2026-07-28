@@ -194,6 +194,82 @@ class ExtractResult(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────
+# 整頁閱讀（模型為主的抽取）
+#
+# 原本的流程是「切分（版面）→ 結構化（內容）」兩段，切分在原生 PDF
+# 上走純程式的規則。那條路的問題不是不準，是**每加一種體例就要打
+# 一批新規則，而新規則會打壞舊的**：加英文的作答括號支援時，
+# `(A) 4.5 公尺` 被判成題號，於是憑空生出標準答案。
+#
+# 改成把整頁的影像交給模型讀，一次產出版面區塊與題目。規則路徑
+# 保留下來當**交叉驗證**——兩邊不一致的題目自動標成存疑，讓校對者
+# 優先看那幾題。規則是純程式，多跑一次的成本是零。
+# ─────────────────────────────────────────────────────────────────
+
+
+class ReadQuestion(StructuredQuestion):
+    """
+    模型從整頁讀出來的一題。
+
+    比 `StructuredQuestion` 多了三類「原稿上看得到」的東西。分開放
+    而不是併進題幹，是因為它們的**著作權地位不同**：試題依著作權法
+    第 9 條不受保護，詳解受保護（文件 16 §3）。
+    """
+
+    #: 原稿印出來的答案（教用版）。選擇題填選項序號，1 起算。
+    #: **只有原稿真的印了才填。** 推論出來的答案走自答階段，
+    #: 那條路有投票與一致率，這裡沒有。
+    printed_answer_keys: list[int] = Field(default_factory=list)
+    printed_answer_text: str | None = None
+    #: 原稿的詳解原文。受著作權保護，與題幹分開存、分開判斷權利。
+    explanation: str | None = None
+    #: 題幹延續到下一頁。跨頁題目靠這個合併。
+    continues_to_next: bool = False
+    #: 講義的題目標頭：「範例 3」「類題 1」「Quiz Time」
+    label: str | None = None
+
+    @model_validator(mode="after")
+    def _printed_keys_in_range(self) -> "ReadQuestion":
+        # 答案指向不存在的選項是最危險的一種錯：題目看起來完全正常，
+        # 只是每個答對的學生都會被判錯。這裡就擋掉。
+        if self.printed_answer_keys and self.options:
+            n = len(self.options)
+            bad = [k for k in self.printed_answer_keys if k < 1 or k > n]
+            if bad:
+                raise ValueError(
+                    f"印出來的答案 {bad} 超出選項範圍（本題共 {n} 個選項）"
+                )
+        return self
+
+
+class ReadResult(BaseModel):
+    """一次呼叫（一頁，含次頁作為上下文）讀出來的東西。"""
+
+    #: 版面區塊。供校對介面的左右連動與附圖裁切；bbox 是頁面比例。
+    blocks: list[LayoutBlock] = Field(default_factory=list)
+    #: 這一頁**開始**的題目。跨頁題目在起始頁完整輸出，不要重複。
+    questions: list[ReadQuestion] = Field(default_factory=list)
+    #: 講義的觀念頁與教學說明。不是題目，但智慧老師要用它來
+    #: 「退回去補前置觀念」——同一份 PDF 裡本來就有，丟掉可惜。
+    materials: list["ReadMaterial"] = Field(default_factory=list)
+    genre: Literal["exam", "worksheet", "material", "unknown"] = "unknown"
+    #: 模型自己說不確定的地方。這會直接變成校對介面的提示，
+    #: 所以要具體到「校對者知道要看哪裡」。
+    unsure: list[str] = Field(default_factory=list)
+
+
+class ReadMaterial(BaseModel):
+    """講義的觀念頁：文法表格、公式整理、例句對照。"""
+
+    title: str
+    body: str
+    bbox: BBox | None = None
+
+
+ReadResult.model_rebuild()
+
+
+# ─────────────────────────────────────────────────────────────────
 # 階段四：答案處理
 # ─────────────────────────────────────────────────────────────────
 

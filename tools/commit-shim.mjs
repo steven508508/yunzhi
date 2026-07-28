@@ -17,6 +17,9 @@ import { normalizeOptions } from '../apps/web/lib/questionShape.mjs';
 
 const VERBATIM_OK = new Set(['OWNED', 'LICENSED', 'OFFICIAL_PUBLIC']);
 
+/** 見 commit.ts 的 explanationScope：題目可以公開，詳解不一定。 */
+const explanationScope = (s) => (s === 'PUBLIC' ? 'TENANT_NO_EXPORT' : s);
+
 export async function commitJob(prisma, jobId, tenantId, userId) {
   const job = await prisma.importJob.findFirst({ where: { id: jobId, tenantId } });
   if (!job) throw new Error('找不到匯入工作');
@@ -125,7 +128,7 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
               tenantId, questionId: question.id,
               origin: 'VERBATIM_IMPORT',
               rightsBasis: job.rightsBasis ?? 'OWNED',
-              licenseScope: job.licenseScope,
+              licenseScope: explanationScope(job.licenseScope),
               displayMode: 'FULL', isPrimary: true,
               layers: { steps: [c.explanationRaw.trim()] },
               rawBody: c.explanationRaw,

@@ -281,22 +281,49 @@ async function stageSegment(ctx) {
     throw new PermanentError('沒有可切分的頁面。請確認上傳的檔案標記為題本。', 'SEGMENTING');
   }
 
-  const out = await callAI(
-    '/v1/import/segment',
-    {
-      pages: pages.map((p) => ({
-        index: p.index,
-        storage_key: p.storageKey,
-        text_blocks: p.blocks?.textBlocks ?? [],
-        figures: p.figures ?? [],
-      })),
-    },
-    'SEGMENTING',
-  );
+  const pageInput = pages.map((p) => ({
+    index: p.index,
+    storage_key: p.storageKey,
+    text_blocks: p.blocks?.textBlocks ?? [],
+    figures: p.figures ?? [],
+  }));
 
-  // 每頁的切分結果寫回，讓校對介面能做左右連動。
+  // ── 規則路徑先跑 ────────────────────────────────────────────
+  //
+  // 它是純程式、零成本、零延遲，而且它做的事現在有兩個用途：
+  //   1. 交叉驗證模型的抽取（兩邊不一致的題目標成存疑）
+  //   2. 模型不可用時的降級路徑
+  //
+  // 原生 PDF 上它會切出完整的版面；掃描件上它沒有文字層可用，
+  // 會回一個空殼——那時候就沒有第二意見，品質說明要講明。
+  const rules = await callAI('/v1/import/segment', { pages: pageInput }, 'SEGMENTING');
+
+  // ── 模型讀整頁 ──────────────────────────────────────────────
+  //
+  // 這是主線。規則那條路每加一種體例就要打一批新規則，而新規則
+  // 會打壞舊的——加英文的作答括號支援時，`(A) 4.5 公尺` 被判成
+  // 題號並憑空生出標準答案。五科、四家出版社、教用版與學生版，
+  // 那是打不完的組合。模型讀整頁看到的是人看到的東西。
+  let read = null;
+  let readError = null;
+  try {
+    read = await callAI(
+      '/v1/import/read',
+      { pages: pageInput, rule_blocks: rules.blocks ?? [] },
+      'SEGMENTING',
+    );
+  } catch (e) {
+    // **模型讀不到不該讓整份匯入失敗。** 規則路徑仍然產得出東西，
+    // 只是品質較差且體例支援有限——降級而不是停擺，並且要讓
+    // 老師知道這一份是怎麼來的。
+    readError = e.message;
+    console.warn(`[import] ${job.id} 整頁判讀失敗，降級為規則切分：${e.message}`);
+  }
+
+  // 每頁的版面寫回，讓校對介面能做左右連動。模型的區塊優先——
+  // 它的分類比規則準；規則的留著當備份，兩者都在同一筆 JSON 裡。
   const byPage = new Map();
-  for (const b of out.blocks) {
+  for (const b of read?.blocks ?? rules.blocks ?? []) {
     const arr = byPage.get(b.bbox.page) ?? [];
     arr.push(b);
     byPage.set(b.bbox.page, arr);
@@ -307,21 +334,143 @@ async function stageSegment(ctx) {
     await prisma.importPage.update({
       where: { id: p.id },
       data: {
-        blocks: { ...(p.blocks ?? {}), layout: blocks, method: out.method[String(p.index)] },
+        blocks: {
+          ...(p.blocks ?? {}),
+          layout: blocks,
+          method: read ? read.method?.[String(p.index)] : rules.method?.[String(p.index)],
+        },
       },
     });
   }
 
-  const failed = Object.entries(out.method).filter(([, m]) => m.startsWith('failed'));
+  const failed = Object.entries(rules.method ?? {}).filter(([, m]) => m.startsWith('failed'));
+  const readFailed = read?.failed_pages ?? [];
+
   return {
-    sections: out.sections,
-    exercises: out.exercises ?? [],
-    genre: out.genre ?? 'unknown',
-    answerInk: out.answer_ink ?? null,
-    groupRanges: out.group_ranges,
-    visionPages: out.vision_pages,
-    failedPages: failed.map(([page, m]) => `第 ${page} 頁（${m}）`),
-    usage: out.usage,
+    // 模型讀出來的題目。有它的話第三階段直接用，不必再呼叫一次
+    // 結構化——模型看版面與看內容是同一趟，本來就該一起做完。
+    readQuestions: read?.questions ?? null,
+    materials: read?.materials ?? [],
+    unsure: read?.unsure ?? [],
+    disagreements: read?.disagreements ?? [],
+    readFigures: read?.figures ?? {},
+    source: read ? 'model' : 'rules',
+    readError,
+    // 規則路徑的產出。降級時第三階段吃這個。
+    sections: rules.sections,
+    exercises: rules.exercises ?? [],
+    genre: read?.genre && read.genre !== 'unknown' ? read.genre : (rules.genre ?? 'unknown'),
+    answerInk: rules.answer_ink ?? null,
+    groupRanges: rules.group_ranges,
+    visionPages: rules.vision_pages,
+    failedPages: [...failed.map(([page, m]) => `第 ${page} 頁（${m}）`), ...readFailed],
+    usage: mergeUsage(rules.usage, read?.usage),
+  };
+}
+
+/**
+ * 把圖分派給題目。
+ *
+ * 判準是**垂直重疊**而不是距離：講義的圖放在題目右側、與題幹同高，
+ * 用距離的話兩題之間的圖會被分給上一題的最後一行——而那一行常常
+ * 是詳解不是題幹。重疊不到就不分派，讓校對者手動補。
+ * **分錯的圖比沒有圖更容易誤導學生。**
+ */
+function figuresFor(q, byPage) {
+  const box = q.source_bbox;
+  const page = box?.page ?? q.page;
+  const figs = byPage?.[page] ?? byPage?.[String(page)] ?? [];
+  if (!box || figs.length === 0) return null;
+
+  const out = figs.filter((f) => {
+    const b = f.bbox ?? {};
+    return Math.min(box.y1, b.y1 ?? 0) - Math.max(box.y0, b.y0 ?? 0) > 0;
+  });
+  return out.length ? out.map((f) => ({ ...f, page })) : null;
+}
+
+/** 把兩次呼叫的用量加起來。成本要記全，否則帳目對不上。 */
+function mergeUsage(a, b) {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return {
+    input_tokens: (a.input_tokens ?? 0) + (b.input_tokens ?? 0),
+    output_tokens: (a.output_tokens ?? 0) + (b.output_tokens ?? 0),
+    calls: (a.calls ?? 0) + (b.calls ?? 0),
+    estimated: Boolean(a.estimated || b.estimated),
+    provider: b.provider || a.provider,
+    model: b.model || a.model,
+    prompt_version: b.prompt_version || a.prompt_version,
+  };
+}
+
+/**
+ * 把整頁閱讀的結果轉成候選題。
+ *
+ * 不呼叫 AI——模型在上一階段就把版面與內容一起讀完了。
+ *
+ * 交叉驗證的結果掛在**每一題**的存疑理由上而不是只寫在工作層級：
+ * 校對介面是逐題翻的，寫在工作層級的警告只有第一眼會被看到，
+ * 翻到第 30 題時早就忘了。
+ */
+function fromReading(jobId, seg, existing) {
+  const rows = [];
+  const jobIssues = (seg.disagreements ?? []).filter((d) => d.scope === 'job');
+
+  for (const [i, q] of seg.readQuestions.entries()) {
+    const reasons = [...(q.confidence_reasons ?? [])];
+
+    // 模型自己說不確定的地方，挑出提到這一題的
+    for (const u of seg.unsure ?? []) {
+      if (q.question_no && u.includes(`第 ${q.question_no} 題`)) {
+        reasons.push({ code: 'model_unsure', detail: u, severity: 'warn' });
+      }
+    }
+    // 整份的不一致掛到每一題上，讓翻到哪一題都看得到
+    for (const d of jobIssues) {
+      reasons.push({ code: d.code, detail: d.detail, severity: d.severity ?? 'warn' });
+    }
+
+    rows.push({
+      jobId,
+      order: existing + i + 1,
+      questionNo: q.question_no ?? null,
+      label: q.label ?? null,
+      subLabel: q.sub_label ?? null,
+      groupKey: q.group_key ?? null,
+      type: q.type,
+      content: q.content,
+      options: q.options ?? [],
+      answerSlots: q.answer_slots?.length ? q.answer_slots : null,
+      // **只收原稿印出來的答案。** 模型推導出來的答案走自答階段，
+      // 那條路有多次投票與一致率把關；在這裡收下推論值等於繞過它。
+      answerKeys: q.printed_answer_keys ?? [],
+      answerText: q.printed_answer_text ?? null,
+      answerOrigin: (q.printed_answer_keys?.length || q.printed_answer_text)
+        ? 'SOURCE_PRINTED'
+        : null,
+      sourceAnswerRaw: q.printed_answer_text
+        ?? (q.printed_answer_keys?.length ? q.printed_answer_keys.join('、') : null),
+      // 詳解與題幹分開存：試題依著作權法第 9 條不受保護，詳解受保護。
+      explanationRaw: q.explanation || null,
+      assets: figuresFor(q, seg.readFigures),
+      score: q.score ?? null,
+      confidence: q.confidence ?? 0,
+      confidenceReasons: reasons,
+      sourceBbox: q.source_bbox ?? null,
+      sourcePage: q.source_bbox?.page ?? q.page ?? null,
+      sourceExam: q.source_exam ?? null,
+      nationalCorrectRate: q.national_correct_rate ?? null,
+    });
+  }
+
+  return {
+    rows,
+    warnings: [
+      ...(seg.disagreements ?? []).map((d) => d.detail),
+      ...(seg.readError ? [`整頁判讀失敗，本次為規則降級：${seg.readError}`] : []),
+    ],
+    usage: null,
   };
 }
 
@@ -352,8 +501,12 @@ async function stageExtract(ctx) {
   ]);
   const existing = top?.order ?? 0;
 
-  const out =
-    seg.genre === 'worksheet'
+  // 模型已經在上一階段連內容一起讀完了，這裡直接收下——看版面與
+  // 看內容是同一趟，本來就該一起做完。少一次呼叫，也少一次
+  // 「模型看不到版面只看得到文字」造成的誤判。
+  const out = seg.readQuestions
+    ? fromReading(job.id, seg, existing)
+    : seg.genre === 'worksheet'
       ? await extractWorksheet(ctx, seg, existing)
       : await extractExam(ctx, seg, existing);
 

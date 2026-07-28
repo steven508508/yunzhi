@@ -473,6 +473,56 @@ _MOCK_NOTE = "（AI_PROVIDER=mock 產生的假資料，僅供安裝驗證）"
 def _mock_reply(system: str, user: str) -> str:
     s = system or ""
 
+    # 整頁閱讀。要排在「版面分析」之前判斷——兩者的提示詞都提到
+    # 版面，而這一支回的是完整的題目而不只是區塊。
+    if "題本的判讀器" in s:
+        return json.dumps(
+            {
+                "genre": "worksheet",
+                "blocks": [
+                    {
+                        "type": "STEM",
+                        "bbox": {"page": 1, "x0": 0.08, "y0": 0.12, "x1": 0.92, "y1": 0.18},
+                        "text": f"1. 這是 mock 讀出來的題幹。{_MOCK_NOTE}",
+                    },
+                    {
+                        "type": "FIGURE",
+                        "bbox": {"page": 1, "x0": 0.60, "y0": 0.30, "x1": 0.92, "y1": 0.55},
+                        "text": "假的坐標圖",
+                    },
+                ],
+                "questions": [
+                    {
+                        "question_no": "1",
+                        "label": "範例 1",
+                        "type": "SINGLE_CHOICE",
+                        "content": f"這是 mock 讀出來的題幹，不是真的題目。{_MOCK_NOTE}",
+                        "options": [
+                            {"order": 1, "label": "(1)", "content": "假選項一"},
+                            {"order": 2, "label": "(2)", "content": "假選項二"},
+                            {"order": 3, "label": "(3)", "content": "假選項三"},
+                        ],
+                        "printed_answer_keys": [2],
+                        "explanation": f"這是 mock 的假詳解。{_MOCK_NOTE}",
+                        "source_bbox": {"page": 1, "x0": 0.08, "y0": 0.12, "x1": 0.92, "y1": 0.55},
+                        "confidence": 0.35,
+                        "confidence_reasons": [
+                            {
+                                "code": "mock_provider",
+                                "detail": f"AI_PROVIDER=mock，這一題的內容是假的，不可入庫。{_MOCK_NOTE}",
+                                "severity": "error",
+                            }
+                        ],
+                    }
+                ],
+                "materials": [
+                    {"title": f"假的觀念頁{_MOCK_NOTE}", "body": "這裡本來會是講義的文法表格或公式整理。"}
+                ],
+                "unsure": [f"整份都是 mock 產生的，沒有任何內容經過辨識。{_MOCK_NOTE}"],
+            },
+            ensure_ascii=False,
+        )
+
     if "版面分析" in s:
         return json.dumps(
             {
