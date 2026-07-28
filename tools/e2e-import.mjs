@@ -629,6 +629,47 @@ async function main() {
     assert.ok(after.reviewNote?.includes('選項'), `校對者要看得懂：${after.reviewNote}`);
   });
 
+  await test('兩個選項一模一樣的題目不入庫，改標成存疑', async () => {
+    // 物理題：四個選項本來是 $\vec{a}$、$\vec{b}$、$a$、$b$。
+    // 翻拍把向量的箭頭抹掉之後，(1) 與 (3) 變成同一個東西。
+    //
+    // 這比上面那個「答案對不上」更隱蔽：選項數量對、答案是合法的
+    // 序號、校對者掃過去不會停。但這一題已經沒有唯一解，而每一個
+    // 選到「另一個一樣的」的學生都被判錯——沒有任何跡象。
+    const jd = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '向量箭頭被翻拍抹掉', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id, stageDetail: { stages: {} },
+      },
+    });
+    const cd = await prisma.importCandidate.create({
+      data: {
+        jobId: jd.id, order: 1, type: 'SINGLE_CHOICE',
+        content: '物體所受合力為下列何者？',
+        options: [
+          { order: 1, label: '(1)', content: '$a$' },
+          { order: 2, label: '(2)', content: '$b$' },
+          { order: 3, label: '(3)', content: '$a$' },
+          { order: 4, label: '(4)', content: '$0$' },
+        ],
+        answerKeys: [1],
+        state: 'CONFIRMED', reviewedBy: teacher.id, reviewedAt: new Date(),
+      },
+    });
+
+    const r = await commitJob(prisma, jd.id, tenant.id, teacher.id);
+    assert.equal(r.committed, 0, '沒有唯一解的題目不該入庫');
+    assert.equal(r.skipped, 1);
+    const after = await prisma.importCandidate.findFirst({ where: { id: cd.id } });
+    assert.equal(after.state, 'FLAGGED');
+    assert.ok(
+      after.reviewNote?.includes('(1)') && after.reviewNote?.includes('(3)'),
+      `校對者要知道是哪兩個選項撞了：${after.reviewNote}`,
+    );
+  });
+
   await test('選項重新編號時答案鍵跟著對映', async () => {
     // 原稿 (1)(2)(4) —— (3) 內容是空的被丟掉。答案 (4) 入庫後
     // 應該變成 (3)，因為選項序號必須從 1 連續。

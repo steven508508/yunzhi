@@ -138,10 +138,38 @@ export async function commitJob(
     // 逐題一個交易。整批一個交易的話，第 40 題的資料問題會讓
     // 前 39 題的入庫一起消失——而老師已經花了 20 分鐘校對它們。
     try {
-      const { options, answerKeys, dropped } = normalizeOptions(
+      const { options, answerKeys, dropped, duplicates } = normalizeOptions(
         c.options,
         c.answerKeys ?? [],
       );
+
+      // 兩個選項一模一樣 → 這一題沒有唯一解。
+      //
+      // 與下面的 dropped 是同一類問題，但更隱蔽：選項數量對、答案是
+      // 合法的序號、校對者掃過去不會停。被讀掉的通常是最細的那一筆
+      // ——向量的箭頭、指數的上標、負號、單位——而物理與數學最常中招。
+      // 讓它入庫的話，選到「另一個一樣的」的學生會被判錯。
+      if (duplicates.length) {
+        const pairs = duplicates.map(([a, b]) => `${a}／${b}`).join('、');
+        await prisma.importCandidate.update({
+          where: { id: c.id },
+          data: {
+            state: 'FLAGGED',
+            reviewNote:
+              `選項 ${pairs} 的內容完全一樣，這一題沒有唯一解。` +
+              `多半是有東西被讀掉了——向量的箭頭、指數的上標、負號、單位。` +
+              `請對照原稿補回差異。`,
+          },
+        });
+        result.skipped++;
+        result.errors.push({
+          candidateId: c.id,
+          label: c.label ?? c.questionNo ?? String(c.order),
+          message: `選項 ${pairs} 內容重複，無法判定唯一答案`,
+        });
+        continue;
+      }
+
       if (dropped.length) {
         // 答案指向一個入庫後不存在的選項。多半是掃描漏抓了一個選項。
         // **不猜、不硬塞、不靜默丟掉**：留在待校對，把原因寫給老師。

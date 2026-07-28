@@ -49,7 +49,32 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
 
   for (const c of candidates) {
     try {
-      const { options, answerKeys, dropped } = normalizeOptions(c.options, c.answerKeys ?? []);
+      const { options, answerKeys, dropped, duplicates } =
+        normalizeOptions(c.options, c.answerKeys ?? []);
+
+      // 與 lib/commit.ts 同步：兩個選項一模一樣 → 這一題沒有唯一解，
+      // 不入庫。被讀掉的通常是向量的箭頭或指數的上標。
+      if (duplicates.length) {
+        const pairs = duplicates.map(([a, b]) => `${a}／${b}`).join('、');
+        await prisma.importCandidate.update({
+          where: { id: c.id },
+          data: {
+            state: 'FLAGGED',
+            reviewNote:
+              `選項 ${pairs} 的內容完全一樣，這一題沒有唯一解。` +
+              `多半是有東西被讀掉了——向量的箭頭、指數的上標、負號、單位。` +
+              `請對照原稿補回差異。`,
+          },
+        });
+        result.skipped++;
+        result.errors.push({
+          candidateId: c.id,
+          label: c.label ?? c.questionNo ?? String(c.order),
+          message: `選項 ${pairs} 內容重複，無法判定唯一答案`,
+        });
+        continue;
+      }
+
       if (dropped.length) {
         await prisma.importCandidate.update({
           where: { id: c.id },

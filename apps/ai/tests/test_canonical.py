@@ -428,12 +428,12 @@ def test_document_round_trips_through_json():
 
 
 # ─────────────────────────────────────────────────────────────────
-# 七、理科：化學與生物
+# 七、自然科：物理、化學、生物
 # ─────────────────────────────────────────────────────────────────
 
 
 def test_chemistry_notation_is_accepted():
-    """
+    r"""
     化學式用 mhchem 的 `\ce{}`。自己拼 LaTeX 下標排出來字級與間距
     都不對，電荷、狀態、可逆箭頭更是拼不好，而且搜尋不到——
     `\ce{H2SO4}` 是穩定的字串，`H_2SO_4` 有五種寫法。
@@ -503,6 +503,199 @@ def test_biology_diagram_is_a_figure_with_alt_text():
     ))
     assert not [i for i in doc.issues if i.severity is Severity.ERROR], doc.issues
     assert doc.stats.with_assets == 1
+
+
+# ── 物理：向量、單位、圖 ──────────────────────────────────────────
+#
+# 物理的三個要害，依「錯了會不會被發現」排序：
+#
+#   一、**向量的箭頭**。掉了就是另一個物理量，而題目讀起來完全通順。
+#   二、**圖**。物理的圖就是題目本身，漏了那一題是零分。
+#   三、**單位**。同一個單位有五種寫法，逐字比對會把對的判成錯的。
+
+
+def test_vector_arrows_survive():
+    r"""
+    $v$ 是速率、$\vec{v}$ 是速度。箭頭是頁面上最細的一筆，
+    翻拍與壓縮最容易把它抹掉，而物理大量在這個區別上出題。
+    """
+    doc = finalize(ImportDocument(
+        document=DocumentMeta(subject=SubjectCode.PHYSICS),
+        questions=[q("q1", QuestionKind.SINGLE_CHOICE, options=[
+            Option(order=1, label="(1)", content=r"$\vec{v}_1 + \vec{v}_2$"),
+            Option(order=2, label="(2)", content=r"$\vec{v}_1 - \vec{v}_2$"),
+            Option(order=3, label="(3)", content=r"$|\vec{v}_1| + |\vec{v}_2|$"),
+        ], stem=r"兩速度 $\vec{v}_1$ 與 $\vec{v}_2$ 的合成為何？")],
+    ))
+    assert not [i for i in doc.issues if i.code == "content_markup"], doc.issues
+
+
+def test_unbalanced_vector_braces_are_caught():
+    r"""少一個右括號，KaTeX 整段排不出來——畫面上是一行紅字而不是題目。"""
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.CALCULATION, options=[],
+          stem=r"求 $\vec{F$ 的量值。"),
+    ]))
+    assert any("大括號" in i.detail for i in doc.issues if i.code == "content_markup"), doc.issues
+
+
+def test_options_that_became_identical_are_caught():
+    r"""
+    **這一支是整個物理支援的核心。**
+
+    一題問「下列何者為合力」，四個選項本來是 $\vec{a}$、$\vec{b}$、
+    $a$、$b$。翻拍把箭頭抹掉之後，選項 (1) 與 (3) 都變成 $a$。
+
+    題目看起來完全正常：選項數量對、答案是合法的序號、校對者一眼
+    掃過去不會停。但這一題已經沒有唯一解，而每一個選到「另一個
+    一樣的」的學生都被判錯——**沒有任何跡象**。
+
+    箭頭掉了我們攔不住（那要看原圖）。選項變得無法區分我們攔得住。
+    """
+    doc = finalize(ImportDocument(
+        document=DocumentMeta(subject=SubjectCode.PHYSICS),
+        questions=[q("q1", QuestionKind.SINGLE_CHOICE, options=[
+            Option(order=1, label="(1)", content="$a$"),
+            Option(order=2, label="(2)", content="$b$"),
+            Option(order=3, label="(3)", content="$a$"),
+        ], answer=Answer(source=AnswerSource.PRINTED, keys=[1]))],
+    ))
+    bad = [i for i in doc.issues if i.code == "duplicate_options"]
+    assert bad, doc.issues
+    assert bad[0].severity is Severity.ERROR
+    assert "(1)" in bad[0].detail and "(3)" in bad[0].detail
+
+
+def test_empty_option_is_an_error():
+    """抽不到選項內容的題目不能拿去考學生。"""
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.SINGLE_CHOICE, options=[
+            Option(order=1, label="(1)", content="甲"),
+            Option(order=2, label="(2)", content="   "),
+        ]),
+    ]))
+    assert [i for i in doc.issues
+            if i.code == "empty_option" and i.severity is Severity.ERROR], doc.issues
+
+
+def test_a_question_that_says_see_the_figure_must_have_one():
+    """
+    「由 v–t 圖求 0 到 4 秒的位移」少了圖，學生看到的是一句「如圖」
+    與一片空白，連猜都無從猜起。其他科漏一張圖多半還能作答，
+    物理漏一張圖是零分。
+    """
+    doc = finalize(ImportDocument(
+        document=DocumentMeta(subject=SubjectCode.PHYSICS),
+        questions=[q("q1", QuestionKind.CALCULATION, options=[],
+                     stem="由右圖之 v–t 圖，求物體在 0 到 4 秒內的位移。")],
+    ))
+    bad = [i for i in doc.issues if i.code == "figure_missing"]
+    assert bad and bad[0].severity is Severity.ERROR, doc.issues
+
+
+def test_a_figure_on_the_group_counts_for_its_children():
+    """
+    實驗題組的圖掛在題組上，子題的 asset_ids 是空的。
+    不算進來的話，每一組實驗題的每一題都會被誤報成「圖不見了」——
+    而誤報吃掉的是校對時間，那是這個系統最稀缺的資源。
+    """
+    doc = finalize(ImportDocument(
+        assets=[Asset(id="cir", kind=AssetKind.FIGURE,
+                      placement=Placement(page=1, bbox=box()),
+                      alt="兩個電阻並聯後與電池串聯的電路圖")],
+        groups=[Group(id="g1", kind=GroupKind.EXPERIMENT,
+                      stimulus="電路如 ![[a:cir]] 所示。",
+                      placement=Placement(page=1, bbox=box()))],
+        questions=[q("q1", QuestionKind.CALCULATION, options=[], group_id="g1",
+                     stem="依上圖求通過 R₂ 的電流。")],
+    ))
+    assert not [i for i in doc.issues if i.code == "figure_missing"], doc.issues
+
+
+def test_an_inline_table_is_not_a_missing_figure():
+    """題幹裡直接排了表格，就不算「引用了一張看不到的表」。"""
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.SINGLE_CHOICE,
+          stem="下表為四次測量結果：\n\n| 次數 | 時間(s) |\n| --- | --- |\n| 1 | 2.0 |\n\n由表中資料判斷。"),
+    ]))
+    assert not [i for i in doc.issues if i.code == "figure_missing"], doc.issues
+
+
+def test_ordinary_prose_is_not_mistaken_for_a_figure_reference():
+    """
+    「代表中國」裡有「表中」、「以上表現」裡有「上表」。寬鬆的樣式會在
+    歷史與公民的題目上大量誤報，而每一筆誤報都要老師看一眼才能排除。
+
+    最後兩句是**真的踩到的**：翰林《數學(1)》4-3 圓與直線裡，
+    「若方程式的圖形表一圓」出現 9 次——那裡的「表」是「表示」、
+    「一圓」是「一個圓」，跟「表 1」無關。早期的樣式會在那一份講義上
+    丟出 9 筆假警報。
+    """
+    for stem in (
+        "下列何者可以代表中國明代的對外政策？",
+        "小明以上表現優異獲選為班級代表，下列敘述何者正確？",
+        "他企圖以此說服眾人，其行為屬於下列何種類型？",
+        "若方程式的圖形表一圓，則 $k$ 的範圍為何？",
+        "若方程式的圖形表一點，則 $k$ 之值為何？",
+    ):
+        doc = finalize(ImportDocument(questions=[q("q1", stem=stem)]))
+        assert not [i for i in doc.issues if i.code == "figure_missing"], (stem, doc.issues)
+
+
+def test_equivalent_unit_spellings_compare_equal():
+    """
+    m/s²、m/s^2、m·s⁻²、m s^-2 是同一個單位，出現在不同出版社的講義上。
+    逐字比對會把學生寫的 `m/s^2` 判錯，而那是排版差異不是物理錯誤。
+    """
+    from pipeline.canonical import normalize_unit, same_unit
+
+    for a, b in (
+        ("m/s²", "m·s⁻²"),
+        ("m/s^2", "m s^-2"),
+        ("m/s/s", "m/s^2"),
+        ("J/(kg·K)", "J·kg^-1·K^-1"),
+        ("N·m", "m·N"),
+        ("μm", "µm"),          # 微符號與希臘小寫 mu 是不同碼位
+    ):
+        assert same_unit(a, b), f"{a} 應等於 {b}（{normalize_unit(a)} vs {normalize_unit(b)}）"
+
+    # 字首不換算：答案要求公尺就是公尺
+    assert not same_unit("km", "m")
+    assert not same_unit("N", "kg·m/s^2"), "不做量綱分析——題目要什麼單位就是什麼單位"
+    # 沒填不等於不相等
+    assert same_unit(None, "N") and same_unit("", "N")
+
+
+def test_a_unit_we_cannot_read_says_so_instead_of_pretending():
+    """
+    看不懂的單位回傳 `?原文`，並在文件裡留一筆。**不假裝正規化成功**：
+    系統看不懂那個單位，就不該在改考卷時宣稱兩種寫法等價。
+    """
+    from pipeline.canonical import Scoring, normalize_unit
+
+    assert normalize_unit("每公升 3 大卡").startswith("?")
+
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.CALCULATION, options=[],
+          scoring=Scoring(score=4, unit="每公升 3 大卡")),
+    ]))
+    assert [i for i in doc.issues if i.code == "unit_unparsed"], doc.issues
+
+    # 看得懂的就安靜
+    ok = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.CALCULATION, options=[],
+          scoring=Scoring(score=4, unit="m/s²", sig_figs=3)),
+    ]))
+    assert not [i for i in ok.issues if i.code == "unit_unparsed"], ok.issues
+    assert ok.questions[0].scoring.unit == "m/s²", "存的是原文"
+    assert ok.questions[0].scoring.unit_canonical == "m·s^-2"
+
+
+def test_physics_maps_to_the_combined_science_paper():
+    """物理是分科教的，但學測考的是合科自然。組模擬卷時要湊得起來。"""
+    from pipeline.canonical import PARENT_SUBJECT
+
+    assert PARENT_SUBJECT[SubjectCode.PHYSICS] is SubjectCode.SCIENCE
 
 
 # ─────────────────────────────────────────────────────────────────

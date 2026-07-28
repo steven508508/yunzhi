@@ -31,12 +31,15 @@
  * @param {unknown} raw 候選題上的 options（JSON 欄位，形狀不保證）
  * @param {number[]} answerKeys 原稿的答案鍵
  * @returns {{options: {order:number,label:string,content:string}[],
- *            answerKeys: number[], dropped: number[]}}
+ *            answerKeys: number[], dropped: number[], duplicates: string[][]}}
  *          dropped 是**對不上任何選項**的答案鍵。有值就代表這一題
  *          不該入庫——不猜、不硬塞、不靜默丟掉。
+ *          duplicates 是**內容一模一樣的選項**，成對列出標籤。理由見下。
  */
 export function normalizeOptions(raw, answerKeys = []) {
-  if (!Array.isArray(raw)) return { options: [], answerKeys: [...answerKeys], dropped: [] };
+  if (!Array.isArray(raw)) {
+    return { options: [], answerKeys: [...answerKeys], dropped: [], duplicates: [] };
+  }
 
   const kept = [];
   for (const [i, o] of raw.entries()) {
@@ -54,6 +57,24 @@ export function normalizeOptions(raw, answerKeys = []) {
     return { ...o, order: i + 1 };
   });
 
+  // ── 兩個選項一模一樣 ────────────────────────────────────────────
+  //
+  // 這是「有東西被讀掉了」最可靠的徵兆，而被讀掉的通常是最細的
+  // 那一筆：向量的箭頭（$\vec{v}$ → $v$）、指數的上標、負號、單位。
+  // 物理與數學最常中招。
+  //
+  // 症狀與上面那個 dropped 是同一類，只是更隱蔽：選項數量對、答案
+  // 是合法的序號、校對者一眼掃過去不會停。但兩個無法區分的選項
+  // 意味著這一題沒有唯一解，而每一個選到「另一個一樣的」的學生
+  // 都被判錯——沒有任何跡象。
+  const byContent = new Map();
+  const duplicates = [];
+  for (const o of options) {
+    const key = o.content.replace(/\s+/g, ' ');
+    if (byContent.has(key)) duplicates.push([byContent.get(key), o.label]);
+    else byContent.set(key, o.label);
+  }
+
   const mapped = [];
   const dropped = [];
   for (const k of answerKeys) {
@@ -62,5 +83,5 @@ export function normalizeOptions(raw, answerKeys = []) {
     else mapped.push(to);
   }
   mapped.sort((a, b) => a - b);
-  return { options, answerKeys: mapped, dropped };
+  return { options, answerKeys: mapped, dropped, duplicates };
 }

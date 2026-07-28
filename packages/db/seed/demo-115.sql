@@ -20,14 +20,34 @@ INSERT INTO tenants (id, name, "updatedAt")
 VALUES ('demo-tenant', '雲端智學', now())
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO subjects (id, "tenantId", code, name, "gsatFullScore", "order") VALUES
-  ('subj-math-a', 'demo-tenant', 'MATH_A',  '數學A', 100, 1),
-  ('subj-math-b', 'demo-tenant', 'MATH_B',  '數學B', 100, 2),
-  ('subj-chinese','demo-tenant', 'CHINESE', '國文',  100, 3),
-  ('subj-english','demo-tenant', 'ENGLISH', '英文',  100, 4),
+INSERT INTO subjects (id, "tenantId", code, name, "parentCode", "gsatFullScore", "order") VALUES
+  ('subj-math-a', 'demo-tenant', 'MATH_A',  '數學A', NULL, 100, 1),
+  ('subj-math-b', 'demo-tenant', 'MATH_B',  '數學B', NULL, 100, 2),
+  ('subj-chinese','demo-tenant', 'CHINESE', '國文',  NULL, 100, 3),
+  ('subj-english','demo-tenant', 'ENGLISH', '英文',  NULL, 100, 4),
   -- 自然與社會的滿分不是 100，級分換算會用到（規格書文件 03 §6.4）
-  ('subj-science','demo-tenant', 'SCIENCE', '自然',  128, 5),
-  ('subj-social', 'demo-tenant', 'SOCIAL',  '社會',  144, 6)
+  ('subj-science','demo-tenant', 'SCIENCE', '自然',  NULL, 128, 5),
+  ('subj-social', 'demo-tenant', 'SOCIAL',  '社會',  NULL, 144, 6),
+
+  -- ── 分科 ──────────────────────────────────────────────────
+  --
+  -- 學測考的是合科的「自然」與「社會」，但補習班是分科教的：
+  -- 物理老師傳的是物理講義、地理老師傳的是地理講義。訪談時說的
+  -- 「每科三位老師、七個班」指的就是這一層。
+  --
+  -- 少了這幾列，物理老師上傳講義時**選不到自己的科目**——他只能
+  -- 選「自然」，然後他的題目跟化學、生物的混在同一個題庫裡，
+  -- 要組一份物理小考時篩不出來。
+  --
+  -- 分科沒有自己的學測滿分（它們不是獨立考科），級分換算一律看
+  -- parentCode 指到的合科。
+  ('subj-physics',  'demo-tenant', 'PHYSICS',       '物理', 'SCIENCE', NULL, 51),
+  ('subj-chemistry','demo-tenant', 'CHEMISTRY',     '化學', 'SCIENCE', NULL, 52),
+  ('subj-biology',  'demo-tenant', 'BIOLOGY',       '生物', 'SCIENCE', NULL, 53),
+  ('subj-earth',    'demo-tenant', 'EARTH_SCIENCE', '地球科學', 'SCIENCE', NULL, 54),
+  ('subj-history',  'demo-tenant', 'HISTORY',       '歷史', 'SOCIAL',  NULL, 61),
+  ('subj-geography','demo-tenant', 'GEOGRAPHY',     '地理', 'SOCIAL',  NULL, 62),
+  ('subj-civics',   'demo-tenant', 'CIVICS',        '公民', 'SOCIAL',  NULL, 63)
 ON CONFLICT DO NOTHING;
 
 -- ── 知識點 ──────────────────────────────────────────────────

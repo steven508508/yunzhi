@@ -96,6 +96,33 @@ CHEM_REF = re.compile(r"\\ce\{")
 #: 同一份題本裡兩種寫法混用，日後就搜不到其中一種。
 CHEM_AS_LATEX = re.compile(r"(?<!\\ce\{)\b[A-Z][a-z]?_\{?\d")
 
+#: 向量與其他戴帽子的符號：`$\vec{v}$`、`$\overrightarrow{AB}$`、
+#: `$\hat{n}$`、`$\overline{AB}$`。
+#:
+#: **箭頭掉了就是另一個物理量。** $v$ 是速率、$\vec{v}$ 是速度；
+#: $F$ 是力的量值、$\vec{F}$ 是力。物理題目大量在這個區別上出題
+#: （「合力的方向」「動量變化量」），而箭頭是頁面上最細的一筆，
+#: 也是最容易在翻拍與壓縮中被抹掉的一筆。
+#:
+#: 抹掉之後的症狀特別惡劣：一題問「下列何者為合力」而四個選項的
+#: 箭頭全掉了，四個選項就會長得**一模一樣**。題目看起來完全正常，
+#: 只是不管學生選哪一個都可能被判錯。這正是下面 `duplicate_options`
+#: 要攔的東西——箭頭掉了我們攔不住，但選項變得無法區分我們攔得住。
+VEC_REF = re.compile(r"\\(?:vec|overrightarrow|overleftarrow|hat|overline)\{")
+
+
+def _brace_unbalanced(text: str, brace_open: int) -> bool:
+    """從 `{` 的位置往後掃，看括號有沒有收回來。"""
+    depth = 0
+    for i in range(brace_open, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return False
+    return True
+
 
 def content_issues(text: str, asset_ids: set[str]) -> list[str]:
     """檢查一段內容標記，回傳問題描述。空清單代表沒問題。"""
@@ -111,19 +138,101 @@ def content_issues(text: str, asset_ids: set[str]) -> list[str]:
     # `\ce{...}` 的大括號要配對。少一個右括號，mhchem 會把後面
     # 整段話都當成化學式排版——排出來是一團看不懂的東西。
     for m in CHEM_REF.finditer(text):
-        depth, i = 0, m.end() - 1
-        while i < len(text):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        if depth != 0:
+        if _brace_unbalanced(text, m.end() - 1):
             problems.append(r"\ce{} 的大括號沒有配對，後面整段會被當成化學式排版")
 
+    # 向量同理：`$\vec{v$` 少一個右括號，KaTeX 會整段排不出來，
+    # 而畫面上出現的是一行紅字而不是題目。
+    for m in VEC_REF.finditer(text):
+        if _brace_unbalanced(text, m.end() - 1):
+            problems.append(r"\vec{} 這類符號的大括號沒有配對，整段數學式會排不出來")
+
     return problems
+
+
+# ═════════════════════════════════════════════════════════════════
+# 單位
+#
+# 物理與化學的答案是「數字＋單位」，而**同一個單位有很多種寫法**：
+#
+#     m/s²   m/s^2   m·s⁻²   m s^-2   ms^-2
+#
+# 五種都對，五種都會出現在不同出版社的講義上。自動改考卷時若逐字
+# 比對，學生寫 `m/s^2` 而答案存 `m·s⁻²` 就被判錯——而那是排版差異，
+# 不是物理錯誤。
+#
+# 這裡把單位化成一個正規形式（符號與指數），讓等價的寫法比得出來。
+# **刻意不做字首換算**：km 與 m 不相等，答案要求公尺就是公尺。
+# ═════════════════════════════════════════════════════════════════
+
+#: 上標數字與正負號。`m·s⁻²` → `m·s-2`
+_SUPERSCRIPT = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-")
+
+#: 乘號的各種寫法，含全形空白。
+_UNIT_MULT = re.compile(r"[·⋅∙*×・\s]+")
+
+#: 一個因式：符號（含希臘字母、度、歐姆、百分比）加上可有可無的指數。
+_UNIT_FACTOR = re.compile(r"([A-Za-zΑ-Ωα-ω°Ω%‰Å]+)\^?([+-]?\d+)?")
+
+
+def normalize_unit(raw: str | None) -> str:
+    """
+    把單位化成正規形式，讓 `m/s²`、`m·s⁻²`、`m s^-2` 比得出相等。
+
+    回傳依符號排序的正規字串（`kg·m·s^-2`）。看不懂的輸入回傳
+    `"?" + 原文`——**不假裝正規化成功**：如果系統看不懂那個單位，
+    改考卷時就不該宣稱兩個答案等價，而該讓老師知道它看不懂。
+
+    不做字首換算（km ≠ m）也不做量綱分析（N ≠ kg·m/s²）：題目要求
+    什麼單位就是什麼單位，替學生換算不是這一層的事。
+    """
+    if not raw or not raw.strip():
+        return ""
+
+    s = raw.strip()
+    for junk in ("$", "\\mathrm", "\\text", "\\rm", "{", "}"):
+        s = s.replace(junk, "")
+    s = s.translate(_SUPERSCRIPT)
+    # µ（微符號 U+00B5）與 μ（希臘小寫 mu）、Ω（歐姆符號 U+2126）與
+    # Ω（希臘大寫 omega）長得一樣但碼位不同。不統一的話 `μm` 與 `μm`
+    # 會被判成兩個單位。
+    s = s.replace("\u00b5", "\u03bc").replace("\u2126", "\u03a9")
+
+    # 第一個 `/` 之後全部取負指數，所以 `m/s/s` 與 `m/s^2` 相等，
+    # `J/(kg·K)` 的兩個都在分母。
+    pieces = s.split("/")
+    groups = [(pieces[0], 1)] + [(p, -1) for p in pieces[1:]]
+
+    factors: dict[str, int] = {}
+    for part, sign in groups:
+        part = part.strip().replace("(", "").replace(")", "")
+        for tok in _UNIT_MULT.split(part):
+            if not tok:
+                continue
+            m = _UNIT_FACTOR.fullmatch(tok)
+            if not m:
+                return "?" + " ".join(raw.split())
+            sym = m.group(1)
+            factors[sym] = factors.get(sym, 0) + sign * int(m.group(2) or 1)
+
+    out = []
+    for sym in sorted(k for k, v in factors.items() if v):
+        v = factors[sym]
+        out.append(sym if v == 1 else f"{sym}^{v}")
+    return "·".join(out)
+
+
+def same_unit(a: str | None, b: str | None) -> bool:
+    """
+    兩個單位是不是同一個。
+
+    任一邊沒填就回 True——**沒填不等於不相等**。原稿沒標單位是很
+    常見的，那時候沒有東西可以矛盾，不該因此把學生判錯。
+    """
+    na, nb = normalize_unit(a), normalize_unit(b)
+    if not na or not nb:
+        return True
+    return na == nb
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -426,12 +535,27 @@ class Scoring(BaseModel):
     word_limit: int | None = Field(default=None, ge=1, le=5000)
     #: 答案的單位。理化常標，而「答對數字但沒寫單位」是不是給分
     #: 由老師決定——系統要記得原稿有沒有要求。
+    #:
+    #: **存原文。** 老師校對時看到的要跟講義上印的一樣；等價寫法的
+    #: 比對交給 `unit_canonical`。
     unit: str | None = None
     #: 有效位數。「答案取三位有效數字」是理化的常見要求，
     #: 而自動改考卷時 2.00 與 2 是不是同一個答案取決於它。
     sig_figs: int | None = Field(default=None, ge=1, le=15)
     #: 原稿印的評分原則原文。與詳解一樣受著作權保護，分開存。
     rubric_raw: str | None = None
+
+    @property
+    def unit_canonical(self) -> str:
+        """
+        給改考卷用的正規化單位。學生寫 `m/s^2`、答案存 `m·s⁻²` 時，
+        逐字比對會判錯——那是排版差異，不是物理錯誤。
+
+        刻意做成 property 而不是欄位：存進系統的是原文，正規形式
+        是算出來的。存兩份的話，日後改了正規化規則，舊資料就會帶著
+        一份過時的正規形式而沒有人知道。
+        """
+        return normalize_unit(self.unit)
 
 
 class Explanation(BaseModel):
@@ -705,6 +829,39 @@ class ImportDocument(BaseModel):
 # ═════════════════════════════════════════════════════════════════
 
 
+#: 題幹在講「去看那張圖／那張表」。
+#:
+#: 物理是這件事最要命的科目：v–t 圖求位移、x–t 圖求速度、電路圖求
+#: 電流、光路圖求成像——**圖就是題目本身**，沒有圖那一題完全不能作答。
+#: 其他科漏一張圖多半還能猜，物理漏一張圖是零分。
+#:
+#: 型式刻意收得緊，而且是**拿真實講義量過的**。中文裡「表」與「圖」
+#: 都身兼動詞與名詞，寬鬆的樣式會大量誤報：
+#:
+#:   「代表中國」      → 含「表中」
+#:   「以上表現優異」  → 含「上表」
+#:   「圖形表一圓」    → 含「表一」（這裡的「表」是「表示」，
+#:                       「一圓」是「一個圓」，不是「表 1」）
+#:
+#: 最後那一條在翰林《數學(1)》4-3 圓與直線裡出現 9 次——早期的樣式
+#: 會在那一份講義上丟出 9 筆假警報。誤報吃掉的是校對時間，
+#: 而那是這個系統最稀缺的資源（50 題 20 分鐘）。
+#:
+#: 所以編號形式要求後面接的是邊界或引用語（「圖1所示」「表一，」），
+#: 不能是名詞（「表一圓」）。
+_REF_TAIL = r"(?=[\s、，。：；）)\]】]|$|所|中|之|的|可|為|列|資料|數據)"
+_FIGURE_MENTION = re.compile(
+    r"(?:如|依|由|見|參[考見]|據|根據)[右左上下本該]?[圖表]"
+    r"|[右左上下附]圖"
+    r"|[右左上下附]表" + _REF_TAIL +
+    r"|圖\s*[一二三四五六七八九十\d]+" + _REF_TAIL +
+    r"|表\s*[一二三四五六七八九十\d]+" + _REF_TAIL
+)
+
+#: Markdown 表格。題幹裡直接排了表格就不算「引用了一張看不到的表」。
+_MD_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+
+
 def validate_document(doc: ImportDocument) -> list[Issue]:
     """
     跨物件的完整性檢查。回傳的 issue 會併進 `doc.issues`。
@@ -716,6 +873,11 @@ def validate_document(doc: ImportDocument) -> list[Issue]:
     asset_ids = {a.id for a in doc.assets}
     section_ids = {s.id for s in doc.sections}
     group_ids = {g.id for g in doc.groups}
+    #: 題組共用的圖。子題的 `asset_ids` 可以是空的，圖掛在題組上——
+    #: 不算進來的話，每一組實驗題的每一題都會被誤報成「圖不見了」。
+    group_assets = {
+        g.id: {m.group(1) for m in ASSET_REF.finditer(g.stimulus)} for g in doc.groups
+    }
 
     def add(code: str, detail: str, **kw) -> None:
         found.append(Issue(code=code, detail=detail, **kw))
@@ -766,6 +928,57 @@ def validate_document(doc: ImportDocument) -> list[Issue]:
         if missing:
             add("asset_not_listed",
                 f"題目 {q.id} 的內容引用了 {sorted(missing)}，但沒有列進 asset_ids",
+                question_id=q.id, page=q.placement.page)
+
+        # ── 兩個選項一模一樣 ────────────────────────────────────
+        #
+        # 這是「有東西被讀掉了」最可靠的徵兆，而被讀掉的通常是最細的
+        # 那一筆：向量的箭頭、指數的上標、負號、單位。物理與數學最常
+        # 中招——$\vec{v}$ 與 $v$、$10^3$ 與 $103$、$-2$ 與 $2$。
+        #
+        # 症狀是**題目看起來完全正常**：選項數量對、答案是合法的序號、
+        # 校對者一眼掃過去不會停。但兩個無法區分的選項意味著這一題
+        # 沒有唯一解，而每一個選到「另一個一樣的」的學生都被判錯。
+        if len(q.options) > 1:
+            seen_content: dict[str, str] = {}
+            for o in q.options:
+                key = " ".join(o.content.split())
+                if not key:
+                    add("empty_option",
+                        f"題目 {q.id} 的選項 {o.label} 是空的。"
+                        f"抽不到選項內容的話，這一題不能拿去考學生",
+                        severity=Severity.ERROR, question_id=q.id,
+                        page=q.placement.page)
+                elif key in seen_content:
+                    add("duplicate_options",
+                        f"題目 {q.id} 的選項 {seen_content[key]} 與 {o.label} 內容完全一樣"
+                        f"（{key[:40]}）。多半是有東西被讀掉了——向量的箭頭、"
+                        f"指數的上標、負號、單位。這一題目前沒有唯一解",
+                        severity=Severity.ERROR, question_id=q.id,
+                        page=q.placement.page)
+                else:
+                    seen_content[key] = o.label
+
+        # ── 題幹說「如圖」，圖卻不在 ────────────────────────────
+        have_assets = set(q.asset_ids) | group_assets.get(q.group_id or "", set())
+        if not have_assets and not _MD_TABLE_ROW.search(q.stem):
+            hit = _FIGURE_MENTION.search(q.stem)
+            if hit:
+                add("figure_missing",
+                    f"題目 {q.id} 的題幹提到「{hit.group(0)}」，但這一題沒有接上"
+                    f"任何圖表。學生會看到一句「如圖」與一片空白",
+                    severity=Severity.ERROR, question_id=q.id,
+                    page=q.placement.page)
+
+        # ── 單位看不看得懂 ──────────────────────────────────────
+        #
+        # 只在**解析失敗**時出聲，所以不會誤報：系統看不懂那個單位，
+        # 就不該在改考卷時宣稱兩種寫法等價，而該讓老師知道。
+        if q.scoring.unit and q.scoring.unit_canonical.startswith("?"):
+            add("unit_unparsed",
+                f"題目 {q.id} 的單位「{q.scoring.unit}」系統看不懂。"
+                f"自動改考卷時無法判斷 m/s^2 與 m·s⁻² 這類等價寫法，"
+                f"會逐字比對",
                 question_id=q.id, page=q.placement.page)
 
         # ── 出版社專屬題型要說得出它是什麼 ──────────────────────

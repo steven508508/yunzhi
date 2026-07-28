@@ -27,15 +27,11 @@ os.environ.setdefault("AI_PROVIDER", "mock")
 os.environ.setdefault("S3_BUCKET", "test")
 os.environ.setdefault("S3_ENDPOINT", "http://localhost:9000")
 
-import storage  # noqa: E402
+from fakestore import install  # noqa: E402
 
-_FAKE: dict[str, bytes] = {}
-storage.get_bytes = lambda key: _FAKE[key]  # type: ignore[assignment]
-storage.put_bytes = lambda key, data, content_type="": (  # type: ignore[assignment]
-    _FAKE.__setitem__(key, data),
-    key,
-)[1]
-storage.healthy = lambda: (True, None)  # type: ignore[assignment]
+#: 三支測試共用同一份假儲存。各自宣告一份的話，模組層級的覆寫是
+#: 「最後 import 的贏」，另外兩支就拿不到自己寫進去的檔案。
+_FAKE = install()
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
