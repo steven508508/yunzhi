@@ -144,6 +144,7 @@ model User {
   declaredExplanations Explanation[]        @relation("ExplanationDeclarer")
   resolvedDuplicates  DuplicateGroup[]      @relation("DuplicateResolver")
   verifiedSources     OfficialSourceFetch[] @relation("OfficialSourceVerifier")
+  confirmedTypes      CustomQuestionType[]  @relation("CustomTypeConfirmer")
 
   @@unique([tenantId, username])
   @@unique([tenantId, email])
@@ -584,6 +585,12 @@ model Subject {
   code          String // MATH_A / CHINESE / ENGLISH / SCIENCE / SOCIAL
   name          String
   // 學測滿分：社會 144、自然 128、其餘 100
+  /// 分科所屬的學測合科代碼（CHEMISTRY → SCIENCE）。合科本身留空。
+  ///
+  /// 學測的自然與社會是合科考卷，但補習班是分科教的——化學老師傳
+  /// 的是化學講義。少了這一欄，化學老師要組一份化學小考時，
+  /// 他的題目跟生物的混在同一個題庫裡篩不出來。
+  parentCode    String?
   gsatFullScore Int?
   order         Int      @default(0)
   active        Boolean  @default(true)
@@ -679,9 +686,66 @@ model Publisher {
   name   String
   active Boolean @default(true)
 
-  editions TextbookEdition[]
+  editions  TextbookEdition[]
+  questionTypes CustomQuestionType[]
 
   @@map("publishers")
+}
+
+/// 出版社專屬題型。
+///
+/// 出版社常有自己設計的題型：翰林的「觀念速記」、南一的「圖表解碼」、
+/// 龍騰的某種雙欄配對。它們**呈現方式獨特，但作答方式幾乎一定是
+/// 標準的那幾種之一**——這一點讓它變得可處理：系統不必懂那個題型的
+/// 教學設計，只要知道學生怎麼答、怎麼給分。
+///
+/// 流程是「問老師一次，之後記住」：模型遇到不認得的題型時標成
+/// OTHER 並保留原圖，校對介面拿給老師看並問三件事（這是什麼、
+/// 學生怎麼作答、有沒有取得授權），老師確認後存成這一列；
+/// 下一次同一種題型出現，定義會放進提示詞，模型就認得了。
+///
+/// **授權記在題型上而不是只記在匯入工作上。** 題型會被反覆使用，
+/// 「這個題型我們有沒有權利用」是題型層級的事實，不是某一次匯入的。
+model CustomQuestionType {
+  id          String  @id @default(cuid())
+  tenantId    String
+  publisherId String?
+  /// 出版社的名稱快照。出版社資料被整理過時，這個題型的來源仍然查得到。
+  publisherName String?
+
+  name        String  /// 「觀念速記」「圖表解碼」
+  description String  /// 這個題型長什麼樣、要學生做什麼
+  /// 學生實際上怎麼作答。對應 QuestionType，決定作答介面與評分邏輯。
+  answerMode  QuestionType
+  /// 給模型看的辨識線索：版面特徵、慣用標題、與哪些題型容易混淆。
+  /// 這一段會被放進提示詞，所以寫得越具體，下一次認得越準。
+  recognitionHint String?
+  /// 一張範例圖，供校對者與日後的維護者對照。
+  exampleAssetKey String?
+
+  /// 授權基礎。與 ImportJob 用同一組值（OWNED／LICENSED／
+  /// OFFICIAL_PUBLIC／UNVERIFIED）。UNVERIFIED 的題型可以辨識，
+  /// 但它的題目不得散布到租戶之外。
+  rightsBasis    String
+  rightsNote     String?
+  /// 誰確認的。這是責任歸屬——「向老師確認即可」的那個確認。
+  confirmedBy    String?
+  confirmedName  String?
+  confirmedAt    DateTime?
+
+  active    Boolean  @default(true)
+  usageCount Int     @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  publisher Publisher? @relation(fields: [publisherId], references: [id], onDelete: SetNull)
+  confirmer User?      @relation("CustomTypeConfirmer", fields: [confirmedBy], references: [id], onDelete: SetNull)
+
+  /// 同一租戶下同一個出版社的題型名稱不重複。沒有這個約束的話，
+  /// 每一次匯入都會建一個新的「觀念速記」，篩選就失效了。
+  @@unique([tenantId, publisherName, name])
+  @@index([tenantId, active])
+  @@map("custom_question_types")
 }
 
 model TextbookEdition {
@@ -1110,6 +1174,11 @@ model ImportCandidate {
   // 只在原稿真的印了才有值——推估出來的難度不可以存進這裡。
   sourceExam          String?
   nationalCorrectRate Float?
+
+  // 出版社專屬題型。模型認出既有定義時填 id；提議新題型時只有
+  // 名稱，等老師確認後才會建出定義並回填 id。
+  customTypeId   String?
+  customTypeName String?
 
   state      CandidateState @default(PENDING)
   reviewedBy String?

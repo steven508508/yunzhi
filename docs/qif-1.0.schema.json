@@ -249,6 +249,54 @@
       "title": "ConfidenceReason",
       "type": "object"
     },
+    "CustomTypeRef": {
+      "description": "出版社專屬的題型。\n\n出版社常有自己設計的題型：翰林的「觀念速記」、南一的「圖表解碼」、\n龍騰的某種雙欄配對。它們**呈現方式獨特，但作答方式幾乎一定是\n標準的那幾種之一**——這一點讓它變得可處理：系統不必懂那個題型\n的教學設計，只要知道學生要怎麼答、怎麼給分。\n\n流程是「問老師一次，之後記住」：\n\n  1. 模型遇到不認得的題型 → `kind=OTHER` ＋ 一筆 unsupported_content\n  2. 校對介面把裁下來的原圖與模型的猜測拿給老師看，問這是什麼、\n     學生要怎麼答、有沒有取得出版社授權\n  3. 老師確認後存成租戶層級的題型定義\n  4. 下一次同一種題型出現，定義會放進提示詞，模型就認得了，\n     `kind` 填 PUBLISHER_CUSTOM 並帶上 `custom_type`\n\n**授權要記在這裡而不是只記在匯入工作上。** 題型會被反覆使用，\n而「這個題型我們有沒有權利用」是題型層級的事實，不是某一次\n匯入的事實。",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "answer_mode": {
+          "$ref": "#/$defs/QuestionKind",
+          "default": "SHORT_ANSWER"
+        },
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CustomTypeRef",
+      "type": "object"
+    },
     "DocumentMeta": {
       "properties": {
         "subject": {
@@ -821,6 +869,17 @@
           },
           "title": "Topic Hints",
           "type": "array"
+        },
+        "custom_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CustomTypeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -848,6 +907,7 @@
         "ESSAY",
         "TRANSLATION",
         "LISTENING",
+        "PUBLISHER_CUSTOM",
         "OTHER"
       ],
       "title": "QuestionKind",
@@ -900,6 +960,20 @@
           ],
           "default": null,
           "title": "Unit"
+        },
+        "sig_figs": {
+          "anyOf": [
+            {
+              "maximum": 15,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sig Figs"
         },
         "rubric_raw": {
           "anyOf": [
@@ -991,7 +1065,7 @@
       "type": "string"
     },
     "SubjectCode": {
-      "description": "學測考科。ELECTIVE 給補習班自己開的加強班用。",
+      "description": "科目。\n\n**學測的「自然」與「社會」是合科考卷，但補習班是分科教的。**\n化學老師傳的是化學講義、地理老師傳的是地理講義；訪談時說的\n「每科三位老師、七個班」指的就是分科。只留 SCIENCE 一個值的話，\n化學老師的題目會跟生物的混在同一個題庫裡，而他要組一份化學\n小考時篩不出來。\n\n所以分科與合科並存：SCIENCE／SOCIAL 給學測合科試卷用，\n其餘給日常的分科講義用。",
       "enum": [
         "CHINESE",
         "ENGLISH",
@@ -999,6 +1073,13 @@
         "MATH_B",
         "SOCIAL",
         "SCIENCE",
+        "HISTORY",
+        "GEOGRAPHY",
+        "CIVICS",
+        "PHYSICS",
+        "CHEMISTRY",
+        "BIOLOGY",
+        "EARTH_SCIENCE",
         "ELECTIVE",
         "UNKNOWN"
       ],

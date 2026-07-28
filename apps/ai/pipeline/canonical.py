@@ -78,6 +78,24 @@ BLANK_REF = re.compile(r"\{\{blank\}\}")
 #: 未跳脫的數學分隔符。用來檢查配對。
 MATH_DELIM = re.compile(r"(?<!\\)\$")
 
+#: 化學式與反應式。`$\ce{2H2 + O2 -> 2H2O}$`
+#:
+#: 用 mhchem 的 `\ce{}` 而不是自己拼 LaTeX 下標，有三個實際的理由：
+#:
+#:   · `$2H_2 + O_2 \rightarrow 2H_2O$` 排出來的字級與間距都不對，
+#:     化學老師一眼就看得出來不專業
+#:   · 電荷、狀態、可逆箭頭（`<=>`）、沉澱符號用純 LaTeX 拼很痛苦，
+#:     而模型拼錯了不會報錯，只是排出一個看起來差不多的東西
+#:   · `\ce{}` 是可搜尋的：要找「所有考到硫酸的題目」時，
+#:     `\ce{H2SO4}` 是一個穩定的字串，`H_2SO_4` 有五種寫法
+#:
+#: **渲染端要載入 KaTeX 的 mhchem 擴充**，否則這些會排不出來。
+CHEM_REF = re.compile(r"\\ce\{")
+
+#: 看起來像化學式、卻用純 LaTeX 下標寫的。這不算錯，但值得提醒——
+#: 同一份題本裡兩種寫法混用，日後就搜不到其中一種。
+CHEM_AS_LATEX = re.compile(r"(?<!\\ce\{)\b[A-Z][a-z]?_\{?\d")
+
 
 def content_issues(text: str, asset_ids: set[str]) -> list[str]:
     """檢查一段內容標記，回傳問題描述。空清單代表沒問題。"""
@@ -90,6 +108,21 @@ def content_issues(text: str, asset_ids: set[str]) -> list[str]:
         if m.group(1) not in asset_ids:
             problems.append(f"參照到不存在的資產 {m.group(1)}")
 
+    # `\ce{...}` 的大括號要配對。少一個右括號，mhchem 會把後面
+    # 整段話都當成化學式排版——排出來是一團看不懂的東西。
+    for m in CHEM_REF.finditer(text):
+        depth, i = 0, m.end() - 1
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            problems.append(r"\ce{} 的大括號沒有配對，後面整段會被當成化學式排版")
+
     return problems
 
 
@@ -99,16 +132,53 @@ def content_issues(text: str, asset_ids: set[str]) -> list[str]:
 
 
 class SubjectCode(str, Enum):
-    """學測考科。ELECTIVE 給補習班自己開的加強班用。"""
+    """
+    科目。
+
+    **學測的「自然」與「社會」是合科考卷，但補習班是分科教的。**
+    化學老師傳的是化學講義、地理老師傳的是地理講義；訪談時說的
+    「每科三位老師、七個班」指的就是分科。只留 SCIENCE 一個值的話，
+    化學老師的題目會跟生物的混在同一個題庫裡，而他要組一份化學
+    小考時篩不出來。
+
+    所以分科與合科並存：SCIENCE／SOCIAL 給學測合科試卷用，
+    其餘給日常的分科講義用。
+    """
 
     CHINESE = "CHINESE"
     ENGLISH = "ENGLISH"
     MATH_A = "MATH_A"
     MATH_B = "MATH_B"
+
+    # 學測合科試卷
     SOCIAL = "SOCIAL"
     SCIENCE = "SCIENCE"
+
+    # 社會的分科
+    HISTORY = "HISTORY"
+    GEOGRAPHY = "GEOGRAPHY"
+    CIVICS = "CIVICS"
+
+    # 自然的分科
+    PHYSICS = "PHYSICS"
+    CHEMISTRY = "CHEMISTRY"
+    BIOLOGY = "BIOLOGY"
+    EARTH_SCIENCE = "EARTH_SCIENCE"
+
     ELECTIVE = "ELECTIVE"
     UNKNOWN = "UNKNOWN"
+
+
+#: 分科 → 學測合科。組一份學測模擬卷時要能把分科的題目湊起來。
+PARENT_SUBJECT = {
+    SubjectCode.HISTORY: SubjectCode.SOCIAL,
+    SubjectCode.GEOGRAPHY: SubjectCode.SOCIAL,
+    SubjectCode.CIVICS: SubjectCode.SOCIAL,
+    SubjectCode.PHYSICS: SubjectCode.SCIENCE,
+    SubjectCode.CHEMISTRY: SubjectCode.SCIENCE,
+    SubjectCode.BIOLOGY: SubjectCode.SCIENCE,
+    SubjectCode.EARTH_SCIENCE: SubjectCode.SCIENCE,
+}
 
 
 class Genre(str, Enum):
@@ -152,6 +222,9 @@ class QuestionKind(str, Enum):
     ESSAY = "ESSAY"
     TRANSLATION = "TRANSLATION"
     LISTENING = "LISTENING"
+    #: 出版社專屬題型。**必須同時填 custom_type**，那是它到底是
+    #: 什麼的說明；`custom_type.answer_mode` 決定它怎麼作答與評分。
+    PUBLISHER_CUSTOM = "PUBLISHER_CUSTOM"
     OTHER = "OTHER"                  # 逃生口，必須伴隨 issue
 
 
@@ -169,6 +242,42 @@ CHOICE_KINDS = {
     QuestionKind.MULTI_CHOICE,
     QuestionKind.TRUE_FALSE,
 }
+
+
+class CustomTypeRef(BaseModel):
+    """
+    出版社專屬的題型。
+
+    出版社常有自己設計的題型：翰林的「觀念速記」、南一的「圖表解碼」、
+    龍騰的某種雙欄配對。它們**呈現方式獨特，但作答方式幾乎一定是
+    標準的那幾種之一**——這一點讓它變得可處理：系統不必懂那個題型
+    的教學設計，只要知道學生要怎麼答、怎麼給分。
+
+    流程是「問老師一次，之後記住」：
+
+      1. 模型遇到不認得的題型 → `kind=OTHER` ＋ 一筆 unsupported_content
+      2. 校對介面把裁下來的原圖與模型的猜測拿給老師看，問這是什麼、
+         學生要怎麼答、有沒有取得出版社授權
+      3. 老師確認後存成租戶層級的題型定義
+      4. 下一次同一種題型出現，定義會放進提示詞，模型就認得了，
+         `kind` 填 PUBLISHER_CUSTOM 並帶上 `custom_type`
+
+    **授權要記在這裡而不是只記在匯入工作上。** 題型會被反覆使用，
+    而「這個題型我們有沒有權利用」是題型層級的事實，不是某一次
+    匯入的事實。
+    """
+
+    #: 租戶題型庫裡的 id。模型從提示詞給的清單裡選，**不得自創**——
+    #: 自創的話同一種題型會在系統裡有五個名字，篩選就失效了。
+    id: str | None = None
+    #: 題型名稱。第一次遇到（還沒有 id）時由模型提議，交給老師確認。
+    name: str = Field(min_length=1)
+    publisher: str | None = None
+    #: 學生實際上怎麼作答。這是系統真正需要知道的部分。
+    answer_mode: QuestionKind = QuestionKind.SHORT_ANSWER
+    #: 這一題是不是用既有定義認出來的。false 代表模型在提議一個
+    #: 新題型，**尚未經過老師確認，不可自動入庫**。
+    confirmed: bool = False
 
 
 class GroupKind(str, Enum):
@@ -315,8 +424,12 @@ class Scoring(BaseModel):
     partial_credit: bool = False
     #: 非選題的字數限制（國寫、英文作文）
     word_limit: int | None = Field(default=None, ge=1, le=5000)
-    #: 答案的單位與有效位數，理科常標
+    #: 答案的單位。理化常標，而「答對數字但沒寫單位」是不是給分
+    #: 由老師決定——系統要記得原稿有沒有要求。
     unit: str | None = None
+    #: 有效位數。「答案取三位有效數字」是理化的常見要求，
+    #: 而自動改考卷時 2.00 與 2 是不是同一個答案取決於它。
+    sig_figs: int | None = Field(default=None, ge=1, le=15)
     #: 原稿印的評分原則原文。與詳解一樣受著作權保護，分開存。
     rubric_raw: str | None = None
 
@@ -445,6 +558,8 @@ class Question(BaseModel):
     #: 知識點線索。模型從單元標題與內容讀到的，供標註階段當候選。
     #: **不是知識點本身**——那必須從知識點樹裡選，不得自由生成。
     topic_hints: list[str] = Field(default_factory=list)
+    #: 出版社專屬題型的說明。`kind=PUBLISHER_CUSTOM` 時必填。
+    custom_type: CustomTypeRef | None = None
 
     @field_validator("stem")
     @classmethod
@@ -652,6 +767,20 @@ def validate_document(doc: ImportDocument) -> list[Issue]:
             add("asset_not_listed",
                 f"題目 {q.id} 的內容引用了 {sorted(missing)}，但沒有列進 asset_ids",
                 question_id=q.id, page=q.placement.page)
+
+        # ── 出版社專屬題型要說得出它是什麼 ──────────────────────
+        if q.kind is QuestionKind.PUBLISHER_CUSTOM:
+            if not q.custom_type:
+                add("custom_type_missing",
+                    f"題目 {q.id} 標成出版社專屬題型卻沒有說明那是什麼。"
+                    f"沒有 custom_type 的話，下游不知道學生要怎麼作答",
+                    severity=Severity.ERROR, question_id=q.id)
+            elif not q.custom_type.confirmed:
+                add("custom_type_unconfirmed",
+                    f"題目 {q.id} 是模型提議的新題型「{q.custom_type.name}」，"
+                    f"尚未經老師確認。請確認這是什麼題型、學生怎麼作答、"
+                    f"以及是否已取得出版社授權",
+                    question_id=q.id, page=q.placement.page)
 
         # ── 逃生口用了就要說明 ──────────────────────────────────
         if q.kind is QuestionKind.OTHER:

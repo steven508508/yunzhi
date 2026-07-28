@@ -298,6 +298,26 @@ async function stageSegment(ctx) {
   // 會回一個空殼——那時候就沒有第二意見，品質說明要講明。
   const rules = await callAI('/v1/import/segment', { pages: pageInput }, 'SEGMENTING');
 
+  // 這個補習班已經確認過的出版社專屬題型。
+  //
+  // 「問老師一次，之後記住」的後半段：老師確認過的定義跟著每一次
+  // 呼叫走，模型下次直接認得。沒有這一段的話，同一種題型每匯入
+  // 一次就要重問一次，而那正是老師最不耐煩的事。
+  const customTypes = (
+    await prisma.customQuestionType.findMany({
+      where: { tenantId: job.tenantId, active: true },
+      orderBy: { usageCount: 'desc' },
+      take: 40,
+    })
+  ).map((t) => ({
+    id: t.id,
+    name: t.name,
+    publisher: t.publisherName ?? undefined,
+    answer_mode: t.answerMode,
+    hint: t.recognitionHint ?? undefined,
+    description: t.description,
+  }));
+
   // ── 模型讀整頁 ──────────────────────────────────────────────
   //
   // 這是主線。規則那條路每加一種體例就要打一批新規則，而新規則
@@ -315,6 +335,7 @@ async function stageSegment(ctx) {
         })),
         rule_blocks: rules.blocks ?? [],
         source_file: job.title,
+        custom_types: customTypes,
       },
       'SEGMENTING',
     );
@@ -510,6 +531,10 @@ function fromReading(jobId, seg, existing) {
       kpSuggestions: (q.topic_hints ?? []).length
         ? { hints: q.topic_hints }
         : null,
+      // 出版社專屬題型。模型認出既有定義時有 id；提議新題型時只有
+      // 名稱，等老師在校對介面確認後才會建出定義並回填 id。
+      customTypeId: q.custom_type?.confirmed ? (q.custom_type.id ?? null) : null,
+      customTypeName: q.custom_type?.name ?? null,
     });
   }
 
@@ -586,6 +611,15 @@ async function stageExtract(ctx) {
   });
 
   if (out.rows.length) await prisma.importCandidate.createMany({ data: out.rows });
+
+  // 題型的使用次數。提示詞只放得下前 40 種，用得多的要排前面——
+  // 一家補習班用久了會累積出幾十種，而模型讀不完全部。
+  const usedTypes = new Set(out.rows.map((r) => r.customTypeId).filter(Boolean));
+  for (const id of usedTypes) {
+    await prisma.customQuestionType
+      .update({ where: { id }, data: { usageCount: { increment: 1 } } })
+      .catch(() => {});
+  }
 
   return {
     extracted: out.rows.length,

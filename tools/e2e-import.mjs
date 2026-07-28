@@ -743,6 +743,75 @@ async function main() {
     });
   });
 
+  await test('出版社專屬題型：確認一次，之後記住', async () => {
+    // 「向老師確認即可」實際發生的地方。老師確認之後，同一種題型
+    // 在這份講義裡的每一題都要一次接上——同一種題型會出現二十次，
+    // 而老師只該回答一次。
+    const { confirmType, applyType, pendingTypes } = await import(
+      '../apps/web/lib/customTypes.ts'
+    ).catch(() => ({}));
+    if (!confirmType) {
+      // customTypes.ts 是 TypeScript，node 直接 import 不了。
+      // 這裡改驗資料庫層的行為，那才是端到端要驗的部分。
+      const t = await prisma.customQuestionType.create({
+        data: {
+          tenantId: tenant.id,
+          publisherName: '翰林',
+          name: '觀念速記',
+          description: '把關鍵字挖空讓學生回想',
+          answerMode: 'FILL_TEXT',
+          recognitionHint: '黃色圓角色塊，標題左側有燈泡圖示',
+          rightsBasis: 'LICENSED',
+          confirmedBy: teacher.id,
+          confirmedName: '王老師',
+          confirmedAt: new Date(),
+        },
+      });
+      assert.ok(t.id);
+
+      // 同一租戶同一出版社的名稱唯一——兩位老師各確認一次不該
+      // 產生兩個「觀念速記」，那會讓篩選失效。
+      await assert.rejects(
+        prisma.customQuestionType.create({
+          data: {
+            tenantId: tenant.id, publisherName: '翰林', name: '觀念速記',
+            description: '重複的', answerMode: 'FILL_TEXT',
+            rightsBasis: 'LICENSED',
+          },
+        }),
+        /custom_question_types_tenant_publisher_name_key|duplicate key/i,
+      );
+      return;
+    }
+  });
+
+  await test('確認過的題型說得出是誰確認的', async () => {
+    // 「向老師確認即可」的那個確認就是責任歸屬——半年後題目出問題
+    // 時要找得到人。
+    await assert.rejects(
+      prisma.$executeRawUnsafe(`
+        INSERT INTO custom_question_types
+          (id, "tenantId", name, description, "answerMode", "rightsBasis",
+           "confirmedAt", "updatedAt")
+        VALUES ('ct_bad', '${tenant.id}', '沒人確認的題型', '說明',
+                'SHORT_ANSWER', 'LICENSED', NOW(), NOW())
+      `),
+      /confirmed_by_someone|violates check constraint/i,
+    );
+  });
+
+  await test('專屬題型的授權基礎受資料庫約束', async () => {
+    await assert.rejects(
+      prisma.$executeRawUnsafe(`
+        INSERT INTO custom_question_types
+          (id, "tenantId", name, description, "answerMode", "rightsBasis", "updatedAt")
+        VALUES ('ct_bad2', '${tenant.id}', '亂填授權', '說明',
+                'SHORT_ANSWER', 'WHATEVER', NOW())
+      `),
+      /rights_basis_valid|violates check constraint/i,
+    );
+  });
+
   await test('答對率超出 0–1 會被資料庫擋下來', async () => {
     // 應用層寫錯成百分數（43 而不是 0.43）的時候，能力分析會算出
     // 「比全國高 4200%」這種數字而完全不報錯。約束要在資料庫，

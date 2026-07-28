@@ -59,6 +59,24 @@ _TAIWAN_CONTEXT = """
   不是題幹內容。
 · 社會科的非選題有**作答格**（表格狀的空白欄位，標著「作答區」）。
   那是給學生寫字的地方，標成 ANSWER_AREA，不要當成表格內容抽取。
+
+理化與生物另有幾件事：
+
+· **化學式與反應式一律用 mhchem 的 `\\ce{}`**，不要自己拼下標：
+    對：$\\ce{2H2 + O2 -> 2H2O}$、$\\ce{H2SO4}$、$\\ce{CH3COOH <=> CH3COO- + H+}$
+    錯：$2H_2 + O_2 \\rightarrow 2H_2O$
+  自己拼的排出來字級與間距都不對，電荷、狀態、可逆箭頭、沉澱符號
+  更是拼不好；而且 `\\ce{H2SO4}` 是可搜尋的穩定字串，`H_2SO_4`
+  有五種寫法。
+· **結構式、電子點式、實驗裝置圖、遺傳圖譜、細胞構造圖都是「圖」**，
+  不要試圖用文字描述它們的形狀。標成 FIGURE 並把 `alt` 寫成一句
+  完整的描述（「苯環接一個羥基的結構式」「三代家系圖，第二代
+  第 3 位為患者」）。
+· 理化的答案常標**單位**與**有效位數**（「答案取三位有效數字」）。
+  兩者都填進 `scoring`——自動改考卷時，2.00 與 2 是不是同一個答案
+  取決於它。
+· 生物的**實驗設計題**問的是控制變因、操縱變因、對照組，
+  那是 SHORT_ANSWER 不是選擇題，即使選項看起來像。
 """.strip()
 
 
@@ -274,7 +292,47 @@ READ_SYSTEM = f"""
 """.strip()
 
 
-def read_user(page_note: str, text_hint: str = "") -> str:
+def custom_types_block(types: list[dict]) -> str:
+    """
+    把這個租戶已經確認過的出版社專屬題型寫進提示詞。
+
+    這是「問老師一次，之後記住」的後半段：老師確認過一次之後，
+    定義就跟著每一次呼叫走，模型下次直接認得，不必再問。
+
+    刻意只給名稱、作答方式與辨識線索，不給題目範例——範例會佔掉
+    大量 token，而模型需要的是「怎麼認出來」而不是「長什麼樣」。
+    """
+    if not types:
+        return ""
+    lines = []
+    for t in types:
+        line = f"  · id={t['id']}　「{t['name']}」"
+        if t.get("publisher"):
+            line += f"（{t['publisher']}）"
+        line += f"　作答方式：{t['answer_mode']}"
+        if t.get("hint"):
+            line += f"\n      辨識線索：{t['hint']}"
+        if t.get("description"):
+            line += f"\n      說明：{t['description']}"
+        lines.append(line)
+
+    return f"""
+
+# 這個補習班已經確認過的出版社專屬題型
+
+遇到下列題型時，`kind` 填 `PUBLISHER_CUSTOM`，並在 `custom_type`
+填上它的 id 與名稱、`confirmed` 填 true。**id 要照抄，不要自己編**——
+自己編的話同一種題型會在系統裡有五個名字，篩選就失效了。
+
+{chr(10).join(lines)}
+
+清單裡沒有的題型不要硬套。那是新的，照「格式裡沒有的東西」那一條
+處理：`kind` 填 `OTHER`、附一筆 unsupported_content 並保留原文，
+另外在 `custom_type` 提議一個名稱與你判斷的作答方式、`confirmed`
+填 false——校對介面會把它拿給老師確認一次，之後就記住了。"""
+
+
+def read_user(page_note: str, text_hint: str = "", custom_types: list[dict] | None = None) -> str:
     hint = ""
     if text_hint:
         hint = f"""
@@ -297,7 +355,7 @@ def read_user(page_note: str, text_hint: str = "") -> str:
     return f"""
 請判讀以下頁面。
 
-{page_note}{hint}
+{page_note}{hint}{custom_types_block(custom_types or [])}
 
 只輸出符合 PageReading schema 的 JSON。
 """.strip()

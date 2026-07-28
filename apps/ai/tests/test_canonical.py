@@ -427,6 +427,154 @@ def test_document_round_trips_through_json():
     assert again.stats.questions == 1
 
 
+# ─────────────────────────────────────────────────────────────────
+# 七、理科：化學與生物
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_chemistry_notation_is_accepted():
+    """
+    化學式用 mhchem 的 `\ce{}`。自己拼 LaTeX 下標排出來字級與間距
+    都不對，電荷、狀態、可逆箭頭更是拼不好，而且搜尋不到——
+    `\ce{H2SO4}` 是穩定的字串，`H_2SO_4` 有五種寫法。
+    """
+    doc = finalize(ImportDocument(
+        document=DocumentMeta(subject=SubjectCode.CHEMISTRY),
+        questions=[q("q1", QuestionKind.CALCULATION,
+                     stem=r"下列反應 $\ce{2H2 + O2 -> 2H2O}$ 中，求限量試劑。",
+                     options=[])],
+    ))
+    assert not [i for i in doc.issues if i.code == "content_markup"], doc.issues
+
+
+def test_unbalanced_chem_braces_are_caught():
+    """
+    少一個右括號，mhchem 會把後面整段話都當成化學式排版——
+    排出來是一團看不懂的東西，而且不會報錯。
+    """
+    doc = finalize(ImportDocument(questions=[
+        q("q1", QuestionKind.CALCULATION, options=[],
+          stem=r"反應式 $\ce{2H2 + O2 -> 2H2O$，求生成物質量。"),
+    ]))
+    codes = [i.detail for i in doc.issues if i.code == "content_markup"]
+    assert any("大括號" in c for c in codes), doc.issues
+
+
+def test_science_subjects_map_to_the_combined_paper():
+    """
+    學測的自然與社會是合科考卷，但補習班分科教。分科要能對回合科，
+    否則組一份學測模擬卷時湊不起來。
+    """
+    from pipeline.canonical import PARENT_SUBJECT
+
+    assert PARENT_SUBJECT[SubjectCode.CHEMISTRY] is SubjectCode.SCIENCE
+    assert PARENT_SUBJECT[SubjectCode.BIOLOGY] is SubjectCode.SCIENCE
+    assert PARENT_SUBJECT[SubjectCode.GEOGRAPHY] is SubjectCode.SOCIAL
+    # 合科自己不是任何科的子科
+    assert SubjectCode.SCIENCE not in PARENT_SUBJECT
+
+
+def test_significant_figures_and_units_are_kept():
+    """
+    「答案取三位有效數字」是理化的常見要求。自動改考卷時
+    2.00 與 2 是不是同一個答案，取決於系統記不記得這件事。
+    """
+    from pipeline.canonical import Scoring
+
+    got = q("q1", QuestionKind.CALCULATION, options=[],
+            scoring=Scoring(score=4, unit="mol/L", sig_figs=3))
+    assert got.scoring.unit == "mol/L"
+    assert got.scoring.sig_figs == 3
+
+
+def test_biology_diagram_is_a_figure_with_alt_text():
+    """
+    遺傳圖譜、細胞構造圖、實驗裝置圖都是圖，不要用文字描述形狀。
+    替代文字要寫成完整的句子——視障學生看到的就是它。
+    """
+    doc = finalize(ImportDocument(
+        document=DocumentMeta(subject=SubjectCode.BIOLOGY),
+        assets=[Asset(id="ped", kind=AssetKind.FIGURE,
+                      placement=Placement(page=1, bbox=box()),
+                      alt="三代家系圖，第二代第 3 位為患者，第三代有兩位帶因者")],
+        questions=[q("q1", QuestionKind.SHORT_ANSWER, options=[],
+                     stem="依 ![[a:ped]] 判斷此性狀的遺傳方式。",
+                     asset_ids=["ped"])],
+    ))
+    assert not [i for i in doc.issues if i.severity is Severity.ERROR], doc.issues
+    assert doc.stats.with_assets == 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# 八、出版社專屬題型：問老師一次，之後記住
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_confirmed_custom_type_passes_clean():
+    """老師確認過的題型直接可用，不再出聲。"""
+    from pipeline.canonical import CustomTypeRef
+
+    doc = finalize(ImportDocument(questions=[
+        Question(id="q1", kind=QuestionKind.PUBLISHER_CUSTOM,
+                 stem="觀念速記：光合作用的兩個階段是 {{blank}} 與 {{blank}}",
+                 custom_type=CustomTypeRef(id="ct_1", name="觀念速記", publisher="翰林",
+                                           answer_mode=QuestionKind.FILL_BLANK,
+                                           confirmed=True),
+                 placement=Placement(page=1, bbox=box()),
+                 confidence=Confidence(score=0.9)),
+    ]))
+    assert doc.issues == [], doc.issues
+
+
+def test_proposed_custom_type_is_flagged_for_the_teacher():
+    """
+    模型提議的新題型**不可自動入庫**。它要先被拿去問老師三件事：
+    這是什麼、學生怎麼作答、有沒有取得出版社授權。
+    """
+    from pipeline.canonical import CustomTypeRef
+
+    doc = finalize(ImportDocument(questions=[
+        Question(id="q1", kind=QuestionKind.PUBLISHER_CUSTOM,
+                 stem="某種沒看過的題型",
+                 custom_type=CustomTypeRef(name="圖表解碼", publisher="南一",
+                                           answer_mode=QuestionKind.SHORT_ANSWER,
+                                           confirmed=False),
+                 placement=Placement(page=1, bbox=box()),
+                 confidence=Confidence(score=0.5)),
+    ]))
+    hit = [i for i in doc.issues if i.code == "custom_type_unconfirmed"]
+    assert hit, doc.issues
+    assert "圖表解碼" in hit[0].detail
+    assert "授權" in hit[0].detail
+
+
+def test_custom_type_without_a_description_is_an_error():
+    """
+    標成專屬題型卻說不出那是什麼，下游就不知道學生要怎麼作答——
+    系統存得下它卻沒辦法拿它考學生，那比不支援更糟，因為老師
+    以為可以用。
+    """
+    doc = finalize(ImportDocument(questions=[
+        Question(id="q1", kind=QuestionKind.PUBLISHER_CUSTOM, stem="某題",
+                 placement=Placement(page=1, bbox=box()),
+                 confidence=Confidence(score=0.8)),
+    ]))
+    hit = [i for i in doc.issues if i.code == "custom_type_missing"]
+    assert hit and hit[0].severity is Severity.ERROR, doc.issues
+
+
+def test_custom_type_answer_mode_is_a_standard_one():
+    """
+    專屬題型無論長得多特別，**作答方式一定落在標準的那幾種**。
+    這一點讓它變得可處理：系統不必懂那個題型的教學設計。
+    """
+    from pipeline.canonical import CustomTypeRef
+
+    ref = CustomTypeRef(name="雙欄配對", answer_mode=QuestionKind.MATCHING)
+    assert ref.answer_mode in set(QuestionKind)
+    assert ref.confirmed is False, "預設必須是未確認"
+
+
 if __name__ == "__main__":
     import traceback
 

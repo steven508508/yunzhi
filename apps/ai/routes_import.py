@@ -412,6 +412,10 @@ class ReadRequest(BaseModel):
     pages: list[ReadPageIn] = Field(min_length=1)
     #: 原稿檔名，寫進文件的中繼資料供回頭比對
     source_file: str | None = None
+    #: 這個補習班已經確認過的出版社專屬題型。呼叫端從資料庫撈。
+    #: 有它，模型下一次遇到同一種題型就直接認得，不必再問老師。
+    #: 形狀：{id, name, publisher, answer_mode, hint, description}
+    custom_types: list[dict] = Field(default_factory=list)
     only_pages: list[int] = Field(default_factory=list)
     #: 交叉驗證用的規則切分結果。呼叫端把 /segment 的 blocks 傳進來，
     #: 沒傳就只做閱讀不做比對。
@@ -466,6 +470,10 @@ class ReadRequest(BaseModel):
     pages: list[ReadPageIn] = Field(min_length=1)
     #: 原稿檔名，寫進文件的中繼資料供回頭比對
     source_file: str | None = None
+    #: 這個補習班已經確認過的出版社專屬題型。呼叫端從資料庫撈。
+    #: 有它，模型下一次遇到同一種題型就直接認得，不必再問老師。
+    #: 形狀：{id, name, publisher, answer_mode, hint, description}
+    custom_types: list[dict] = Field(default_factory=list)
     only_pages: list[int] = Field(default_factory=list)
     #: 交叉驗證用的規則切分結果。呼叫端把 /segment 的 blocks 傳進來，
     #: 沒傳就只做閱讀不做比對。
@@ -744,6 +752,7 @@ def build_router(get_provider) -> APIRouter:
                         image=image,
                         next_image=nxt_image,
                         text_blocks=p.text_blocks,
+                        custom_types=req.custom_types,
                         tier=req.tier,
                     )
                 results[p.index] = out

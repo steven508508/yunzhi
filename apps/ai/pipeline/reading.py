@@ -109,6 +109,7 @@ async def read_page(
     image: bytes,
     next_image: bytes | None = None,
     text_blocks: list[dict] | None = None,
+    custom_types: list[dict] | None = None,
     tier: str = "MID",
 ) -> tuple[PageReading, dict]:
     """
@@ -131,7 +132,7 @@ async def read_page(
         provider,
         model_cls=PageReading,
         system=READ_SYSTEM,
-        user=read_user(note, text_hint(text_blocks)),
+        user=read_user(note, text_hint(text_blocks), custom_types),
         tier=tier,
         max_tokens=16384,
         images=images,
