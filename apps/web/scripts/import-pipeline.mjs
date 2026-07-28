@@ -232,6 +232,7 @@ async function stageNormalize(ctx) {
         // text_blocks 存進 blocks 欄位，第二階段直接用，
         // 不必回頭再讀一次 PDF。
         blocks: p.text_blocks?.length ? { textBlocks: p.text_blocks } : null,
+        figures: p.figures?.length ? p.figures : null,
       })),
     });
 
@@ -273,7 +274,7 @@ async function stageSegment(ctx) {
     ? await prisma.importPage.findMany({
         where: { jobId: job.id, fileId: { in: fileIds } },
         orderBy: [{ fileId: 'asc' }, { index: 'asc' }],
-        select: { id: true, index: true, storageKey: true, blocks: true },
+        select: { id: true, index: true, storageKey: true, blocks: true, figures: true },
       })
     : [];
   if (pages.length === 0) {
@@ -287,6 +288,7 @@ async function stageSegment(ctx) {
         index: p.index,
         storage_key: p.storageKey,
         text_blocks: p.blocks?.textBlocks ?? [],
+        figures: p.figures ?? [],
       })),
     },
     'SEGMENTING',
@@ -351,6 +353,7 @@ async function stageExtract(ctx) {
     extracted: out.rows.length,
     genre: seg.genre ?? 'unknown',
     withExplanation: out.rows.filter((r) => r.explanationRaw).length,
+    withFigure: out.rows.filter((r) => r.assets).length,
     sectionWarnings: out.warnings,
     usage: out.usage,
   };
@@ -405,6 +408,7 @@ async function extractWorksheet(ctx, seg, existing) {
         answerText: src.answer || null,
         sourceAnswerRaw: src.answer || (src.inline_answers ?? []).join('；') || null,
         explanationRaw: src.explanation || null,
+        assets: src.assets?.length ? src.assets : null,
         score: q.score ?? null,
         confidence: q.confidence ?? 0,
         confidenceReasons: q.confidence_reasons ?? [],

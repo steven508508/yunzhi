@@ -49,6 +49,7 @@ type CandidateRow = {
   answerText: string | null;
   score: number | null;
   explanationRaw: string | null;
+  assets: unknown;
   kpSuggestions: unknown;
   sourcePage: number | null;
   questionId: string | null;
@@ -118,6 +119,9 @@ export async function commitJob(
             subLabel: c.subLabel,
             type: (c.type ?? 'SINGLE_CHOICE') as never,
             content: c.content ?? '',
+            // 附圖跟著題目走。幾何題沒有圖就是不能用的題目，
+            // 所以它與題幹一樣要在入庫時搬過去。
+            contentAssets: normalizeAssets(c.assets),
             score: c.score ?? 0,
             answerKeys: c.answerKeys ?? [],
             answerSlots: (c.answerSlots as Prisma.InputJsonValue) ?? undefined,
@@ -338,6 +342,26 @@ function normalizeOptions(raw: unknown): { order: number; label: string; content
   // 選項序號必須從 1 連續，否則 questions 的選擇題檢核會出問題。
   out.sort((a, b) => a.order - b.order);
   return out.map((o, i) => ({ ...o, order: i + 1 }));
+}
+
+/**
+ * 題目附圖。只留下真的有物件鍵的那些——沒有鍵就沒有圖可顯示，
+ * 留著只會讓前端出現破圖。
+ */
+function normalizeAssets(raw: unknown): Prisma.InputJsonValue | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .filter((a): a is Record<string, unknown> => Boolean(a) && typeof a === 'object')
+    .filter((a) => typeof a.key === 'string' && a.key)
+    .map((a) => ({
+      key: a.key as string,
+      page: typeof a.page === 'number' ? a.page : null,
+      bbox: (a.bbox as Record<string, number>) ?? null,
+      // 標籤先當替代文字用。正式的替代文字要由 AI 依題幹生成
+      // （文件 01 的無障礙要求），那是另一個階段。
+      alt: Array.isArray(a.labels) ? (a.labels as string[]).join(' ') : '',
+    }));
+  return out.length ? (out as unknown as Prisma.InputJsonValue) : undefined;
 }
 
 function normalizeKp(raw: unknown): { id: string; weight: number }[] {

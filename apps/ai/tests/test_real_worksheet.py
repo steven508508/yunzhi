@@ -72,7 +72,8 @@ def _run(sample: Path = None):
         "/v1/import/segment",
         json={
             "pages": [
-                {"index": p["index"], "storage_key": p["storage_key"], "text_blocks": p["text_blocks"]}
+                {"index": p["index"], "storage_key": p["storage_key"],
+                 "text_blocks": p["text_blocks"], "figures": p["figures"]}
                 for p in norm["pages"]
             ]
         },
@@ -134,6 +135,61 @@ def test_real_worksheet():
     # 頁首頁尾不該出現在題幹裡
     for e in ex:
         assert "互動式教學講義" not in e["stem"], f"頁首漏進題幹：{e['label']}"
+
+
+def test_figures_are_extracted_and_attached():
+    """
+    講義的幾何題幾乎每題都有附圖。抓不到圖的話，題幹寫著「如右圖」
+    而學生看到一片空白——那是不能用的題目。
+    """
+    if not SAMPLE.exists():
+        print(f"  · 跳過：找不到 {SAMPLE}")
+        return
+
+    norm, segd = _run()
+
+    total = sum(len(p["figures"]) for p in norm["pages"])
+    assert total >= 20, f"整份只抓到 {total} 張圖，太少"
+
+    # 圖要真的裁出來並寫進物件儲存
+    keys = [f["key"] for p in norm["pages"] for f in p["figures"]]
+    assert keys, "沒有任何圖被裁切"
+    for k in keys[:5]:
+        assert k in _FAKE, f"{k} 沒有寫進物件儲存"
+        assert len(_FAKE[k]) > 500, f"{k} 太小，可能裁到空白"
+
+    with_fig = [e for e in segd["exercises"] if e["assets"]]
+    assert len(with_fig) >= 8, f"只有 {len(with_fig)} 題掛到圖"
+
+    # bbox 要在頁面範圍內，否則校對介面的連動會指到頁面外
+    for p in norm["pages"]:
+        for f in p["figures"]:
+            b = f["bbox"]
+            assert 0 <= b["x0"] < b["x1"] <= 1, b
+            assert 0 <= b["y0"] < b["y1"] <= 1, b
+
+
+def test_math_is_reconstructed_in_real_content():
+    """
+    分數與上下標要真的組回來。沒組起來的話下游收到的是
+    `－3－（－1）＝－7` 這種碎片，而模型會盡力理解然後給出
+    合理但錯誤的結果——沒有任何錯誤訊息。
+    """
+    if not SAMPLE.exists():
+        print(f"  · 跳過：找不到 {SAMPLE}")
+        return
+
+    _, segd = _run()
+    body = "\n".join(
+        (e["stem"] + "\n" + e["explanation"]) for e in segd["exercises"]
+    )
+    assert r"\frac" in body, "一份數學講義不可能沒有分數"
+    assert "^{" in body or "_{" in body, "應該有上下標"
+    # 全形運算符號在數學區間內要換成半形，否則 KaTeX 排不出來
+    import re
+
+    for m in re.finditer(r"\$([^$]+)\$", body):
+        assert "＝" not in m.group(1), f"數學區間裡還有全形等號：{m.group(1)[:40]}"
 
 
 def test_every_sample_parses():

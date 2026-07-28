@@ -31,6 +31,7 @@ import storage
 from providers import BaseProvider, ContentRefused, FatalError, ProviderError, RetryableError
 from pipeline import segment as seg
 from pipeline import stages
+from pipeline import figures as figmod
 from pipeline import glyphmap
 from pipeline.normalize import Prepared, normalize, prepare
 from pipeline.prompts import PROMPT_VERSION
@@ -140,6 +141,8 @@ class PageOut(BaseModel):
     quality_notes: list[str] = Field(default_factory=list)
     #: 這一頁各區塊的主要墨色。教用版靠顏色分辨題目與詳解。
     ink: str | None = None
+    #: 這一頁偵測到的圖。bbox 已正規化為頁面比例。
+    figures: list[dict] = Field(default_factory=list)
 
 
 class GlyphInfo(BaseModel):
@@ -177,6 +180,44 @@ def _normalize_sync(req: NormalizeRequest, prep: Prepared, t0: float) -> Normali
     """
     result = normalize(prep)
 
+    # 附圖。只有 PDF 走得到——影像來源整張就是一張圖，
+    # 沒有「圖在哪裡」的問題。
+    figures_by_page: dict[int, list[dict]] = {}
+    if prep.pdf:
+        import fitz
+
+        doc = fitz.open(stream=prep.pdf, filetype="pdf")
+        try:
+            for pno in range(min(len(doc), req.max_pages)):
+                page = doc[pno]
+                found = figmod.find_figures(page)
+                if not found:
+                    continue
+                w, h = page.rect.width, page.rect.height
+                items = []
+                for idx, fig in enumerate(found):
+                    key = (
+                        f"{req.page_key_prefix.rstrip('/')}/"
+                        f"fig/{pno + 1:04d}-{idx:02d}.png"
+                    )
+                    try:
+                        storage.put_bytes(key, figmod.crop(page, fig), "image/png")
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("第 %d 頁第 %d 張圖裁切失敗：%s", pno + 1, idx, e)
+                        continue
+                    items.append(
+                        {
+                            "key": key,
+                            "bbox": fig.norm(w, h),
+                            "labels": fig.labels[:12],
+                            "strokes": fig.strokes,
+                        }
+                    )
+                if items:
+                    figures_by_page[pno + 1] = items
+        finally:
+            doc.close()
+
     pages = result.pages[: req.max_pages]
     truncated = len(result.pages) > len(pages)
 
@@ -199,6 +240,7 @@ def _normalize_sync(req: NormalizeRequest, prep: Prepared, t0: float) -> Normali
                 quality=p.quality,
                 quality_notes=p.quality_notes,
                 ink=max(set(inks), key=inks.count) if inks else None,
+                figures=figures_by_page.get(page_no, []),
             )
         )
 
@@ -278,6 +320,7 @@ class SegmentPage(BaseModel):
     index: int
     storage_key: str = ""
     text_blocks: list[dict] = Field(default_factory=list)
+    figures: list[dict] = Field(default_factory=list)
 
 
 class SegmentRequest(BaseModel):
@@ -302,6 +345,8 @@ class ExerciseOut(BaseModel):
     explanation: str = ""
     answer: str = ""
     inline_answers: list[str] = Field(default_factory=list)
+    #: 這一題的附圖。沒有圖的幾何題是不能用的題目。
+    assets: list[dict] = Field(default_factory=list)
 
 
 class SegmentResponse(BaseModel):
@@ -420,6 +465,35 @@ class HashResponse(BaseModel):
     hashes: list[str]
 
 
+def _assets_for(unit, figures_by_page: dict[int, list[dict]]) -> list[dict]:
+    """
+    把圖分派給題目單位。
+
+    判準是**垂直重疊**：講義的圖都放在題目右側、與題幹同高。
+    用「最近的一行」會分錯——兩題之間那張圖旁邊最近的一行
+    常常是上一題的詳解。
+
+    重疊不到就不分派。寧可讓校對者手動補，也不要分錯：
+    分錯的圖比沒有圖更容易誤導學生。
+    """
+    blocks = unit.stem + unit.explanation
+    if not blocks:
+        return []
+
+    out: list[dict] = []
+    for b in blocks:
+        page = b.bbox.page
+        for fig in figures_by_page.get(page, []):
+            bb = fig.get("bbox") or {}
+            overlap = min(b.bbox.y1, bb.get("y1", 0)) - max(b.bbox.y0, bb.get("y0", 0))
+            if overlap <= 0:
+                continue
+            if any(a["key"] == fig["key"] for a in out):
+                continue
+            out.append({**fig, "page": page})
+    return out
+
+
 def build_router(get_provider) -> APIRouter:
     """
     把 provider 注入各端點。
@@ -499,12 +573,14 @@ def build_router(get_provider) -> APIRouter:
         # 講義才切題目單位。試卷走 sections，兩條路不重疊。
         exercises: list[ExerciseOut] = []
         if genre == "worksheet":
+            figures_by_page = {p.index: p.figures for p in req.pages if p.figures}
             for u in seg.split_by_exercise(merged):
                 stem = u.stem_text()
                 exercises.append(
                     ExerciseOut(
                         label=u.label,
                         page=u.page,
+                        assets=_assets_for(u, figures_by_page),
                         stem=stem,
                         explanation=u.explanation_text(),
                         answer=u.answer,

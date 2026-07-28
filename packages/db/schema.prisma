@@ -1015,6 +1015,9 @@ model ImportPage {
   qualityNotes Json     @default("[]")
   // 版面切割結果（第 2 階段）。每頁一份，避免整份文件一大坨。
   blocks       Json?
+  // 這一頁偵測到的圖。關聯到哪一題是切分階段算的，
+  // 原始清單留在頁面上，重跑結構化時不必重新裁圖。
+  figures      Json?
   createdAt    DateTime @default(now())
 
   job  ImportJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
@@ -1057,6 +1060,9 @@ model ImportCandidate {
   kpSuggestions Json?
   sourceBbox    Json? // 原稿座標，供左右連動
   sourcePage    Int?
+  // 這一題的附圖。[{key, bbox, labels, width, height}]
+  // 幾何題沒有圖就是不能用的題目，所以它與題幹一樣重要。
+  assets        Json?
 
   // 原稿附帶的內容。與 answerText 分開存：answerText 是校對後
   // 要入庫的值，這幾個是原稿長什麼樣，不一致時要看得出來。
