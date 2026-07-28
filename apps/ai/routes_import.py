@@ -33,6 +33,7 @@ from pipeline import segment as seg
 from pipeline import stages
 from pipeline import figures as figmod
 from pipeline import glyphmap
+from pipeline import canonical
 from pipeline import reading
 from pipeline.normalize import Prepared, normalize, prepare
 from pipeline.prompts import PROMPT_VERSION
@@ -409,6 +410,8 @@ class ReadPageIn(BaseModel):
 
 class ReadRequest(BaseModel):
     pages: list[ReadPageIn] = Field(min_length=1)
+    #: 原稿檔名，寫進文件的中繼資料供回頭比對
+    source_file: str | None = None
     only_pages: list[int] = Field(default_factory=list)
     #: 交叉驗證用的規則切分結果。呼叫端把 /segment 的 blocks 傳進來，
     #: 沒傳就只做閱讀不做比對。
@@ -416,46 +419,58 @@ class ReadRequest(BaseModel):
     tier: str = "MID"
 
 
-class ReadQuestionOut(BaseModel):
-    page: int
-    question_no: str | None = None
-    sub_label: str | None = None
-    group_key: str | None = None
-    label: str | None = None
-    type: str
-    content: str
-    options: list[dict] = Field(default_factory=list)
-    answer_slots: list[dict] = Field(default_factory=list)
-    printed_answer_keys: list[int] = Field(default_factory=list)
-    printed_answer_text: str | None = None
-    explanation: str | None = None
-    score: float | None = None
-    has_figure: bool = False
-    figure_alt: str | None = None
-    source_bbox: dict | None = None
-    source_exam: str | None = None
-    national_correct_rate: float | None = None
-    continues_to_next: bool = False
-    confidence: float = 0.0
-    confidence_reasons: list[dict] = Field(default_factory=list)
-
-
 class ReadResponse(BaseModel):
+    """
+    整頁閱讀的結果。
+
+    `document` 是**標準交換格式（QIF）的完整文件**——不論原稿是哪
+    一科、哪一家出版社、教用版還是學生版、原生 PDF 還是手機拍的，
+    這個欄位的形狀都一樣。呼叫端把它整份存起來，下游只認它。
+    """
+
     method: dict[int, str]
-    genre: str = "unknown"
-    questions: list[ReadQuestionOut] = Field(default_factory=list)
-    blocks: list[LayoutBlock] = Field(default_factory=list)
-    #: 講義的觀念頁。不是題目，但智慧老師要用它補前置觀念。
-    materials: list[dict] = Field(default_factory=list)
+    document: dict
+    schema_version: str = canonical.SCHEMA_VERSION
+    #: 模型回報的圖，已裁切並寫進物件儲存。document.assets 裡的
+    #: storage_key 已經填好，這裡是給呼叫端做批次處理用的索引。
     figures: dict[int, list[dict]] = Field(default_factory=dict)
-    #: 模型自己說不確定的地方，逐頁彙整。
-    unsure: list[str] = Field(default_factory=list)
-    #: 與規則路徑不一致的地方。會變成候選題上的存疑理由。
+    #: 與規則路徑不一致的地方。已併進 document.issues，這裡另外列
+    #: 一份是為了讓呼叫端不必從整份文件裡撈。
     disagreements: list[dict] = Field(default_factory=list)
     failed_pages: list[str] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     elapsed_ms: int = 0
 
+
+#: 視覺切分的並行度。壓得比 provider 的併發上限低，是因為每次請求
+#: 帶兩張 300 dpi 的頁面影像，記憶體與上游速率都吃得比純文字重。
+_VISION_CONCURRENCY = 3
+
+
+# ─────────────────────────────────────────────────────────────────
+# 階段二之一：整頁閱讀（模型為主）
+#
+# 取代「規則切分 → 模型結構化」兩段。規則路徑仍然照跑，但改當
+# 交叉驗證——理由與設計見 pipeline/reading.py 的檔頭。
+# ─────────────────────────────────────────────────────────────────
+
+
+class ReadPageIn(BaseModel):
+    index: int
+    storage_key: str
+    #: 原生 PDF 才有。只當字元比對用，衝突時以影像為準。
+    text_blocks: list[dict] = Field(default_factory=list)
+
+
+class ReadRequest(BaseModel):
+    pages: list[ReadPageIn] = Field(min_length=1)
+    #: 原稿檔名，寫進文件的中繼資料供回頭比對
+    source_file: str | None = None
+    only_pages: list[int] = Field(default_factory=list)
+    #: 交叉驗證用的規則切分結果。呼叫端把 /segment 的 blocks 傳進來，
+    #: 沒傳就只做閱讀不做比對。
+    rule_blocks: list[dict] = Field(default_factory=list)
+    tier: str = "MID"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -706,7 +721,7 @@ def build_router(get_provider) -> APIRouter:
             raise HTTPException(400, detail="沒有要判讀的頁面")
 
         by_index = {p.index: p for p in req.pages}
-        results: dict[int, ReadResult] = {}
+        results: dict[int, canonical.PageReading] = {}
         method: dict[int, str] = {}
         failed: list[str] = []
         usage = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
@@ -740,66 +755,51 @@ def build_router(get_provider) -> APIRouter:
                 # 單頁失敗不該讓整份失敗。校對介面會顯示「第 N 頁
                 # 未能判讀」，老師可以只重跑那一頁或手動補。
                 log.error("第 %d 頁判讀失敗：%s", p.index, e)
-                results[p.index] = ReadResult()
+                results[p.index] = canonical.PageReading()
                 method[p.index] = f"failed: {type(e).__name__}"
                 failed.append(f"第 {p.index} 頁（{type(e).__name__}）")
 
         await asyncio.gather(*(one(p) for p in pages))
 
-        ordered = [results[p.index] for p in sorted(pages, key=lambda x: x.index)]
+        ordered = sorted(pages, key=lambda x: x.index)
+        readings = [(p.index, results[p.index]) for p in ordered]
 
-        questions: list[ReadQuestionOut] = []
-        blocks: list[LayoutBlock] = []
-        materials: list[dict] = []
-        unsure: list[str] = []
-        genres: list[str] = []
-
-        for p in sorted(pages, key=lambda x: x.index):
-            res = results[p.index]
-            blocks.extend(res.blocks)
-            unsure.extend(f"第 {p.index} 頁：{u}" for u in res.unsure)
-            if res.genre != "unknown":
-                genres.append(res.genre)
-            for m in res.materials:
-                materials.append({
-                    "page": p.index,
-                    "title": m.title,
-                    "body": m.body,
-                    "bbox": m.bbox.model_dump() if m.bbox else None,
-                })
-            for q in res.questions:
-                questions.append(
-                    ReadQuestionOut(
-                        page=p.index,
-                        question_no=q.question_no,
-                        sub_label=q.sub_label,
-                        group_key=q.group_key,
-                        label=q.label,
-                        type=q.type.value,
-                        content=q.content,
-                        options=[o.model_dump() for o in q.options],
-                        answer_slots=[s.model_dump() for s in q.answer_slots],
-                        printed_answer_keys=q.printed_answer_keys,
-                        printed_answer_text=q.printed_answer_text,
-                        explanation=q.explanation,
-                        score=q.score,
-                        has_figure=q.has_figure,
-                        figure_alt=q.figure_alt,
-                        source_bbox=q.source_bbox.model_dump() if q.source_bbox else None,
-                        source_exam=q.source_exam,
-                        national_correct_rate=q.national_correct_rate,
-                        continues_to_next=q.continues_to_next,
-                        confidence=q.confidence,
-                        confidence_reasons=[r_.model_dump() for r_ in q.confidence_reasons],
-                    )
+        # ── 裁圖 ────────────────────────────────────────────────
+        #
+        # 掃描件沒有向量繪圖資料，模型回報的位置是唯一的來源。
+        # 裁完把 storage_key 填回資產上——下游就不必知道圖是怎麼
+        # 來的（原生 PDF 的繪圖物件、還是模型指的位置）。
+        figures: dict[int, list[dict]] = {}
+        for page_no, r in readings:
+            src = by_index.get(page_no)
+            if not src or not src.storage_key:
+                continue
+            page_png = None
+            for idx, asset in enumerate(r.assets):
+                if asset.kind not in (canonical.AssetKind.FIGURE, canonical.AssetKind.TABLE):
+                    continue
+                box = asset.placement.bbox
+                if not box or box.x1 - box.x0 < _MIN_FIG_SIDE or box.y1 - box.y0 < _MIN_FIG_SIDE:
+                    continue
+                try:
+                    if page_png is None:
+                        page_png = storage.get_bytes(src.storage_key)
+                    key = f"{src.storage_key.rsplit('.', 1)[0]}-fig-{idx:02d}.png"
+                    storage.put_bytes(key, _crop_png(page_png, box), "image/png")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("第 %d 頁第 %d 張圖裁切失敗：%s", page_no, idx, e)
+                    continue
+                asset.storage_key = key
+                figures.setdefault(page_no, []).append(
+                    {"key": key, "bbox": box.model_dump(), "alt": asset.alt,
+                     "kind": asset.kind.value}
                 )
 
-        # 模型回報的 FIGURE 區塊裁成實際的圖檔
-        vision_figs = _crop_vision_figures(
-            ordered,
-            {i: SegmentPage(index=p.index, storage_key=p.storage_key)
-             for i, p in by_index.items()},
-            {i: "vision" for i in method},
+        # ── 組裝成一份標準文件 ──────────────────────────────────
+        doc = canonical.assemble(
+            readings,
+            source_file=req.source_file,
+            page_count=len(req.pages),
         )
 
         # ── 交叉驗證 ────────────────────────────────────────────
@@ -807,8 +807,7 @@ def build_router(get_provider) -> APIRouter:
         if req.rule_blocks:
             try:
                 rule = [LayoutBlock.model_validate(b) for b in req.rule_blocks]
-                all_q = [q for res in ordered for q in res.questions]
-                disagreements = reading.cross_check(all_q, rule)
+                disagreements = reading.cross_check(doc.questions, rule)
             except Exception as e:  # noqa: BLE001
                 # 比對本身壞掉不該讓整份匯入失敗——它是第二意見，
                 # 不是主線。但要留下痕跡，否則沒有人會發現比對沒跑。
@@ -817,15 +816,23 @@ def build_router(get_provider) -> APIRouter:
                     "scope": "job", "code": "crosscheck_failed", "severity": "info",
                     "detail": f"規則交叉驗證未能執行（{type(e).__name__}），本次只有模型的結果。",
                 }]
+        for d in disagreements:
+            doc.issues.append(canonical.Issue(
+                code=d["code"],
+                severity=canonical.Severity(d.get("severity", "warn")),
+                detail=d["detail"],
+            ))
+        for f in failed:
+            doc.issues.append(canonical.Issue(
+                code="page_unreadable", severity=canonical.Severity.ERROR,
+                detail=f"{f} 未能判讀。這一頁的題目完全沒有進來，請重跑或手動補。",
+            ))
+        doc.stats = canonical.recompute_stats(doc)
 
         return ReadResponse(
             method=method,
-            genre=max(set(genres), key=genres.count) if genres else "unknown",
-            questions=questions,
-            blocks=blocks,
-            materials=materials,
-            figures=vision_figs,
-            unsure=unsure,
+            document=doc.model_dump(mode="json"),
+            figures=figures,
             disagreements=disagreements,
             failed_pages=failed,
             usage=Usage(
@@ -838,6 +845,16 @@ def build_router(get_provider) -> APIRouter:
             ),
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
         )
+
+    @r.get("/schema")
+    async def _schema() -> dict:  # noqa: ANN202
+        """
+        標準交換格式的 JSON Schema。
+
+        這是「交換格式」名副其實的地方：日後要把題庫轉出去給別的
+        系統、或別的系統要轉進來，靠的是這一份而不是讀我們的原始碼。
+        """
+        return canonical.json_schema()
 
     @r.post("/segment", response_model=SegmentResponse)
     async def _segment(req: SegmentRequest) -> SegmentResponse:  # noqa: ANN202

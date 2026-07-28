@@ -30,15 +30,17 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 from pipeline import reading  # noqa: E402
-from pipeline.schemas import (  # noqa: E402
-    BBox,
-    BlockType,
-    LayoutBlock,
-    OptionOut,
-    QuestionType,
-    ReadQuestion,
-    ReadResult,
+from pipeline.canonical import (  # noqa: E402
+    Answer,
+    AnswerSource,
+    Confidence,
+    Option,
+    PageReading,
+    Placement,
+    Question,
+    QuestionKind,
 )
+from pipeline.schemas import BBox, BlockType, LayoutBlock  # noqa: E402
 
 SAMPLES = sorted(Path("/home/claude/samples").glob("*.pdf"))
 
@@ -53,18 +55,26 @@ def png(width=2575, height=3615) -> bytes:
     return buf.tobytes()
 
 
-def q(no, content, options=(), keys=(), **kw):
-    return ReadQuestion(
-        question_no=no,
-        type=QuestionType.SINGLE_CHOICE if options else QuestionType.SHORT_ANSWER,
-        content=content,
+def q(no, content, options=(), keys=(), page=1, **kw):
+    return Question(
+        id=f"q{no}",
+        number=str(no),
+        kind=QuestionKind.SINGLE_CHOICE if options else QuestionKind.SHORT_ANSWER,
+        stem=content,
         options=[
-            OptionOut(order=i + 1, label=f"({i + 1})", content=o)
+            Option(order=i + 1, label=f"({i + 1})", content=o)
             for i, o in enumerate(options)
         ],
-        printed_answer_keys=list(keys),
-        confidence=0.9,
-        **kw,
+        answer=(
+            Answer(source=AnswerSource.PRINTED, keys=list(keys))
+            if keys else Answer()
+        ),
+        placement=Placement(
+            page=page,
+            bbox=BBox(page=page, x0=0.08, y0=0.1, x1=0.92, y1=0.2),
+            **kw,
+        ),
+        confidence=Confidence(score=0.9),
     )
 
 
@@ -158,7 +168,7 @@ def test_text_hint_is_capped():
 # ─────────────────────────────────────────────────────────────────
 
 
-def stub_reader(result: ReadResult):
+def stub_reader(result: PageReading):
     """把 _structured 換成固定回覆，測跨頁與正規化的邏輯。"""
     from pipeline import stages
 
@@ -177,15 +187,8 @@ def test_next_page_blocks_are_dropped():
     """
     from pipeline import stages
 
-    result = ReadResult(
-        blocks=[
-            LayoutBlock(type=BlockType.STEM,
-                        bbox=BBox(page=1, x0=0.1, y0=0.1, x1=0.9, y1=0.2),
-                        text="本頁的題目"),
-            LayoutBlock(type=BlockType.STEM,
-                        bbox=BBox(page=2, x0=0.1, y0=0.1, x1=0.9, y1=0.2),
-                        text="下一頁的題目"),
-        ],
+    result = PageReading(
+        questions=[q(1, "本頁的題目", page=1), q(2, "下一頁的題目", page=2)],
     )
     original = stub_reader(result)
     try:
@@ -195,22 +198,21 @@ def test_next_page_blocks_are_dropped():
     finally:
         stages._structured = original
 
-    assert [b.text for b in out.blocks] == ["本頁的題目"]
-    assert out.blocks[0].bbox.page == 7, "頁碼沒有換算回真實頁碼"
+    assert [x.stem for x in out.questions] == ["本頁的題目"]
+    assert out.questions[0].placement.page == 7, "頁碼沒有換算回真實頁碼"
 
 
 def test_question_bbox_pages_are_remapped():
     from pipeline import stages
 
-    result = ReadResult(
-        questions=[q("3", "求 x 的值", source_bbox=BBox(page=1, x0=0.1, y0=0.1, x1=0.9, y1=0.2))],
-    )
+    result = PageReading(questions=[q(3, "求 x 的值", page=1)])
     original = stub_reader(result)
     try:
         out, _ = asyncio.run(reading.read_page(None, page_index=12, image=png()))
     finally:
         stages._structured = original
-    assert out.questions[0].source_bbox.page == 12
+    assert out.questions[0].placement.page == 12
+    assert out.questions[0].placement.bbox.page == 12
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -227,21 +229,24 @@ def test_printed_answer_outside_the_options_is_rejected():
     import pydantic
 
     try:
-        q("7", "下列何者正確？", options=("甲", "乙"), keys=(4,))
+        q(7, "下列何者正確？", options=("甲", "乙"), keys=(4,))
         raise AssertionError("超出範圍的答案沒有被擋下來")
     except pydantic.ValidationError as e:
         assert "超出選項範圍" in str(e)
 
 
 def test_printed_answer_within_range_is_fine():
-    got = q("7", "下列何者正確？", options=("甲", "乙", "丙"), keys=(3,))
-    assert got.printed_answer_keys == [3]
+    got = q(7, "下列何者正確？", options=("甲", "乙", "丙"), keys=(3,))
+    assert got.answer.keys == [3]
+    assert got.answer.source is AnswerSource.PRINTED
 
 
 def test_no_printed_answer_is_the_normal_case():
     """學生版沒有印答案。空的就是空的——推導答案是另一個階段的事，
     那條路有多次投票與一致率把關，這裡沒有。"""
-    assert q("7", "下列何者正確？", options=("甲", "乙")).printed_answer_keys == []
+    got = q(7, "下列何者正確？", options=("甲", "乙"))
+    assert got.answer.keys == []
+    assert got.answer.source is AnswerSource.NONE
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -251,8 +256,8 @@ def test_no_printed_answer_is_the_normal_case():
 
 def test_agreement_produces_no_noise():
     """兩邊看到一樣的東西時不要出聲。假警報會讓人開始忽略警報。"""
-    questions = [q("1", "設 A（6，6）、B（4，7）三點共線，則 k＝？"),
-                 q("2", "求通過 P（1，2）且斜率為 3 的直線方程式")]
+    questions = [q(1, "設 A（6，6）、B（4，7）三點共線，則 k＝？"),
+                 q(2, "求通過 P（1，2）且斜率為 3 的直線方程式")]
     rules = [rule_block("1. 設 A（6，6）、B（4，7）三點共線，則 k＝？"),
              rule_block("2. 求通過 P（1，2）且斜率為 3 的直線方程式")]
     assert reading.cross_check(questions, rules) == []
@@ -260,7 +265,7 @@ def test_agreement_produces_no_noise():
 
 def test_missing_questions_are_flagged():
     """規則切出 8 題而模型只讀出 2 題——有東西被整段漏掉了。"""
-    questions = [q("1", "第一題的內容在這裡，長度要夠才比得出來")]
+    questions = [q(1, "第一題的內容在這裡，長度要夠才比得出來")]
     rules = [rule_block(f"{i}. 第 {i} 題的內容在這裡，長度要夠才比得出來")
              for i in range(1, 9)]
     issues = reading.cross_check(questions, rules)
@@ -273,7 +278,7 @@ def test_teacher_edition_answers_lost_by_the_model_is_an_error():
     模型一個都沒讀到，多半是模型把教用版當成了學生版——那會讓
     整批題目沒有標準答案，而且看起來很正常。
     """
-    questions = [q("1", "設 A（6，6）、B（4，7）、C（2，k）三點共線，則 k＝？")]
+    questions = [q(1, "設 A（6，6）、B（4，7）、C（2，k）三點共線，則 k＝？")]
     rules = [rule_block("1. 設 A（6，6）、B（4，7）、C（2，k）三點共線，則 k＝？",
                         answers=["(B)", "8", "－13"])]
     issues = reading.cross_check(questions, rules)
@@ -282,7 +287,7 @@ def test_teacher_edition_answers_lost_by_the_model_is_an_error():
 
 
 def test_disagreeing_answers_are_an_error():
-    questions = [q("1", "設 A、B、C 三點共線，則 k 的值為何？",
+    questions = [q(1, "設 A、B、C 三點共線，則 k 的值為何？",
                    options=("甲", "乙", "丙"), keys=(1,))]
     rules = [rule_block("1. 設 A、B、C 三點共線，則 k 的值為何？", answers=["(3)"])]
     issues = reading.cross_check(questions, rules)
@@ -290,7 +295,7 @@ def test_disagreeing_answers_are_an_error():
 
 
 def test_matching_answers_are_not_flagged():
-    questions = [q("1", "設 A、B、C 三點共線，則 k 的值為何？",
+    questions = [q(1, "設 A、B、C 三點共線，則 k 的值為何？",
                    options=("甲", "乙", "丙"), keys=(3,))]
     rules = [rule_block("1. 設 A、B、C 三點共線，則 k 的值為何？", answers=["(3)"])]
     assert not [i for i in reading.cross_check(questions, rules)
@@ -303,14 +308,14 @@ def test_math_notation_differences_do_not_trigger_a_warning():
     `$\\dfrac{7-6}{4-6}$`。兩者是同一題，比對不該為此出聲——
     假警報比沒有警報更糟，它會讓人養成略過的習慣。
     """
-    questions = [q("1", r"設 $m=\frac{7-6}{4-6}$，求 $m$ 的值並說明理由")]
+    questions = [q(1, r"設 $m=\frac{7-6}{4-6}$，求 $m$ 的值並說明理由")]
     rules = [rule_block(r"1. 設 $m=\dfrac{7-6}{4-6}$，求 $m$ 的值並說明理由")]
     assert reading.cross_check(questions, rules) == []
 
 
 def test_no_rule_blocks_means_no_comparison():
     """規則路徑沒跑（例如掃描件）時，不要憑空生出「不一致」。"""
-    assert reading.cross_check([q("1", "隨便一題")], []) == []
+    assert reading.cross_check([q(1, "隨便一題")], []) == []
 
 
 if __name__ == "__main__":

@@ -40,7 +40,8 @@ import logging
 from providers import BaseProvider
 
 from .prompts import READ_SYSTEM, read_user
-from .schemas import BlockType, ReadQuestion, ReadResult
+from .canonical import ASSET_REF, PageReading, Question
+from .schemas import BlockType
 
 log = logging.getLogger("yunzhi.ai.reading")
 
@@ -109,7 +110,7 @@ async def read_page(
     next_image: bytes | None = None,
     text_blocks: list[dict] | None = None,
     tier: str = "MID",
-) -> tuple[ReadResult, dict]:
+) -> tuple[PageReading, dict]:
     """
     讀一頁，回傳 (結果, 用量)。
 
@@ -128,7 +129,7 @@ async def read_page(
 
     result, completion = await _structured(
         provider,
-        model_cls=ReadResult,
+        model_cls=PageReading,
         system=READ_SYSTEM,
         user=read_user(note, text_hint(text_blocks)),
         tier=tier,
@@ -142,23 +143,30 @@ async def read_page(
         "estimated": getattr(u, "estimated", False),
     }
 
-    # 模型回報的 page 可能是 1 或 2（它看到兩頁）。換算回真實頁碼，
-    # 然後**只留本頁**——次頁的內容由它自己那一次呼叫負責。
-    kept = []
-    for b in result.blocks:
-        b.bbox.page = page_index if b.bbox.page <= 1 else page_index + (b.bbox.page - 1)
-        if b.bbox.page == page_index:
-            kept.append(b)
-    result.blocks = kept
+    # 模型看到兩頁，回報的 page 可能是 1 或 2。換算回真實頁碼，
+    # 然後**只留本頁**——次頁的內容由它自己那一次呼叫負責。兩邊都留
+    # 的話，第 2 頁起每一頁的內容都會進題庫兩次。
+    def fix(items: list) -> list:
+        out = []
+        for it in items:
+            pl = it.placement
+            pl.page = page_index if pl.page <= 1 else page_index + (pl.page - 1)
+            if pl.bbox:
+                pl.bbox.page = pl.page
+            if pl.page == page_index:
+                out.append(it)
+        return out
 
-    for q in result.questions:
-        if q.source_bbox:
-            p = q.source_bbox.page
-            q.source_bbox.page = page_index if p <= 1 else page_index + (p - 1)
-    for m in result.materials:
-        if m.bbox:
-            p = m.bbox.page
-            m.bbox.page = page_index if p <= 1 else page_index + (p - 1)
+    result.assets = fix(result.assets)
+    result.sections = fix(result.sections)
+    result.groups = fix(result.groups)
+    result.questions = fix(result.questions)
+    result.materials = fix(result.materials)
+    for i in result.issues:
+        if i.page is None or i.page <= 1:
+            i.page = page_index
+        elif i.page == 2:
+            i.page = page_index + 1
 
     return result, usage
 
@@ -206,7 +214,7 @@ _STEM_MATCH = 0.62
 
 
 def cross_check(
-    model_questions: list[ReadQuestion],
+    model_questions: list[Question],
     rule_blocks: list,
 ) -> list[dict]:
     """
@@ -252,13 +260,13 @@ def cross_check(
     for q in model_questions:
         best, best_i = 0.0, -1
         for i, s in enumerate(pool):
-            r = _similar(q.content, s)
+            r = _similar(q.stem, s)
             if r > best:
                 best, best_i = r, i
         if best >= _STEM_MATCH:
             pool.pop(best_i)
         else:
-            unmatched.append(q.question_no or q.label or q.content[:20])
+            unmatched.append(q.number or q.label or q.stem[:20])
 
     if unmatched and rule_stems:
         issues.append({
@@ -279,8 +287,10 @@ def cross_check(
     # 這一項最要緊。規則路徑抓答案靠顏色與版面（零推論），模型靠
     # 閱讀。兩邊都抓到卻不一樣，一定有一邊錯，而錯的那一邊會讓
     # 一整班的成績是錯的。
+    from .canonical import AnswerSource
+
     model_has_answer = sum(
-        1 for q in model_questions if q.printed_answer_keys or q.printed_answer_text
+        1 for q in model_questions if q.answer.source is AnswerSource.PRINTED
     )
     if rule_answers and not model_has_answer:
         issues.append({
@@ -309,16 +319,19 @@ def cross_check(
     return issues
 
 
-def _answers_overlap(model_questions: list[ReadQuestion], rule_answers: list[str]) -> bool:
+def _answers_overlap(model_questions: list[Question], rule_answers: list[str]) -> bool:
     """兩邊的答案集合有沒有交集。完全沒有交集才算「對不上」。"""
     pool = {_norm(a) for a in rule_answers if a}
     if not pool:
         return True
     for q in model_questions:
-        for k in q.printed_answer_keys:
+        for k in q.answer.keys:
             label = q.options[k - 1].label if 0 < k <= len(q.options) else str(k)
             if any(_norm(label) in a or a in _norm(label) for a in pool if a):
                 return True
-        if q.printed_answer_text and _norm(q.printed_answer_text) in pool:
+        if q.answer.text and _norm(q.answer.text) in pool:
             return True
+        for slot in q.answer.slots:
+            if _norm(slot.value) in pool:
+                return True
     return False

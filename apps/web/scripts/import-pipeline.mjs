@@ -309,7 +309,13 @@ async function stageSegment(ctx) {
   try {
     read = await callAI(
       '/v1/import/read',
-      { pages: pageInput, rule_blocks: rules.blocks ?? [] },
+      {
+        pages: pageInput.map(({ index, storage_key, text_blocks }) => ({
+          index, storage_key, text_blocks,
+        })),
+        rule_blocks: rules.blocks ?? [],
+        source_file: job.title,
+      },
       'SEGMENTING',
     );
   } catch (e) {
@@ -320,10 +326,24 @@ async function stageSegment(ctx) {
     console.warn(`[import] ${job.id} 整頁判讀失敗，降級為規則切分：${e.message}`);
   }
 
-  // 每頁的版面寫回，讓校對介面能做左右連動。模型的區塊優先——
-  // 它的分類比規則準；規則的留著當備份，兩者都在同一筆 JSON 裡。
+  // ── 整份標準文件寫回 ────────────────────────────────────────
+  //
+  // 候選題是從它產出來的，而它本身要留著：題組的共用素材、圖的
+  // 替代文字、觀念頁都不屬於任何單一候選題，沒有別的地方掛；
+  // 而且抽取邏輯改版後要能重跑而不必再付一次模型的錢。
+  if (read?.document) {
+    await prisma.importJob.update({
+      where: { id: job.id },
+      data: {
+        documentJson: read.document,
+        documentSchema: read.document.schema_version ?? null,
+      },
+    });
+  }
+
+  // 每頁的版面寫回，讓校對介面能做左右連動。
   const byPage = new Map();
-  for (const b of read?.blocks ?? rules.blocks ?? []) {
+  for (const b of rules.blocks ?? []) {
     const arr = byPage.get(b.bbox.page) ?? [];
     arr.push(b);
     byPage.set(b.bbox.page, arr);
@@ -337,7 +357,7 @@ async function stageSegment(ctx) {
         blocks: {
           ...(p.blocks ?? {}),
           layout: blocks,
-          method: read ? read.method?.[String(p.index)] : rules.method?.[String(p.index)],
+          method: read?.method?.[String(p.index)] ?? rules.method?.[String(p.index)],
         },
       },
     });
@@ -349,9 +369,7 @@ async function stageSegment(ctx) {
   return {
     // 模型讀出來的題目。有它的話第三階段直接用，不必再呼叫一次
     // 結構化——模型看版面與看內容是同一趟，本來就該一起做完。
-    readQuestions: read?.questions ?? null,
-    materials: read?.materials ?? [],
-    unsure: read?.unsure ?? [],
+    document: read?.document ?? null,
     disagreements: read?.disagreements ?? [],
     readFigures: read?.figures ?? {},
     source: read ? 'model' : 'rules',
@@ -359,7 +377,9 @@ async function stageSegment(ctx) {
     // 規則路徑的產出。降級時第三階段吃這個。
     sections: rules.sections,
     exercises: rules.exercises ?? [],
-    genre: read?.genre && read.genre !== 'unknown' ? read.genre : (rules.genre ?? 'unknown'),
+    genre: read?.document?.document?.genre && read.document.document.genre !== 'UNKNOWN'
+      ? read.document.document.genre.toLowerCase()
+      : (rules.genre ?? 'unknown'),
     answerInk: rules.answer_ink ?? null,
     groupRanges: rules.group_ranges,
     visionPages: rules.vision_pages,
@@ -414,64 +434,114 @@ function mergeUsage(a, b) {
  * 翻到第 30 題時早就忘了。
  */
 function fromReading(jobId, seg, existing) {
+  const doc = seg.document;
   const rows = [];
-  const jobIssues = (seg.disagreements ?? []).filter((d) => d.scope === 'job');
 
-  for (const [i, q] of seg.readQuestions.entries()) {
-    const reasons = [...(q.confidence_reasons ?? [])];
+  const groups = new Map((doc.groups ?? []).map((g) => [g.id, g]));
+  const assets = new Map((doc.assets ?? []).map((a) => [a.id, a]));
 
-    // 模型自己說不確定的地方，挑出提到這一題的
-    for (const u of seg.unsure ?? []) {
-      if (q.question_no && u.includes(`第 ${q.question_no} 題`)) {
-        reasons.push({ code: 'model_unsure', detail: u, severity: 'warn' });
-      }
-    }
-    // 整份的不一致掛到每一題上，讓翻到哪一題都看得到
-    for (const d of jobIssues) {
-      reasons.push({ code: d.code, detail: d.detail, severity: d.severity ?? 'warn' });
-    }
+  // 整份層級的問題（交叉驗證不一致、某頁讀不到）掛到**每一題**上。
+  // 校對介面是逐題翻的，只寫在工作層級的警告翻到第 30 題早就忘了。
+  const docIssues = (doc.issues ?? []).filter((i) => !i.question_id);
+  const byQuestion = new Map();
+  for (const i of doc.issues ?? []) {
+    if (!i.question_id) continue;
+    byQuestion.set(i.question_id, [...(byQuestion.get(i.question_id) ?? []), i]);
+  }
+
+  for (const [i, q] of (doc.questions ?? []).entries()) {
+    const g = q.group_id ? groups.get(q.group_id) : null;
+    const printed = q.answer?.source === 'PRINTED';
+
+    const reasons = [
+      ...(q.confidence?.reasons ?? []).map((r) => ({
+        code: r.code, detail: r.detail, severity: r.severity ?? 'warn',
+      })),
+      ...(byQuestion.get(q.id) ?? []).map((x) => ({
+        code: x.code, detail: x.detail, severity: x.severity ?? 'warn',
+      })),
+      ...docIssues.map((x) => ({
+        code: x.code, detail: x.detail, severity: x.severity ?? 'warn',
+      })),
+    ];
 
     rows.push({
       jobId,
       order: existing + i + 1,
-      questionNo: q.question_no ?? null,
+      questionNo: q.number ?? null,
       label: q.label ?? null,
       subLabel: q.sub_label ?? null,
-      groupKey: q.group_key ?? null,
-      type: q.type,
-      content: q.content,
+      // 題組共用的素材放在 stimulus，不複製進每一題的題幹——
+      // 複製的話重複題偵測會把整組看成互相重複，學生也會在
+      // 第二題看到同一段又讀一次。
+      groupKey: q.group_id ?? null,
+      stimulus: g?.stimulus || null,
+      type: toDbType(q.kind),
+      content: q.stem,
       options: q.options ?? [],
-      answerSlots: q.answer_slots?.length ? q.answer_slots : null,
-      // **只收原稿印出來的答案。** 模型推導出來的答案走自答階段，
-      // 那條路有多次投票與一致率把關；在這裡收下推論值等於繞過它。
-      answerKeys: q.printed_answer_keys ?? [],
-      answerText: q.printed_answer_text ?? null,
-      answerOrigin: (q.printed_answer_keys?.length || q.printed_answer_text)
-        ? 'SOURCE_PRINTED'
+      answerSlots: q.answer?.slots?.length ? q.answer.slots : null,
+      // **只收原稿印出來的答案。** 推導的答案走自答階段，
+      // 那條路有多次投票與一致率把關。
+      answerKeys: printed ? (q.answer.keys ?? []) : [],
+      answerText: printed ? (q.answer.text ?? null) : null,
+      answerOrigin: printed ? 'SOURCE_PRINTED' : null,
+      sourceAnswerRaw: printed
+        ? (q.answer.text ?? ((q.answer.keys ?? []).join('、') || null))
         : null,
-      sourceAnswerRaw: q.printed_answer_text
-        ?? (q.printed_answer_keys?.length ? q.printed_answer_keys.join('、') : null),
       // 詳解與題幹分開存：試題依著作權法第 9 條不受保護，詳解受保護。
-      explanationRaw: q.explanation || null,
-      assets: figuresFor(q, seg.readFigures),
-      score: q.score ?? null,
-      confidence: q.confidence ?? 0,
+      explanationRaw: q.explanation?.body || null,
+      assets: (q.asset_ids ?? [])
+        .map((id) => assets.get(id))
+        .filter((a) => a && a.storage_key)
+        .map((a) => ({
+          key: a.storage_key,
+          page: a.placement?.page ?? null,
+          bbox: a.placement?.bbox ?? null,
+          labels: a.alt ? [a.alt] : [],
+          kind: a.kind,
+        })),
+      score: q.scoring?.score ?? null,
+      confidence: q.confidence?.score ?? 0,
       confidenceReasons: reasons,
-      sourceBbox: q.source_bbox ?? null,
-      sourcePage: q.source_bbox?.page ?? q.page ?? null,
-      sourceExam: q.source_exam ?? null,
-      nationalCorrectRate: q.national_correct_rate ?? null,
+      sourceBbox: q.placement?.bbox ?? null,
+      sourcePage: q.placement?.page ?? null,
+      sourceExam: q.provenance?.exam ?? null,
+      nationalCorrectRate: q.provenance?.national_correct_rate ?? null,
+      kpSuggestions: (q.topic_hints ?? []).length
+        ? { hints: q.topic_hints }
+        : null,
     });
   }
+
+  // assets 為空陣列時存 null，讓「有沒有圖」的查詢單純一點
+  for (const r of rows) if (!r.assets.length) r.assets = null;
 
   return {
     rows,
     warnings: [
-      ...(seg.disagreements ?? []).map((d) => d.detail),
+      ...docIssues.map((i) => i.detail),
       ...(seg.readError ? [`整頁判讀失敗，本次為規則降級：${seg.readError}`] : []),
     ],
     usage: null,
   };
+}
+
+/**
+ * 標準格式的題型 → 資料庫的列舉。
+ *
+ * 標準格式涵蓋五科所以多幾種（配合題、排序、計算證明、英聽）。
+ * 對不上的一律落到 SHORT_ANSWER 而**不是**猜一個選擇題——
+ * 猜成選擇題的話會得到一題沒有選項的選擇題，schema 驗證擋掉之後
+ * 那一題就消失了。落到簡答至少內容留得住，校對者改得回來。
+ */
+function toDbType(kind) {
+  const direct = new Set([
+    'SINGLE_CHOICE', 'MULTI_CHOICE', 'TRUE_FALSE', 'FILL_SLOT',
+    'SHORT_ANSWER', 'ESSAY', 'TRANSLATION',
+  ]);
+  if (direct.has(kind)) return kind;
+  if (kind === 'FILL_BLANK') return 'FILL_TEXT';
+  return 'SHORT_ANSWER';
 }
 
 /** 第三階段：切分結果 → 候選題。 */
@@ -504,7 +574,7 @@ async function stageExtract(ctx) {
   // 模型已經在上一階段連內容一起讀完了，這裡直接收下——看版面與
   // 看內容是同一趟，本來就該一起做完。少一次呼叫，也少一次
   // 「模型看不到版面只看得到文字」造成的誤判。
-  const out = seg.readQuestions
+  const out = seg.document
     ? fromReading(job.id, seg, existing)
     : seg.genre === 'worksheet'
       ? await extractWorksheet(ctx, seg, existing)

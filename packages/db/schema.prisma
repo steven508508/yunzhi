@@ -977,6 +977,23 @@ model ImportJob {
 
   error       String?
   stageDetail Json?
+
+  // 標準交換格式（QIF）的完整文件。
+  //
+  // 這是**模型理解這份原稿之後的標準化結果**——不論原稿是哪一科、
+  // 哪一家出版社、教用版還是學生版、原生 PDF 還是手機拍的，這一欄
+  // 的形狀都一樣。候選題是從它產出來的，而它本身留著，因為：
+  //
+  //   · 校對介面要顯示題組的共用素材、圖的替代文字、觀念頁——
+  //     那些東西不屬於任何單一候選題，沒地方掛
+  //   · 抽取邏輯改版後要能重跑而不必再付一次模型的錢
+  //   · 老師問「這一題原稿到底寫什麼」時，這是唯一的答案
+  //
+  // documentSchema 記版本。格式一定會長，而題庫裡會同時存在好幾個
+  // 版本產出的資料——沒有版本號的話，日後任何一次調整都要靠猜。
+  documentJson   Json?
+  documentSchema String?
+
   createdBy   String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
