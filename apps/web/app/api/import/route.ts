@@ -245,6 +245,9 @@ export async function POST(req: NextRequest) {
       rightsBasis: meta.rightsBasis,
       rightsNote: meta.rightsNote,
       rightsDeclaredBy: user.id,
+      // 姓名快照。帳號日後被刪時 rightsDeclaredBy 會變成 NULL，
+      // 但「誰聲明這份題本可以用」是權利基礎的證據，不能跟著消失。
+      rightsDeclaredName: user.displayName || user.username,
       createdBy: user.id,
       stageDetail: { stages: {} },
     },

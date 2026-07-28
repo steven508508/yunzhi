@@ -20,8 +20,22 @@ const BCRYPT_ROUNDS = 12;
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 
-/** 不存在的帳號也要跑一次比對，讓回應時間一致 */
-const DUMMY_HASH = '$2a$12$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012';
+/**
+ * 不存在的帳號也要跑一次比對，讓回應時間一致。
+ *
+ * **這個字串必須是合法的 bcrypt 雜湊。** 上一版是手打的 62 個字元，
+ * 而合法的 bcrypt 雜湊固定 60（`$2a$12$` 加 22 字元 salt 加 31 字元
+ * 摘要）。bcryptjs 對格式錯誤的雜湊直接回 false，**完全不做運算**：
+ * 實測假雜湊 0.065 ms、真雜湊 335 ms，差五千倍。回應時間就是現成的
+ * 「這個帳號存不存在」的神諭，而補習班的學號是連號的。
+ *
+ * 所以改成在載入時真的算一次。多花約 300 ms 的啟動時間，換掉一個
+ * 靜默失效的防護。
+ */
+const DUMMY_HASH = bcrypt.hashSync(
+  randomBytes(24).toString('base64url'),
+  BCRYPT_ROUNDS,
+);
 
 export async function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, BCRYPT_ROUNDS);

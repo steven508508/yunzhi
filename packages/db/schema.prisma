@@ -946,9 +946,16 @@ model ImportJob {
   sourceType   SourceType
   licenseScope LicenseScope
   // 權利聲明：誰聲明的、聲明了什麼。責任歸屬明確。
-  rightsDeclaredBy String?
-  rightsBasis      String?
-  rightsNote       String?
+  //
+  // rightsDeclaredName 是聲明人的姓名快照。帳號被刪時 rightsDeclaredBy
+  // 會變成 NULL（ON DELETE SET NULL），但**誰聲明的這件事必須留著**
+  // ——那是權利基礎的證據，也是 import_jobs_rights_declared 這個
+  // CHECK 的另一半：少了它，刪掉任何一個曾聲明過權利的老師帳號
+  // 都會撞上約束而失敗，而錯誤訊息完全看不出原因。
+  rightsDeclaredBy   String?
+  rightsDeclaredName String?
+  rightsBasis        String?
+  rightsNote         String?
 
   totalPages      Int?
   totalCandidates Int  @default(0)

@@ -8,7 +8,13 @@
  * **兩份實作有分岐的風險**，所以這裡刻意只做最小的搬移：
  * 邏輯與 commit.ts 逐行對應，改的只有 prisma 的來源。
  * 日後改 commit.ts 一定要同步改這裡，否則測試會綠燈而正式環境會壞。
+ *
+ * 最危險的一段——選項重新編號與答案鍵對映——已經抽到
+ * `apps/web/lib/questionShape.mjs` 由兩邊共用。那一段算錯的話，
+ * 每一個答對的學生都會被判錯而且沒有任何跡象，不能容忍兩份實作。
  */
+import { normalizeOptions } from '../apps/web/lib/questionShape.mjs';
+
 const VERBATIM_OK = new Set(['OWNED', 'LICENSED', 'OFFICIAL_PUBLIC']);
 
 export async function commitJob(prisma, jobId, tenantId, userId) {
@@ -26,13 +32,40 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
   };
   if (candidates.length === 0) return result;
 
-  await prisma.importJob.update({ where: { id: jobId }, data: { status: 'COMMITTING' } });
+  const claimed = await prisma.importJob.updateMany({
+    where: { id: jobId, tenantId, status: { not: 'COMMITTING' } },
+    data: { status: 'COMMITTING', stageStartedAt: new Date() },
+  });
+  if (claimed.count === 0) {
+    result.errors.push({ candidateId: '', label: '', message: '這份題本正在入庫中，請稍候再試' });
+    return result;
+  }
 
   const verbatimAllowed = VERBATIM_OK.has(job.rightsBasis ?? '');
   const groupIds = new Map();
 
   for (const c of candidates) {
     try {
+      const { options, answerKeys, dropped } = normalizeOptions(c.options, c.answerKeys ?? []);
+      if (dropped.length) {
+        await prisma.importCandidate.update({
+          where: { id: c.id },
+          data: {
+            state: 'FLAGGED',
+            reviewNote:
+              `答案 (${dropped.join(')(')}) 找不到對應的選項，` +
+              `本題共 ${options.length} 個選項。請確認是否有選項漏抓。`,
+          },
+        });
+        result.skipped++;
+        result.errors.push({
+          candidateId: c.id,
+          label: c.label ?? c.questionNo ?? String(c.order),
+          message: `答案與選項對不上（答案 ${dropped.join('、')}，選項只有 ${options.length} 個）`,
+        });
+        continue;
+      }
+
       let groupId = null;
       if (c.groupKey) {
         groupId = groupIds.get(c.groupKey) ?? null;
@@ -57,7 +90,7 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
           type: c.type ?? 'SINGLE_CHOICE',
           content: c.content ?? '',
           score: c.score ?? 0,
-          answerKeys: c.answerKeys ?? [],
+          answerKeys,
           answerSlots: c.answerSlots ?? null,
           answerText: c.answerText,
           sourceType: job.sourceType,
@@ -74,15 +107,16 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
         },
       });
 
-      const opts = (Array.isArray(c.options) ? c.options : [])
-        .filter((o) => o && String(o.content ?? '').trim())
-        .map((o, i) => ({
-          questionId: question.id,
-          order: i + 1,
-          label: String(o.label ?? i + 1),
-          content: String(o.content),
-        }));
-      if (opts.length) await prisma.questionOption.createMany({ data: opts });
+      if (options.length) {
+        await prisma.questionOption.createMany({
+          data: options.map((o) => ({
+            questionId: question.id,
+            order: o.order,
+            label: o.label,
+            content: o.content,
+          })),
+        });
+      }
 
       if (c.explanationRaw?.trim()) {
         if (verbatimAllowed) {
@@ -135,6 +169,7 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
     data: {
       status: remaining > 0 ? 'READY_FOR_REVIEW' : 'COMMITTED',
       committedAt: remaining > 0 ? null : new Date(),
+      stageStartedAt: null,
       committedCount: total,
       commitDetail: { lastRun: { committed: result.committed }, remaining },
     },

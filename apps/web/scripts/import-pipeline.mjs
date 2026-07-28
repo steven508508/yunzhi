@@ -335,7 +335,22 @@ async function stageExtract(ctx) {
   await prisma.importCandidate.deleteMany({
     where: { jobId: job.id, state: 'PENDING', reviewedAt: null },
   });
-  const existing = await prisma.importCandidate.count({ where: { jobId: job.id } });
+
+  // 新的 order 要從**現有最大值**往後接，不是從「剩幾列」往後接。
+  //
+  // 老師確認了第 3 題然後續跑：刪掉未校對的之後只剩 1 列，於是新
+  // 候選從 order=2 開始編——而 order=3 已經被那一題佔著。
+  // `UNIQUE(jobId, order)` 讓整個 createMany 拋錯，EXTRACTING 階段
+  // 標成 FAILED。續跑正是這條管線的賣點，而它撞的是自己的唯一鍵。
+  const [kept, top] = await Promise.all([
+    prisma.importCandidate.count({ where: { jobId: job.id } }),
+    prisma.importCandidate.findFirst({
+      where: { jobId: job.id },
+      orderBy: { order: 'desc' },
+      select: { order: true },
+    }),
+  ]);
+  const existing = top?.order ?? 0;
 
   const out =
     seg.genre === 'worksheet'
@@ -344,7 +359,7 @@ async function stageExtract(ctx) {
 
   await prisma.importJob.update({
     where: { id: job.id },
-    data: { totalCandidates: existing + out.rows.length },
+    data: { totalCandidates: kept + out.rows.length },
   });
 
   if (out.rows.length) await prisma.importCandidate.createMany({ data: out.rows });

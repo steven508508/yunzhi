@@ -1,14 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { prisma } from '@/lib/prisma';
 import { loadJob, saveReviews } from '@/lib/candidates';
-import { requireUser } from '@/lib/auth';
+import { requireUser, canEditSubject } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * 校對這份題本的資格。
+ *
+ * 這支 API 是校對頁面的後端，而**頁面本身**（`app/(app)/import/[jobId]`）
+ * 早就有 `canEditSubject` 的檢查——只有支撐它的 API 沒有。同一個功能
+ * 的其他入口（上傳擋學生與家長、入庫與續跑要 `canEditSubject`）也都
+ * 有檢查。少了這一段，只教數學的老師可以改英文科題本的答案，而題本
+ * 清單頁對任何登入者列出最近 50 筆工作與 ID，連猜都不必猜。
+ */
+async function mayReview(jobId: string, user: { id: string; tenantId: string; systemRole?: string }) {
+  const job = await prisma.importJob.findFirst({
+    where: { id: jobId, tenantId: user.tenantId },
+    select: { subjectId: true, subject: { select: { name: true } } },
+  });
+  if (!job) return { error: NextResponse.json({ error: '找不到匯入工作' }, { status: 404 }) };
+  if (!(await canEditSubject(user as never, job.subjectId))) {
+    return {
+      error: NextResponse.json(
+        { error: `你不是「${job.subject.name}」的授課老師，無法校對這份題本` },
+        { status: 403 },
+      ),
+    };
+  }
+  return { job };
+}
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = await params;
   const user = await requireUser();
   if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+
+  const gate = await mayReview(jobId, user);
+  if (gate.error) return gate.error;
 
   const data = await loadJob(jobId, user.tenantId);
   if (!data) return NextResponse.json({ error: '找不到匯入工作' }, { status: 404 });
@@ -29,6 +59,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ jo
   const { jobId } = await params;
   const user = await requireUser();
   if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+
+  const gate = await mayReview(jobId, user);
+  if (gate.error) return gate.error;
 
   const parsed = PatchBody.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {

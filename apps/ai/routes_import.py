@@ -307,6 +307,12 @@ async def _normalize_impl(req: NormalizeRequest, get_provider) -> NormalizeRespo
                 doc.close()
 
         return await asyncio.to_thread(_normalize_sync, req, prep, t0)
+    except storage.StorageError as e:
+        # **要排在 RuntimeError 之前**：StorageError 繼承自 RuntimeError，
+        # 排在後面的話永遠被攔截成 422，而 422 的契約是「內容有問題、
+        # 重試也沒用、轉人工」。MinIO 重開機那幾秒鐘剛好上傳的老師，
+        # 會看到他剛傳的 80MB 題本被標成永久失敗。
+        raise _to_http(e) from e
     except (ValueError, NotImplementedError) as e:
         # 格式不支援：重試沒有意義，要讓老師知道該換檔案。
         raise HTTPException(415, detail=str(e)) from e
@@ -663,9 +669,15 @@ def build_router(get_provider) -> APIRouter:
                     if nxt and nxt.storage_key and not nxt.text_blocks:
                         images.append(storage.get_bytes(nxt.storage_key))
                         note = f"這是第 {p.index} 頁與第 {nxt.index} 頁"
-                    results[p.index] = await seg.segment_scanned(
+                    out = await seg.segment_scanned(
                         provider_obj, p.index, images, note
                     )
+                    # **只留本頁的區塊。** 下一頁是給模型看接續用的
+                    # 上下文，它自己也會被當成主頁跑一次——兩邊都留
+                    # 的話，第 2 頁起每一頁的內容都會進題庫兩次，
+                    # 而且是一模一樣的兩份，看起來就像題本印了兩遍。
+                    out.blocks = [b for b in out.blocks if b.bbox.page == p.index]
+                    results[p.index] = out
                     method[p.index] = "vision"
             except Exception as e:  # noqa: BLE001
                 # 單頁失敗不該讓整份失敗。標記為空結果並記下來，

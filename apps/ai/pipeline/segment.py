@@ -111,8 +111,30 @@ _ANSWER_AREA = re.compile(r"^\s*(?:作答[區欄格]|答案[區欄格]|請於下
 #: 20 題全部漏掉），整頁變成一團沒有結構的文字。數學講義從來
 #: 不用這個體例，所以先前完全沒有暴露出來——這是五科都要做的
 #: 系統只拿一科的教材驗證會遇到的典型問題。
+#:
+#: **但這個形狀與選項只差一點點**，而認錯的代價很大：
+#:
+#:     (A) 4.5 公尺      ← 選項。認錯的話這一題少一個選項，
+#:                          而且「A」會被當成印出來的標準答案
+#:     ( C ) 7. To win…  ← 題號
+#:
+#: 所以加了兩道限制：
+#:
+#:   · 括號裡**要嘛是空的**（學生版，選項不可能沒有編號），
+#:     **要嘛編號前後有空白**（`( C )` 而不是 `(C)`）。
+#:   · 句點後面**不可以緊接數字**——`4.5` 是小數，`6. It` 是題號。
+#:     小數點後不會有空白，題號後會，這一點可以分得乾淨。
+#:
+#: 代價是排版成 `(C)7.` 這種沒有空白的教用版會漏掉，那一題會被
+#: 判成選項——與加這條規則之前的行為相同，不會更糟。**寧可漏，
+#: 不可錯**：漏掉的題目校對時看得見，憑空生出來的答案看不見。
+_PAREN_PREFIX = (
+    rf"{_LP}(?:\s+[A-EＡ-Ｅ①-⑩{_D}]\s+|\s*){_RP}\s*"
+)
+_NUMBER_HEAD = rf"[{_D}]{{1,3}}\s*(?:[.．](?![0-9])|[、·])"
+
 _ANSWER_PAREN = re.compile(
-    rf"^\s*{_LP}\s*([A-EＡ-Ｅ①-⑩{_D}]{{0,3}})\s*{_RP}\s*(?=[{_D}]{{1,3}}\s*[.、．·])"
+    rf"^\s*{_LP}(?:\s+([A-EＡ-Ｅ①-⑩{_D}])\s+|(\s*)){_RP}\s*(?={_NUMBER_HEAD})"
 )
 
 #: 題號。「1.」「12、」「１．」「(3)」都算，前面可以有作答括號。
@@ -122,10 +144,10 @@ _ANSWER_PAREN = re.compile(
 #: 都會被當成題號——實測一份 29 頁的講義會抽出 419 個假題號，
 #: 而真正的題目只有 24 個。
 _QUESTION_NO = re.compile(
-    rf"^\s*(?:{_LP}\s*[A-EＡ-Ｅ①-⑩{_D}]{{0,3}}\s*{_RP}\s*)?"  # 作答括號（可省略）
+    rf"^\s*(?:{_PAREN_PREFIX})?"               # 作答括號（可省略）
     rf"(?:"
     rf"{_LP}\s*[{_D}]{{1,3}}\s*{_RP}"          # (3) （12）
-    rf"|[{_D}]{{1,3}}\s*[.、．·]"                 # 1. 12、
+    rf"|{_NUMBER_HEAD}"                        # 1. 12、
     rf")\s*(?=\S)"
 )
 
@@ -135,12 +157,13 @@ def answer_in_paren(text: str) -> str | None:
     取出教用版印在作答括號裡的答案：`( C ) 7. …` → `C`。
 
     這是**零成本**拿到答案的路徑，比 AI 自答便宜也可靠得多。
-    空括號（學生版）回 None——不猜。
+    空括號（學生版）回 None——不猜。憑空生出一個答案會被當成
+    標準答案拿去改學生的卷子，那是這整條管線最不能犯的錯。
     """
     m = _ANSWER_PAREN.match(text)
     if not m:
         return None
-    inner = m.group(1).strip()
+    inner = (m.group(1) or "").strip()
     return inner or None
 
 #: 選項。學測數學是 5 個 (1)–(5)，英文是 4 個 (A)–(D)，
@@ -243,12 +266,9 @@ class Provenance:
         return self.exam is not None or self.correct_rate is not None
 
 
-#: 出處標籤要離文字結尾這麼近才算是標籤。留一點餘裕給後綴的
-#: 括號與標點，但不能多——「本題取自 110學測，請作答。」只差
-#: 五個字，那是題幹。
-_BADGE_TAIL = 3
-#: 與答對率標籤相鄰的距離。兩個標籤通常並排印在同一個色塊裡。
-_BADGE_ADJACENT = 12
+#: 標籤與標籤之間、標籤與文字結尾之間允許出現的東西：空白、
+#: 括號、分隔符號。除此之外就不是標籤區了。
+_BADGE_FILLER = re.compile(r"[\s\[\]\(\)（）【】｜|,，、／/·．.:：-]*$")
 
 
 def extract_provenance(text: str) -> tuple[Provenance, str]:
@@ -259,41 +279,50 @@ def extract_provenance(text: str) -> tuple[Provenance, str]:
     重複題偵測把「同一題但年份標籤不同」看成兩題，也會讓學生
     在作答時看到「答對率 27%」而先入為主。
 
-    但**年份不能見到就抓**。「108學測」也可能是題幹的內容：
-    「自 108 學測起，社會科加考混合題型」——把它當標籤拿掉，
-    題目就被改寫了，而那種損壞在校對介面上看不出來（少了幾個字
-    的句子仍然通順）。所以只認「長得像標籤」的位置：貼在文字的
-    頭或尾，或與答對率標籤相鄰。中間出現的一律視為內容。
+    **但兩個標籤都不能見到就抓**，因為兩者都可能是題目在講的事：
+
+        自 108 學測起，社會科加考混合題型，下列敘述何者正確？
+        已知該次測驗全班答對率 43%，共 40 人應試，求答對人數。
+
+    抓掉之後句子仍然通順——「自 起，社會科加考…」——校對介面上
+    看不出來，而題目已經壞了。第二個例子更糟：那個 43% 會被當成
+    大考中心的實測難度寫進題庫，而 schema 明寫這一欄「編出來的
+    數字混進去就再也分不出真假」。
+
+    所以判準不是「位置接近」而是**版面事實**：這兩個標籤印在題目
+    末端的一串圓角色塊裡，所以它們一定構成文字**結尾的一段連續
+    標籤區**（中間只隔空白、括號、分隔符）。從尾端往前一個一個
+    剝，剝不動就停——中間出現的一律視為內容。
     """
     prov = Provenance()
+    head = text
     spans: list[tuple[int, int]] = []
 
-    m = _CORRECT_RATE.search(text)
-    if m:
-        rate = int(m.group(1))
-        if 0 <= rate <= 100:
-            prov.correct_rate = rate / 100
-            spans.append(m.span())
+    while True:
+        stripped = _BADGE_FILLER.sub("", head)
+        m = _CORRECT_RATE.search(stripped)
+        if m and m.end() == len(stripped) and 0 <= int(m.group(1)) <= 100:
+            if prov.correct_rate is None:
+                prov.correct_rate = int(m.group(1)) / 100
+            spans.append((m.start(), len(head)))
+            head = stripped[: m.start()]
+            continue
 
-    for m2 in _SOURCE_EXAM.finditer(text):
-        at_tail = len(text) - m2.end() <= _BADGE_TAIL
-        is_whole = m2.end() - m2.start() >= len(text.strip()) - _BADGE_TAIL
-        near_rate = any(
-            abs(m2.start() - e) <= _BADGE_ADJACENT
-            or abs(s - m2.end()) <= _BADGE_ADJACENT
-            for s, e in spans
-        )
-        if at_tail or is_whole or near_rate:
-            prov.exam = prov.exam or f"{m2.group(1)}{m2.group(2)}"
-            spans.append(m2.span())
+        m = _SOURCE_EXAM.search(stripped)
+        if m and m.end() == len(stripped):
+            if prov.exam is None:
+                prov.exam = f"{m.group(1)}{m.group(2)}"
+            spans.append((m.start(), len(head)))
+            head = stripped[: m.start()]
+            continue
+        break
 
     if not spans:
         return prov, text
 
-    cleaned = text
-    for s, e in sorted(spans, reverse=True):
-        cleaned = cleaned[:s] + cleaned[e:]
-    # 標籤常被方括號或全形括號包著，拿掉之後會留下空殼
+    # 標籤常被方括號或全形括號包著。剝掉標籤之後左括號會落單，
+    # 留著會變成「…面積約多少？（」這種看起來像抽壞了的題幹。
+    cleaned = re.sub(r"[\[\(（【]\s*$", "", head)
     cleaned = re.sub(r"[\[\(（【]\s*[\]\)）】]", "", cleaned)
     return prov, re.sub(r"[ \t　]{2,}", " ", cleaned).strip()
 

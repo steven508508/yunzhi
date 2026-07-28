@@ -335,13 +335,31 @@ async def solve_question(
             log.warning("自答第 %d 次失敗：%s", idx + 1, e)
             return None
 
-    attempts = [a for a in await asyncio.gather(*(one(i) for i in range(votes))) if a]
+    raw = await asyncio.gather(*(one(i) for i in range(votes)))
+    attempts = [a for a in raw if a]
     if not attempts:
         return None
 
+    # ── 一致率的分母是**投票次數**，不是成功次數 ────────────────
+    #
+    # 拿成功次數當分母的話，五票被限流打掉四票，剩下的那一票就是
+    # 「一致率 100%」——系統會自動把它填成標準答案，理由欄還寫著
+    # 「推導 1 次，結果完全一致」。那是用一次可能出錯的推導去改
+    # 全班的卷子，而且看起來比五票一致還可信。
+    #
+    # 失敗的票視為「沒有共識」而不是「不存在」。
     tally = Counter(_norm_answer(a) for a in attempts)
     top, count = tally.most_common(1)[0]
-    consistency = count / len(attempts)
+    consistency = count / votes
+
+    # ── 「我不知道」不是一種答案 ────────────────────────────────
+    #
+    # SOLVE_SYSTEM 明確要求「資訊不足就把 answer_keys 留空」，
+    # 而模型會照做。三次都留空 → EMPTY 拿下全部票數 → 一致率 1.0
+    # → 自動填入 `answerKeys: []`，把題本原本附的答案**清掉**。
+    # 交叉驗證也會因為共識為空而靜默跳過。
+    if top == "EMPTY":
+        return SolveResult(attempts=attempts, consistency=0.0)
 
     winner = next(a for a in attempts if _norm_answer(a) == top)
     return SolveResult(

@@ -579,6 +579,154 @@ async function main() {
     assert.equal(q.correctRate, null, '全國答對率不該寫進本班的 correctRate');
   });
 
+  await test('答案對不上選項的題目不入庫，改標成存疑', async () => {
+    // 掃描漏抓了選項 (2)：原稿四個選項、答案是 (4)。重新編號之後
+    // 只剩三個選項，(4) 指不到東西。**硬塞一個看起來合理的答案，
+    // 每個答對的學生都會被判錯，而且沒有任何跡象。**
+    const j5 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '掃描漏抓選項', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id, stageDetail: { stages: {} },
+      },
+    });
+    const c = await prisma.importCandidate.create({
+      data: {
+        jobId: j5.id, order: 1, type: 'SINGLE_CHOICE',
+        content: '某商品原價 100 元，打八折後再降 10 元，售價為多少？',
+        options: [
+          { order: 1, label: '(1)', content: '60 元' },
+          { order: 3, label: '(3)', content: '80 元' },
+          { order: 4, label: '(4)', content: '90 元' },
+        ],
+        answerKeys: [2],  // 指向被漏掉的那個選項
+        state: 'CONFIRMED', reviewedBy: teacher.id, reviewedAt: new Date(),
+      },
+    });
+
+    const r = await commitJob(prisma, j5.id, tenant.id, teacher.id);
+    assert.equal(r.committed, 0, '答案對不上就不該入庫');
+    assert.equal(r.skipped, 1);
+    const after = await prisma.importCandidate.findFirst({ where: { id: c.id } });
+    assert.equal(after.state, 'FLAGGED');
+    assert.ok(after.reviewNote?.includes('選項'), `校對者要看得懂：${after.reviewNote}`);
+  });
+
+  await test('選項重新編號時答案鍵跟著對映', async () => {
+    // 原稿 (1)(2)(4) —— (3) 內容是空的被丟掉。答案 (4) 入庫後
+    // 應該變成 (3)，因為選項序號必須從 1 連續。
+    const j6 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '選項重新編號', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id, stageDetail: { stages: {} },
+      },
+    });
+    await prisma.importCandidate.create({
+      data: {
+        jobId: j6.id, order: 1, type: 'SINGLE_CHOICE', content: '下列何者正確？',
+        options: [
+          { order: 1, label: '(1)', content: '甲' },
+          { order: 2, label: '(2)', content: '乙' },
+          { order: 3, label: '(3)', content: '   ' },
+          { order: 4, label: '(4)', content: '丁' },
+        ],
+        answerKeys: [4],
+        state: 'CONFIRMED', reviewedBy: teacher.id, reviewedAt: new Date(),
+      },
+    });
+
+    await commitJob(prisma, j6.id, tenant.id, teacher.id);
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: j6.id } });
+    const opts = await prisma.questionOption.findMany({ where: { questionId: q.id } });
+    assert.equal(opts.length, 3);
+    assert.deepEqual(q.answerKeys, [3], `答案沒有跟著重新編號：${q.answerKeys}`);
+    const answer = opts.find((o) => o.order === q.answerKeys[0]);
+    assert.equal(answer.content, '丁', '答案指到了別的選項');
+  });
+
+  await test('原文收錄的詳解不可以標成公開', async () => {
+    // 一份標成「歷屆試題／PUBLIC」的講義夾帶出版社教用版詳解。
+    // 試題依著作權法第 9 條不受保護，**詳解受保護**。
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: job.id } });
+    await assert.rejects(
+      prisma.explanation.create({
+        data: {
+          tenantId: tenant.id, questionId: q.id,
+          origin: 'VERBATIM_IMPORT', rightsBasis: 'OFFICIAL_PUBLIC',
+          licenseScope: 'PUBLIC', displayMode: 'FULL', isPrimary: false,
+          layers: { steps: ['出版社的詳解原文'] },
+        },
+      }),
+      /explanations_verbatim_not_public|violates check constraint/i,
+    );
+  });
+
+  await test('刪掉聲明權利的老師帳號不會撞上約束', async () => {
+    // rightsDeclaredBy 是 ON DELETE SET NULL，而 CHECK 要求它不是 NULL
+    // ——兩者互相矛盾，刪帳號會失敗且錯誤訊息完全看不出原因。
+    // 姓名快照讓「誰聲明的」留下來，同時解開這個死結。
+    const temp = await prisma.user.create({
+      data: {
+        tenantId: tenant.id, username: 'temp_teacher', displayName: '臨時老師',
+        systemRole: 'TEACHER', status: 'ACTIVE',
+      },
+    });
+    const j7 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '離職老師傳的', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: temp.id, rightsDeclaredName: '臨時老師',
+        stageDetail: { stages: {} },
+      },
+    });
+    await prisma.$executeRawUnsafe(`DELETE FROM users WHERE id = '${temp.id}'`);
+    const after = await prisma.importJob.findFirst({ where: { id: j7.id } });
+    assert.equal(after.rightsDeclaredBy, null);
+    assert.equal(after.rightsDeclaredName, '臨時老師', '聲明人的姓名要留著');
+  });
+
+  await test('續跑結構化階段不會撞上 order 的唯一鍵', async () => {
+    // 老師確認了第 3 題之後續跑。舊的作法是「刪完剩幾列就從那裡
+    // 接下去編號」，而剩下的那一列 order 是 3 —— 新候選從 2 開始
+    // 編，撞上 UNIQUE(jobId, order)，整個階段標成 FAILED。
+    // 續跑正是這條管線的賣點。
+    const j8 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '續跑測試', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id, stageDetail: { stages: {} },
+      },
+    });
+    for (const [order, state] of [[1, 'PENDING'], [2, 'PENDING'], [3, 'CONFIRMED']]) {
+      await prisma.importCandidate.create({
+        data: {
+          jobId: j8.id, order, type: 'SINGLE_CHOICE', content: `第 ${order} 題`,
+          state, ...(state === 'CONFIRMED'
+            ? { reviewedBy: teacher.id, reviewedAt: new Date() } : {}),
+        },
+      });
+    }
+    // 模擬 stageExtract 的續跑邏輯
+    await prisma.importCandidate.deleteMany({
+      where: { jobId: j8.id, state: 'PENDING', reviewedAt: null },
+    });
+    const top = await prisma.importCandidate.findFirst({
+      where: { jobId: j8.id }, orderBy: { order: 'desc' }, select: { order: true },
+    });
+    assert.equal(top.order, 3, '要從最大的 order 往後接，不是從剩幾列往後接');
+    await prisma.importCandidate.create({
+      data: {
+        jobId: j8.id, order: top.order + 1, type: 'SINGLE_CHOICE',
+        content: '重跑抽出來的新題', state: 'PENDING',
+      },
+    });
+  });
+
   await test('答對率超出 0–1 會被資料庫擋下來', async () => {
     // 應用層寫錯成百分數（43 而不是 0.43）的時候，能力分析會算出
     // 「比全國高 4200%」這種數字而完全不報錯。約束要在資料庫，

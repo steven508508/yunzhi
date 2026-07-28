@@ -192,6 +192,40 @@ def test_non_maths_pages_are_not_mistaken_for_worksheets_with_範例():
     )
 
 
+def test_decimal_option_is_not_mistaken_for_a_question():
+    """
+    **這一條擋的是憑空生出標準答案。**
+
+    `(A) 4.5 公尺` 與 `( C ) 7. To win…` 只差一點點。認錯的話這一題
+    少一個選項，而且括號裡的「A」會被當成教用版印出來的答案——
+    一個完全沒印答案的學生版講義，會產出兩個標準答案，然後拿去
+    改全班的卷子。這種錯誤在校對介面上看不出來（答案欄有東西，
+    而且是合法的選項編號）。
+    """
+    for line in ("(A) 4.5 公尺", "(B) 3.14 倍", "(1) 2.5 公斤", "(2) 1.5 小時"):
+        assert _classify(line, None) is BlockType.OPTION, line
+        assert answer_in_paren(line) is None, line
+
+
+def test_student_edition_never_yields_an_answer():
+    """學生版整頁跑完，一個答案都不該生出來。"""
+    lines = [
+        "1 文法選擇：40%（每題 2 分，共 20 題）",
+        "(  ) 6. It was on Sep. 21, 1999 ________ a big earthquake hit Taiwan.",
+        "(A) which　(B) where　(C) that　(D) then",
+        "(  ) 7. The distance is about ________.",
+        "(A) 4.5 公尺　(B) 3.14 倍　(C) 2.5 公斤　(D) 1.5 小時",
+    ]
+    result = segment_native(1, blocks(*lines))
+    answers = [a for b in result.blocks for a in b.answers]
+    assert answers == [], f"學生版憑空生出答案：{answers}"
+
+
+def test_question_number_followed_by_a_digit_still_works():
+    """`6. 3x＋2＝5` 的題幹以數字開頭。小數點後面沒有空白，題號後面有。"""
+    assert _classify("6. 3x＋2＝5，求 x 的值", None) is BlockType.QUESTION_NO
+
+
 if __name__ == "__main__":
     import traceback
 

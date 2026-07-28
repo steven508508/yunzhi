@@ -306,6 +306,35 @@ export function createPgShim({ connectionString, schemaPath }) {
         return toClient(model, rows[0]);
       },
 
+      // updateMany 與 update 的差別不只是「一次改幾列」：**它是
+      // 條件式更新**，也就是搶鎖的手段。`where` 帶上狀態條件再看
+      // count 是不是 0，就是一次原子的 compare-and-set。入庫的
+      // 併發保護靠的就是它，所以 shim 一定要實作，否則正式路徑
+      // 有保護、測試路徑沒有，而測試會綠燈。
+      updateMany: async (args = {}) => {
+        const b = new Builder();
+        const sets = [];
+        for (const [name, val] of Object.entries(args.data ?? {})) {
+          const f = model.fields.get(name);
+          if (!f) throw new Error(`pg-shim：模型 ${model.name} 沒有欄位 ${name}`);
+          if (val && typeof val === 'object' && 'increment' in val) {
+            sets.push(`${q(f.column)} = ${q(f.column)} + ${b.bind(val.increment)}`);
+          } else {
+            sets.push(`${q(f.column)} = ${b.bind(serialize(f, val))}`);
+          }
+        }
+        const upd = [...model.fields].find(([, f]) => f.isUpdatedAt);
+        if (upd && !(upd[0] in (args.data ?? {}))) {
+          sets.push(`${q(upd[1].column)} = ${b.bind(new Date())}`);
+        }
+        const w = whereSql(model, args.where, b);
+        const rows = await run(
+          `UPDATE ${T} SET ${sets.join(', ')}` + (w ? ` WHERE ${w}` : '') + ' RETURNING 1',
+          b.values,
+        );
+        return { count: rows.length };
+      },
+
       deleteMany: async (args = {}) => {
         const b = new Builder();
         const w = whereSql(model, args.where, b);

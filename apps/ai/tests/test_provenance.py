@@ -114,6 +114,44 @@ def test_rate_is_a_ratio_not_a_percentage():
     assert 0.0 <= prov.correct_rate <= 1.0
 
 
+def test_rate_inside_the_sentence_is_content():
+    """
+    **這一條與上面那條一樣重要，而且更難發現。**
+
+    「已知該次測驗全班答對率 43%，共 40 人應試，求答對人數」是一道
+    數學題。把 43% 當成大考中心的實測難度抓走，題幹會變成
+    「…全班，共 40 人應試…」——一道無解的題目，而那個編出來的
+    難度會被當成實測值寫進題庫，之後再也分不出真假。
+    """
+    text = "已知該次測驗全班答對率 43%，共 40 人應試，求答對人數。"
+    prov, cleaned = extract_provenance(text)
+    assert prov.correct_rate is None, "題幹裡的百分比被當成實測難度了"
+    assert cleaned == text
+
+
+def test_badges_must_form_a_trailing_cluster():
+    """
+    版面事實：這兩個標籤印在題目末端的一串圓角色塊裡。所以判準是
+    「文字結尾的一段連續標籤區」，不是「位置接近」。
+    """
+    prov, cleaned = extract_provenance("答對率 43% 的那一題，112學測")
+    # 「112學測」在結尾 → 是標籤；「答對率 43%」中間隔著中文 → 是內容
+    assert prov.exam == "112學測"
+    assert prov.correct_rate is None
+    assert "答對率 43%" in cleaned
+
+
+def test_stripping_does_not_leave_a_dangling_bracket():
+    """
+    剝掉標籤之後左括號會落單，變成「…面積約多少？（」——
+    看起來就像抽壞了，校對者會退回重做。
+    """
+    _, cleaned = extract_provenance("15. 婆羅洲島的面積約多少？（108學測）")
+    assert cleaned == "15. 婆羅洲島的面積約多少？", repr(cleaned)
+    _, cleaned2 = extract_provenance("11.圖一為何處？[答對率 95%]")
+    assert cleaned2 == "11.圖一為何處？", repr(cleaned2)
+
+
 if __name__ == "__main__":
     import traceback
 

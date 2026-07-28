@@ -19,6 +19,7 @@
  *    帶著 questionId，重跑時跳過，不會產生重複題目。
  */
 import { prisma } from '@/lib/prisma';
+import { normalizeOptions } from '@/lib/questionShape.mjs';
 import type { Prisma } from '@prisma/client';
 
 /** 允許原文收錄解析的權利基礎。其餘一律走 AI 改寫。 */
@@ -92,10 +93,28 @@ export async function commitJob(
     return result;
   }
 
-  await prisma.importJob.update({
-    where: { id: jobId },
-    data: { status: 'COMMITTING' },
+  // **搶鎖，而且是原子的。** 路由層有讀過一次 status !== 'COMMITTING'，
+  // 但「讀」與「寫」之間隔著一次網路往返：老師開兩個分頁各按一次
+  // 入庫，兩邊都讀到 READY，兩邊都取到同一批 `questionId: null` 的
+  // 候選題，於是每一題各建兩列。`familyId` 每次都重新亂數產生，
+  // 沒有任何唯一索引擋得住，而重複的題目是 DRAFT，題庫頁只顯示
+  // 已發布的——會一路潛伏到老師按下發布那天。
+  //
+  // 同時把 stageStartedAt 設起來。worker 的卡住偵測要求它不是 null，
+  // 而入庫途中被砍掉（部署、OOM）留下的 COMMITTING 沒有它就永遠
+  // 不會被回收，老師只會一直看到「正在入庫中，請稍候再試」。
+  const claimed = await prisma.importJob.updateMany({
+    where: { id: jobId, tenantId, status: { not: 'COMMITTING' } },
+    data: { status: 'COMMITTING', stageStartedAt: new Date() },
   });
+  if (claimed.count === 0) {
+    result.errors.push({
+      candidateId: '',
+      label: '',
+      message: '這份題本正在入庫中，請稍候再試',
+    });
+    return result;
+  }
 
   const verbatimAllowed = VERBATIM_OK.has(job.rightsBasis ?? '');
   const groupIds = new Map<string, string>();
@@ -104,6 +123,33 @@ export async function commitJob(
     // 逐題一個交易。整批一個交易的話，第 40 題的資料問題會讓
     // 前 39 題的入庫一起消失——而老師已經花了 20 分鐘校對它們。
     try {
+      const { options, answerKeys, dropped } = normalizeOptions(
+        c.options,
+        c.answerKeys ?? [],
+      );
+      if (dropped.length) {
+        // 答案指向一個入庫後不存在的選項。多半是掃描漏抓了一個選項。
+        // **不猜、不硬塞、不靜默丟掉**：留在待校對，把原因寫給老師。
+        // 硬塞一個看起來合理的答案，會讓每個答對的學生被判錯，
+        // 而沒有任何跡象。
+        await prisma.importCandidate.update({
+          where: { id: c.id },
+          data: {
+            state: 'FLAGGED',
+            reviewNote:
+              `答案 (${dropped.join(')(')}) 找不到對應的選項，` +
+              `本題共 ${options.length} 個選項。請確認是否有選項漏抓。`,
+          },
+        });
+        result.skipped++;
+        result.errors.push({
+          candidateId: c.id,
+          label: c.label ?? c.questionNo ?? String(c.order),
+          message: `答案與選項對不上（答案 ${dropped.join('、')}，選項只有 ${options.length} 個）`,
+        });
+        continue;
+      }
+
       await prisma.$transaction(async (tx) => {
         const groupId = c.groupKey
           ? await ensureGroup(tx, job, c, groupIds)
@@ -125,7 +171,8 @@ export async function commitJob(
             // 所以它與題幹一樣要在入庫時搬過去。
             contentAssets: normalizeAssets(c.assets),
             score: c.score ?? 0,
-            answerKeys: c.answerKeys ?? [],
+            // 已依重新編號後的選項序號對映過（見 normalizeOptions）
+            answerKeys,
             answerSlots: (c.answerSlots as Prisma.InputJsonValue) ?? undefined,
             answerText: c.answerText,
             sourceType: job.sourceType,
@@ -154,7 +201,6 @@ export async function commitJob(
           select: { id: true },
         });
 
-        const options = normalizeOptions(c.options);
         if (options.length) {
           await tx.questionOption.createMany({
             data: options.map((o) => ({
@@ -245,6 +291,8 @@ export async function commitJob(
       // 還有沒校完的就留在待校對，讓老師可以繼續分批處理。
       status: remaining > 0 ? 'READY_FOR_REVIEW' : 'COMMITTED',
       committedAt: remaining > 0 ? null : new Date(),
+      // 放掉入庫鎖。留著的話，下一次按入庫會被自己擋掉。
+      stageStartedAt: null,
       committedCount: total,
       commitDetail: {
         lastRun: {
@@ -342,22 +390,6 @@ function newFamilyId(): string {
   // 與 Prisma 的 cuid 同形狀即可，不需要真的 cuid ——
   // 它只是一個跨版本穩定的識別。
   return `fam_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
-}
-
-function normalizeOptions(raw: unknown): { order: number; label: string; content: string }[] {
-  if (!Array.isArray(raw)) return [];
-  const out: { order: number; label: string; content: string }[] = [];
-  for (const [i, o] of raw.entries()) {
-    if (!o || typeof o !== 'object') continue;
-    const rec = o as Record<string, unknown>;
-    const content = String(rec.content ?? '').trim();
-    if (!content) continue;
-    const order = Number(rec.order) || i + 1;
-    out.push({ order, label: String(rec.label ?? order), content });
-  }
-  // 選項序號必須從 1 連續，否則 questions 的選擇題檢核會出問題。
-  out.sort((a, b) => a.order - b.order);
-  return out.map((o, i) => ({ ...o, order: i + 1 }));
 }
 
 /**

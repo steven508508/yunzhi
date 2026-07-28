@@ -206,6 +206,53 @@ def test_crop_at_the_page_edge_does_not_overflow():
         assert img is not None and img.size > 0, box
 
 
+def test_context_page_blocks_are_not_kept_twice():
+    """
+    視覺切分一次送**連續兩頁**給模型看接續，但下一頁自己也會被當成
+    主頁跑一次。兩邊的區塊都留的話，第 2 頁起每一頁的內容都會進
+    題庫兩次——一模一樣的兩份，看起來就像題本印了兩遍，而校對者
+    會以為是自己看錯。
+    """
+    _FAKE.clear()
+    for i in (1, 2, 3):
+        _FAKE[f"job/pages/{i:04d}.png"] = page_png()
+
+    async def fake_scanned(provider, page_index, images, page_note=""):
+        # 模型看到兩頁就回兩頁的區塊，這是它被要求做的事
+        out = []
+        for offset in range(len(images)):
+            out.append(
+                LayoutBlock(
+                    type=BlockType.QUESTION_NO,
+                    bbox=BBox(page=page_index + offset, x0=0.08,
+                              y0=0.06, x1=0.9, y1=0.10),
+                    text=f"第 {page_index + offset} 頁的題目",
+                )
+            )
+        return SegmentResult(blocks=out, group_ranges=[])
+
+    original = seg.segment_scanned
+    seg.segment_scanned = fake_scanned
+    try:
+        r = client.post(
+            "/v1/import/segment",
+            json={
+                "pages": [
+                    {"index": i, "storage_key": f"job/pages/{i:04d}.png",
+                     "text_blocks": [], "figures": []}
+                    for i in (1, 2, 3)
+                ]
+            },
+        )
+    finally:
+        seg.segment_scanned = original
+
+    assert r.status_code == 200, r.text
+    texts = [b["text"] for b in r.json()["blocks"]]
+    assert len(texts) == len(set(texts)), f"有重複的區塊：{texts}"
+    assert len(texts) == 3, texts
+
+
 if __name__ == "__main__":
     import traceback
 
