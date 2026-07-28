@@ -313,6 +313,9 @@ async function stageSegment(ctx) {
   const failed = Object.entries(out.method).filter(([, m]) => m.startsWith('failed'));
   return {
     sections: out.sections,
+    exercises: out.exercises ?? [],
+    genre: out.genre ?? 'unknown',
+    answerInk: out.answer_ink ?? null,
     groupRanges: out.group_ranges,
     visionPages: out.vision_pages,
     failedPages: failed.map(([page, m]) => `第 ${page} 頁（${m}）`),
@@ -323,7 +326,108 @@ async function stageSegment(ctx) {
 /** 第三階段：切分結果 → 候選題。 */
 async function stageExtract(ctx) {
   const { prisma, job, state } = ctx;
-  const sections = state.SEGMENTING?.sections ?? [];
+  const seg = state.SEGMENTING ?? {};
+
+  // 重跑此階段時先清掉舊候選。**只清尚未校對的**——老師已經
+  // 確認過的候選不該因為重跑而消失，那是他花在 20 分鐘目標裡的時間。
+  await prisma.importCandidate.deleteMany({
+    where: { jobId: job.id, state: 'PENDING', reviewedAt: null },
+  });
+  const existing = await prisma.importCandidate.count({ where: { jobId: job.id } });
+
+  const out =
+    seg.genre === 'worksheet'
+      ? await extractWorksheet(ctx, seg, existing)
+      : await extractExam(ctx, seg, existing);
+
+  await prisma.importJob.update({
+    where: { id: job.id },
+    data: { totalCandidates: existing + out.rows.length },
+  });
+
+  if (out.rows.length) await prisma.importCandidate.createMany({ data: out.rows });
+
+  return {
+    extracted: out.rows.length,
+    genre: seg.genre ?? 'unknown',
+    withExplanation: out.rows.filter((r) => r.explanationRaw).length,
+    sectionWarnings: out.warnings,
+    usage: out.usage,
+  };
+}
+
+/**
+ * 講義：題目單位已經在切分階段就分好了（範例／類題／習題），
+ * 而且**詳解與答案已經跟題幹分開**——那是切分階段用顏色做到的，
+ * 比讓模型從一整段文字裡猜哪裡是解答可靠得多。
+ *
+ * 所以這裡的模型呼叫只做一件事：把題幹整理成結構化的題目
+ * （題型、選項、配分）。詳解原樣帶過去。
+ */
+async function extractWorksheet(ctx, seg, existing) {
+  const { job } = ctx;
+  const exercises = seg.exercises ?? [];
+  if (exercises.length === 0) {
+    throw new PermanentError('切分階段沒有切出任何題目單位', 'EXTRACTING');
+  }
+
+  const rows = [];
+  const usageTotal = { input_tokens: 0, output_tokens: 0, calls: 0, estimated: false };
+  const BATCH = 12;
+
+  for (let i = 0; i < exercises.length; i += BATCH) {
+    const batch = exercises.slice(i, i + BATCH);
+    const out = await callAI(
+      '/v1/import/structure',
+      {
+        sections: batch.map((e) => ({
+          title: e.label,
+          note: '',
+          text: e.stem,
+        })),
+      },
+      'EXTRACTING',
+    );
+
+    for (const [k, q] of (out.questions ?? []).entries()) {
+      const src = batch[out.section_of?.[k] ?? 0] ?? batch[0];
+      rows.push({
+        jobId: job.id,
+        order: existing + rows.length + 1,
+        questionNo: q.question_no ?? null,
+        label: src.label ?? null,
+        subLabel: q.sub_label ?? null,
+        groupKey: q.group_key ?? null,
+        type: q.type,
+        content: q.content,
+        options: q.options ?? [],
+        answerSlots: q.answer_slots?.length ? q.answer_slots : null,
+        answerText: src.answer || null,
+        sourceAnswerRaw: src.answer || (src.inline_answers ?? []).join('；') || null,
+        explanationRaw: src.explanation || null,
+        score: q.score ?? null,
+        confidence: q.confidence ?? 0,
+        confidenceReasons: q.confidence_reasons ?? [],
+        sourceBbox: q.source_bbox ?? null,
+        sourcePage: q.source_bbox?.page ?? src.page ?? null,
+      });
+    }
+
+    usageTotal.calls += out.usage?.calls ?? 0;
+    usageTotal.input_tokens += out.usage?.input_tokens ?? 0;
+    usageTotal.output_tokens += out.usage?.output_tokens ?? 0;
+    usageTotal.model = out.usage?.model ?? usageTotal.model;
+    usageTotal.provider = out.usage?.provider ?? usageTotal.provider;
+    usageTotal.prompt_version = out.usage?.prompt_version ?? usageTotal.prompt_version;
+  }
+
+  return { rows, warnings: [], usage: usageTotal };
+}
+
+/** 學測試卷：靠「節」切，配分與題型由節說明推定。 */
+async function extractExam(ctx, seg, existing) {
+  const { job } = ctx;
+  const sections = seg.sections ?? [];
   if (sections.length === 0) {
     throw new PermanentError('切分階段沒有產出任何內容，無法結構化', 'EXTRACTING');
   }
@@ -336,15 +440,7 @@ async function stageExtract(ctx) {
     'EXTRACTING',
   );
 
-  // 重跑此階段時先清掉舊候選。**只清尚未校對的**——老師已經
-  // 確認過的候選不該因為重跑而消失，那是他花在 20 分鐘目標裡的時間。
-  await prisma.importCandidate.deleteMany({
-    where: { jobId: job.id, state: 'PENDING', reviewedAt: null },
-  });
-
-  const existing = await prisma.importCandidate.count({ where: { jobId: job.id } });
-
-  const rows = out.questions.map((q, i) => ({
+  const rows = (out.questions ?? []).map((q, i) => ({
     jobId: job.id,
     order: existing + i + 1,
     questionNo: q.question_no ?? null,
@@ -361,18 +457,7 @@ async function stageExtract(ctx) {
     sourcePage: q.source_bbox?.page ?? null,
   }));
 
-  if (rows.length) await prisma.importCandidate.createMany({ data: rows });
-
-  await prisma.importJob.update({
-    where: { id: job.id },
-    data: { totalCandidates: existing + rows.length },
-  });
-
-  return {
-    extracted: rows.length,
-    sectionWarnings: out.section_warnings ?? [],
-    usage: out.usage,
-  };
+  return { rows, warnings: out.section_warnings ?? [], usage: out.usage };
 }
 
 /** 第四階段：AI 自答（self-consistency 投票）。 */

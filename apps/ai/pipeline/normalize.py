@@ -183,26 +183,70 @@ def _text_blocks(page: fitz.Page, translate=None) -> list[dict]:
 
     只有掃描件才真的需要視覺模型——因為那時候確實沒有別的來源。
 
-    走 get_text("dict") 而非 "blocks"，是因為需要逐 span 的字型名稱：
-    出版社的自製符號字型要靠字型名稱才還原得回來（見 glyphmap.py）。
-    `translate` 是 (字型, 字元) → 真正的字 的查表函式，None 代表
-    這份文件沒有符號字型、或還原不了。
+    實際的重建交給 mathlayout：它從字元幾何與繪圖物件把分數、
+    上下標、線段記號組回可讀的形式，並依視覺行重新切區塊。
+    PyMuPDF 原本的區塊切法會把一個含分數的算式拆成四塊，
+    那四塊單獨看都沒有意義。
     """
     w, h = page.rect.width, page.rect.height
     if w <= 0 or h <= 0:
         return []
 
+    try:
+        from .mathlayout import page_blocks
+
+        result = page_blocks(page, translate)
+        raw = result.blocks
+        stats = {
+            "fractions": result.fractions,
+            "overlines": result.overlines,
+            "scripts": result.scripts,
+            "blanks": len(result.blanks),
+        }
+    except Exception as e:  # noqa: BLE001
+        # 幾何重建失敗時退回原本的抽取方式。少了數學式的重組，
+        # 但總比整頁沒有文字好——而且品質說明會講明發生了什麼。
+        log.warning("數學版面重建失敗，退回逐區塊抽取：%s", e)
+        return _plain_blocks(page, translate)
+
     out: list[dict] = []
-    data = page.get_text("dict")
+    for order, b in enumerate(raw):
+        text = b.get("text", "").strip()
+        if not text:
+            continue
+        x0, y0, x1, y1 = b["bbox_abs"]
+        entry = {
+            "text": _unwrap(text),
+            "bbox": {
+                "x0": max(0.0, min(1.0, x0 / w)),
+                "y0": max(0.0, min(1.0, y0 / h)),
+                "x1": max(0.0, min(1.0, x1 / w)),
+                "y1": max(0.0, min(1.0, y1 / h)),
+            },
+            "order": order,
+        }
+        if b.get("ink"):
+            entry["ink"] = b["ink"]
+        if b.get("runs"):
+            entry["runs"] = b["runs"]
+        if order == 0 and stats:
+            entry["_math"] = stats
+        out.append(entry)
 
-    for no, block in enumerate(data.get("blocks", [])):
+    return _reading_order(out)
+
+
+def _plain_blocks(page: fitz.Page, translate=None) -> list[dict]:
+    """幾何重建失敗時的退路：照 PyMuPDF 的區塊逐塊抽。"""
+    w, h = page.rect.width, page.rect.height
+    out: list[dict] = []
+    for no, block in enumerate(page.get_text("dict").get("blocks", [])):
         if block.get("type") != 0:
-            continue  # 1 是影像區塊，文字才有內容可用
-
-        lines: list[str] = []
-        runs: list[list] = []  # [[色碼, 文字], …] 依出現順序
+            continue
+        lines = []
+        runs: list[list] = []
         for line in block.get("lines", []):
-            parts: list[str] = []
+            parts = []
             for span in line.get("spans", []):
                 text = _apply_translation(span, translate)
                 parts.append(text)
@@ -212,14 +256,12 @@ def _text_blocks(page: fitz.Page, translate=None) -> list[dict]:
                         runs[-1][1] += text
                     else:
                         runs.append([ink, text])
-            joined = "".join(parts)
-            if joined.strip():
-                lines.append(joined)
+            if "".join(parts).strip():
+                lines.append("".join(parts))
 
         t = _unwrap("\n".join(lines))
         if not t:
             continue
-
         x0, y0, x1, y1 = block["bbox"]
         entry = {
             "text": t,
@@ -231,20 +273,14 @@ def _text_blocks(page: fitz.Page, translate=None) -> list[dict]:
             },
             "order": no,
         }
-
-        # 顏色。教用版講義把答案與詳解印成另一個顏色，那是分離
-        # 「試題」與「解析」最可靠的訊號——比任何文字特徵都準，
-        # 而這兩者的著作權地位完全不同（文件 11、16），必須分開存。
         if runs:
             tally: dict[str, int] = {}
             for ink, text in runs:
                 tally[ink] = tally.get(ink, 0) + len(text.strip())
             entry["ink"] = max(tally, key=tally.get)
             if len(tally) > 1:
-                entry["runs"] = [[ink, text] for ink, text in runs if text.strip()]
-
+                entry["runs"] = [[i, t] for i, t in runs if t.strip()]
         out.append(entry)
-
     return _reading_order(out)
 
 

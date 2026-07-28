@@ -309,13 +309,32 @@ _TRAILING_HEADER = re.compile(
     rf"(?P<header>(?:範例|類題|例題|習題|隨堂練習|練習題|綜合練習)\s*[{_D}]{{0,3}})\s*$"
 )
 
+#: 黏在區塊開頭的題目標頭。
+#:
+#: 標頭在版面上是一個色塊標籤，位置在該行的最左邊，所以只要行的
+#: 重組是對的（見 mathlayout），它就會出現在開頭而不是結尾。
+#: 兩種都要處理：文字重組前後、以及不同排版工具，位置都可能不同。
+_LEADING_HEADER = re.compile(
+    rf"^\s*(?P<header>(?:範例|類題|例題|習題|隨堂練習|練習題|綜合練習)\s*[{_D}]{{0,3}})"
+    rf"\s*(?P<after>\S.*)$"
+)
+
 
 def split_embedded_headers(text_blocks: list[dict]) -> list[dict]:
     """把尾巴黏著題目標頭的區塊拆成兩塊。在分類之前做。"""
     out: list[dict] = []
     for b in text_blocks:
         text = (b.get("text") or "").strip()
-        m = _TRAILING_HEADER.match(text) if text else None
+        if not text:
+            out.append(b)
+            continue
+
+        lead = _LEADING_HEADER.match(text)
+        if lead and len(lead.group("after")) >= 2:
+            out.extend(_cut(b, lead.group("header"), lead.group("after"), header_first=True))
+            continue
+
+        m = _TRAILING_HEADER.match(text)
         if not m or len(m.group("before")) < 2:
             out.append(b)
             continue
@@ -342,6 +361,18 @@ def split_embedded_headers(text_blocks: list[dict]) -> list[dict]:
             }
         )
     return out
+
+
+def _cut(b: dict, header: str, body: str, header_first: bool) -> list[dict]:
+    """把一個區塊拆成標頭與內文兩塊，並各給一個合理的框。"""
+    bb = b["bbox"]
+    width = bb["x1"] - bb["x0"]
+    split = min(1.0, bb["x0"] + width * 0.2)
+    head_box = {**bb, "x1": split}
+    body_box = {**bb, "x0": split}
+    head = {**b, "text": header, "bbox": head_box, "runs": None, "ink": None}
+    rest = {**b, "text": body, "bbox": body_box, "runs": None}
+    return [head, rest] if header_first else [rest, head]
 
 
 def _bbox_of(b: dict, page_index: int) -> BBox:

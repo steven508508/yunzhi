@@ -43,18 +43,58 @@ export default function Review({
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [committing, setCommitting] = useState(false);
+  const [commitMsg, setCommitMsg] = useState<string | null>(null);
 
   const pending = useRef<Map<string, Change>>(new Map());
+  // 入庫的動作定義在 flush 之前（它要先 flush 才能入庫），
+  // 而 const 有暫時性死區，不能直接引用。用 ref 轉一手。
+  const flushRef = useRef<(() => Promise<void>) | null>(null);
   const startedAt = useRef(Date.now());
   const srcRef = useRef<HTMLDivElement>(null);
 
   const done = items.filter((c) => c.state !== 'PENDING').length;
+  const ready = items.filter((c) => c.state === 'CONFIRMED').length;
   const lowConf = items.filter((c) => c.state === 'PENDING' && c.confidence < 0.8).length;
 
   useEffect(() => {
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt.current) / 1000)), 1000);
     return () => clearInterval(t);
   }, []);
+
+  /**
+   * 寫進題庫。
+   *
+   * 只送已校畢的題目，存疑與待校的留著——老師本來就是分批做的，
+   * 而「一定要全部校完才能入庫」會讓 50 題裡的一題卡住整批。
+   *
+   * 入庫前一定先把未存的變更送出去。否則剛按下的那幾題
+   * 還在前端的暫存區，入庫會漏掉它們。
+   */
+  const commit = useCallback(async () => {
+    setCommitting(true);
+    setCommitMsg(null);
+    try {
+      await flushRef.current?.();
+      const res = await fetch(`/api/import/${jobId}/commit`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setCommitMsg(body.error ?? `入庫失敗（${res.status}）`);
+        return;
+      }
+      const parts = [`已寫入 ${body.committed} 題`];
+      if (body.explanations) parts.push(`含詳解 ${body.explanations} 則`);
+      if (body.pendingRewrite) parts.push(`${body.pendingRewrite} 則詳解待改寫`);
+      if (body.errors?.length) parts.push(`${body.errors.length} 題失敗`);
+      setCommitMsg(parts.join('，'));
+      // 已入庫的題目不該再顯示成待入庫。重新載入是最簡單也最不會錯的做法。
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) {
+      setCommitMsg(`連線失敗：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCommitting(false);
+    }
+  }, [jobId]);
 
   // ── 批次儲存 ────────────────────────────────────────────────
   const flush = useCallback(async () => {
@@ -76,6 +116,10 @@ export default function Review({
       setSaving(false);
     }
   }, [jobId, saving]);
+
+  useEffect(() => {
+    flushRef.current = flush;
+  }, [flush]);
 
   useEffect(() => {
     const t = setInterval(flush, 8000);
@@ -260,8 +304,28 @@ export default function Review({
         <span><kbd className="yz-kbd">？</kbd> 存疑</span>
         <span><kbd className="yz-kbd">1–9</kbd> 設定答案</span>
         <span><kbd className="yz-kbd">↑↓</kbd> 移動</span>
-        <span style={{ marginLeft: 'auto', color: 'var(--ink-3)' }}>
-          校對記號沿用紙本習慣：✓ 無誤　？ 待查　× 刪除
+
+        {commitMsg && (
+          <span style={{ marginLeft: 18, color: 'var(--ink)' }}>{commitMsg}</span>
+        )}
+
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 14, alignItems: 'center' }}>
+          <span style={{ color: 'var(--ink-3)' }}>
+            ✓ 無誤　？ 待查　× 刪除
+          </span>
+          <button
+            type="button"
+            className="yz-btn yz-btn--primary"
+            disabled={ready === 0 || committing || saving}
+            onClick={commit}
+            title={
+              ready === 0
+                ? '把題目標成「校畢」之後才能寫進題庫'
+                : `把 ${ready} 題已校畢的題目寫進題庫`
+            }
+          >
+            {committing ? '寫入中…' : `寫進題庫（${ready}）`}
+          </button>
         </span>
       </footer>
     </div>

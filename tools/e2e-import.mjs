@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { createPgShim } from './pg-shim.mjs';
 import { runImport, STAGES } from '../apps/web/scripts/import-pipeline.mjs';
+import { commitJob } from './commit-shim.mjs';
 
 // 用 pg-shim 而非 PrismaClient。理由見 tools/pg-shim.mjs 的檔頭：
 // Prisma 的查詢引擎要從外部網域下載，封閉網段拿不到，而那正是
@@ -399,6 +400,138 @@ async function main() {
       '不可重試的錯誤要明說重試沒用，否則老師會一直按',
     );
     assert.equal(j.stageDetail.permanent, true);
+  });
+
+  // ── 入庫 ───────────────────────────────────────────────────
+
+  section('候選題入庫');
+
+  await test('未確認的候選題不會入庫', async () => {
+    const r = await commitJob(prisma, job.id, tenant.id, teacher.id);
+    const confirmed = await prisma.importCandidate.count({
+      where: { jobId: job.id, state: 'CONFIRMED' },
+    });
+    assert.equal(r.committed, confirmed, '只該寫入已確認的');
+  });
+
+  await test('入庫後題目帶著正確的來源與授權', async () => {
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: job.id } });
+    assert.ok(q, '沒有任何題目入庫');
+    assert.equal(q.sourceType, 'OFFICIAL_PAST');
+    assert.equal(q.licenseScope, 'PUBLIC');
+    assert.equal(q.status, 'DRAFT', '入庫是草稿，發布是另一個決定');
+    assert.ok(q.sourceRef?.includes('115'), `來源標註要能回頭找到原稿：${q.sourceRef}`);
+    assert.ok(q.familyId, 'familyId 是跨版本的識別，不能是空的');
+  });
+
+  await test('選項一起寫進去，且序號從 1 連續', async () => {
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: job.id } });
+    const opts = await prisma.questionOption.findMany({ where: { questionId: q.id } });
+    assert.ok(opts.length >= 2, `選擇題應該有選項，實得 ${opts.length}`);
+    const orders = opts.map((o) => o.order).sort((a, b) => a - b);
+    assert.deepEqual(orders, orders.map((_, i) => i + 1));
+  });
+
+  await test('候選題記住它變成了哪一題', async () => {
+    const c = await prisma.importCandidate.findFirst({
+      where: { jobId: job.id, state: 'CONFIRMED' },
+    });
+    assert.ok(c.questionId, '沒有回填 questionId，重跑入庫會產生重複題目');
+  });
+
+  await test('重跑入庫不會產生重複題目', async () => {
+    const before = await prisma.question.count({ where: { sourceImportJobId: job.id } });
+    const r = await commitJob(prisma, job.id, tenant.id, teacher.id);
+    const after = await prisma.question.count({ where: { sourceImportJobId: job.id } });
+    assert.equal(r.committed, 0);
+    assert.equal(before, after);
+  });
+
+  await test('權利未確認時不原文收錄詳解', async () => {
+    const j2 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id,
+        subjectId: subject.id,
+        title: '未確認權利的講義',
+        sourceType: 'PUBLISHER_SCAN',
+        licenseScope: 'TENANT_NO_EXPORT',
+        rightsBasis: 'UNVERIFIED',
+        rightsDeclaredBy: teacher.id,
+        stageDetail: { stages: {} },
+      },
+    });
+    await prisma.importCandidate.create({
+      data: {
+        jobId: j2.id,
+        order: 1,
+        type: 'SINGLE_CHOICE',
+        content: '測試題幹',
+        options: [
+          { order: 1, label: '1', content: '甲' },
+          { order: 2, label: '2', content: '乙' },
+        ],
+        explanationRaw: '這是出版社的詳解原文，受著作權保護。',
+        state: 'CONFIRMED',
+        reviewedBy: teacher.id,
+        reviewedAt: new Date(),
+      },
+    });
+
+    const r = await commitJob(prisma, j2.id, tenant.id, teacher.id);
+    assert.equal(r.committed, 1);
+    assert.equal(r.explanations, 0, '權利未確認就不該建解析列');
+    assert.equal(r.pendingRewrite, 1);
+
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: j2.id } });
+    const ex = await prisma.explanation.count({ where: { questionId: q.id } });
+    assert.equal(ex, 0);
+    assert.ok(q.qualityFlags?.explanationPendingRewrite, '要標記出來，否則沒有人知道還缺一份解析');
+
+    // 原文不可以遺失——它還留在候選題上等改寫
+    const c = await prisma.importCandidate.findFirst({ where: { jobId: j2.id } });
+    assert.ok(c.explanationRaw?.includes('著作權'), '原文不該被丟掉');
+  });
+
+  await test('權利確認過就原文收錄詳解', async () => {
+    const j3 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id,
+        subjectId: subject.id,
+        title: '老師自編講義',
+        sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE',
+        rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id,
+        stageDetail: { stages: {} },
+      },
+    });
+    await prisma.importCandidate.create({
+      data: {
+        jobId: j3.id,
+        order: 1,
+        type: 'SHORT_ANSWER',
+        content: '試證明之。',
+        explanationRaw: '由三角不等式可得。',
+        state: 'CONFIRMED',
+        reviewedBy: teacher.id,
+        reviewedAt: new Date(),
+      },
+    });
+
+    const r = await commitJob(prisma, j3.id, tenant.id, teacher.id);
+    assert.equal(r.explanations, 1);
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: j3.id } });
+    const ex = await prisma.explanation.findFirst({ where: { questionId: q.id } });
+    assert.equal(ex.origin, 'VERBATIM_IMPORT');
+    assert.equal(ex.isPrimary, true);
+    assert.equal(ex.displayMode, 'FULL');
+  });
+
+  await test('入庫寫進稽核記錄', async () => {
+    const n = await prisma.auditLog.count({
+      where: { action: 'import.commit', targetId: job.id },
+    });
+    assert.ok(n >= 1, '入庫是題庫異動，一定要留下痕跡');
   });
 
   // ── 收尾 ───────────────────────────────────────────────────

@@ -738,11 +738,16 @@ model QuestionGroup {
   stimulus       String // 前導敘述／閱讀素材
   stimulusAssets Json?
   label          String? // 「37-39 題為題組」
+  // 同一次匯入的同一個 groupKey 只對應一個題組。
+  // 沒有這個對應，重跑入庫會建出重複的題組。
+  sourceImportJobId String?
+  sourceGroupKey    String?
   createdAt      DateTime @default(now())
 
   subject   Subject    @relation(fields: [subjectId], references: [id], onDelete: Cascade)
   questions Question[]
 
+  @@unique([sourceImportJobId, sourceGroupKey])
   @@index([tenantId, subjectId])
   @@map("question_groups")
 }
@@ -813,6 +818,7 @@ model Question {
   @@index([tenantId, subjectId, status])
   @@index([groupId])
   @@index([sourceType])
+  @@index([sourceImportJobId])
   @@map("questions")
 }
 
@@ -936,6 +942,8 @@ model ImportJob {
   totalCandidates Int  @default(0)
   confirmedCount  Int  @default(0)
   flaggedCount    Int  @default(0)
+  committedCount  Int  @default(0)
+  commitDetail    Json?
 
   // 階段進度。埋在 stageDetail 的 JSONB 裡查起來太痛，
   // 而「卡在哪一階段、跑多久、花多少」是維運每天要看的。
@@ -1049,6 +1057,12 @@ model ImportCandidate {
   kpSuggestions Json?
   sourceBbox    Json? // 原稿座標，供左右連動
   sourcePage    Int?
+
+  // 原稿附帶的內容。與 answerText 分開存：answerText 是校對後
+  // 要入庫的值，這幾個是原稿長什麼樣，不一致時要看得出來。
+  explanationRaw  String? // 教用版的詳解。著作權地位與試題不同，分開判斷
+  sourceAnswerRaw String? // 原稿印出的答案
+  label           String? // 講義的題目標頭（「範例 3」「類題 1」）
 
   state      CandidateState @default(PENDING)
   reviewedBy String?
