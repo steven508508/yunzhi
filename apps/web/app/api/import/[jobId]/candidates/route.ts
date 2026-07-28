@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { scopedRoute } from '@/lib/route';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { loadJob, saveReviews } from '@/lib/candidates';
-import { requireUser, canEditSubject } from '@/lib/auth';
+import {canEditSubject } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * 校對這份題本的資格。
  *
- * 這支 API 是校對頁面的後端，而**頁面本身**（`app/(app)/import/[jobId]`）
+ * 這支 API 是校對頁面的後端，而**頁面本身**（`app/(app)/import/[params.jobId]`）
  * 早就有 `canEditSubject` 的檢查——只有支撐它的 API 沒有。同一個功能
  * 的其他入口（上傳擋學生與家長、入庫與續跑要 `canEditSubject`）也都
  * 有檢查。少了這一段，只教數學的老師可以改英文科題本的答案，而題本
@@ -32,18 +33,15 @@ async function mayReview(jobId: string, user: { id: string; tenantId: string; sy
   return { job };
 }
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
-  const { jobId } = await params;
-  const user = await requireUser();
-  if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+export const GET = scopedRoute<{ jobId: string }>(async (_req: NextRequest, { user, params }) => {
 
-  const gate = await mayReview(jobId, user);
+  const gate = await mayReview(params.jobId, user);
   if (gate.error) return gate.error;
 
-  const data = await loadJob(jobId, user.tenantId);
+  const data = await loadJob(params.jobId, user.tenantId);
   if (!data) return NextResponse.json({ error: '找不到匯入工作' }, { status: 404 });
   return NextResponse.json(data);
-}
+});
 
 const PatchBody = z.object({
   changes: z.array(z.object({
@@ -55,12 +53,9 @@ const PatchBody = z.object({
   reviewSeconds: z.number().int().min(0).max(86400).optional(),
 });
 
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
-  const { jobId } = await params;
-  const user = await requireUser();
-  if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+export const PATCH = scopedRoute<{ jobId: string }>(async (req: NextRequest, { user, params }) => {
 
-  const gate = await mayReview(jobId, user);
+  const gate = await mayReview(params.jobId, user);
   if (gate.error) return gate.error;
 
   const parsed = PatchBody.safeParse(await req.json().catch(() => null));
@@ -72,7 +67,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ jo
   }
 
   try {
-    const job = await saveReviews(jobId, user.tenantId, user.id, parsed.data.changes);
+    const job = await saveReviews(params.jobId, user.tenantId, user.id, parsed.data.changes);
     return NextResponse.json({
       ok: true,
       confirmed: job.confirmedCount,
@@ -82,4 +77,4 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ jo
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
-}
+});

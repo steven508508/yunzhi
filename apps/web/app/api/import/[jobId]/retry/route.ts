@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { scopedRoute } from '@/lib/route';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
-import { requireUser, canEditSubject } from '@/lib/auth';
+import {canEditSubject } from '@/lib/auth';
 import { requeueImport, IMPORT_STAGES, type ImportStage } from '@/lib/queue';
 
 export const dynamic = 'force-dynamic';
@@ -16,16 +17,10 @@ const Body = z.object({
   resume: z.boolean().default(true),
 });
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: Promise<{ jobId: string }> },
-) {
-  const { jobId } = await params;
-  const user = await requireUser();
-  if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+export const POST = scopedRoute<{ jobId: string }>(async (req: NextRequest, { user, params }) => {
 
   const job = await prisma.importJob.findFirst({
-    where: { id: jobId, tenantId: user.tenantId },
+    where: { id: params.jobId, tenantId: user.tenantId },
     include: { subject: { select: { name: true } } },
   });
   if (!job) return NextResponse.json({ error: '找不到匯入工作' }, { status: 404 });
@@ -60,7 +55,7 @@ export async function POST(
     if (!next) {
       // 全部階段都完成過了，直接標成待校對即可，不必再跑一次。
       await prisma.importJob.update({
-        where: { id: jobId },
+        where: { id: params.jobId },
         data: { status: 'READY_FOR_REVIEW', error: null },
       });
       return NextResponse.json({ ok: true, action: 'marked_ready' });
@@ -69,7 +64,7 @@ export async function POST(
   }
 
   await prisma.importJob.update({
-    where: { id: jobId },
+    where: { id: params.jobId },
     data: {
       status: 'QUEUED',
       error: null,
@@ -86,13 +81,13 @@ export async function POST(
       action: resume ? 'import.resume' : 'import.restart',
       actorId: user.id,
       targetType: 'ImportJob',
-      targetId: jobId,
+      targetId: params.jobId,
       metadata: { fromStage: fromStage ?? null, previousError: job.error },
     },
   });
 
   try {
-    await requeueImport({ jobId, tenantId: user.tenantId, fromStage });
+    await requeueImport({ jobId: params.jobId, tenantId: user.tenantId, fromStage });
   } catch (e) {
     return NextResponse.json(
       { error: `無法排入佇列：${e instanceof Error ? e.message : String(e)}` },
@@ -101,4 +96,4 @@ export async function POST(
   }
 
   return NextResponse.json({ ok: true, fromStage: fromStage ?? 'NORMALIZING' });
-}
+});

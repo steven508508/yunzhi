@@ -9,6 +9,11 @@
  */
 import assert from 'node:assert/strict';
 import { createPgShim } from './pg-shim.mjs';
+import {
+  exitTenantScope,
+  withTenant,
+  withoutTenantScope,
+} from '../apps/web/lib/tenantContext.mjs';
 import { runImport, STAGES } from '../apps/web/scripts/import-pipeline.mjs';
 import { commitJob } from './commit-shim.mjs';
 
@@ -102,14 +107,69 @@ async function seed() {
   return { tenant, teacher, subject, klass };
 }
 
-async function main() {
-  // 清乾淨。這支可以重複跑。
-  await prisma.$executeRawUnsafe(`
-    TRUNCATE TABLE tenants, subjects, publishers, official_source_fetches
-    RESTART IDENTITY CASCADE
-  `);
+/** 第二家補習班。存在的唯一理由是證明第一家看不到它的東西。 */
+async function seedOther() {
+  const tenant = await prisma.tenant.create({ data: { name: '隔壁補習班' } });
+  const teacher = await prisma.user.create({
+    data: {
+      tenantId: tenant.id,
+      username: 'T999',
+      displayName: '隔壁老師',
+      systemRole: 'TEACHER',
+      passwordHash: '$2a$12$notarealhashnotarealhashnotarealhashnotarealhashnotar',
+    },
+  });
+  const subject = await prisma.subject.create({
+    data: { tenantId: tenant.id, code: 'MATH_A', name: '數學A', gsatFullScore: 100 },
+  });
+  const job = await prisma.importJob.create({
+    data: {
+      tenantId: tenant.id,
+      subjectId: subject.id,
+      title: '隔壁補習班的題本',
+      sourceType: 'TEACHER_ORIGINAL',
+      licenseScope: 'TENANT_EXPORTABLE',
+      rightsBasis: 'OWNED',
+      rightsDeclaredBy: teacher.id,
+      stageDetail: { stages: {} },
+    },
+  });
+  const question = await prisma.question.create({
+    data: {
+      tenantId: tenant.id,
+      subjectId: subject.id,
+      familyId: 'fam-other',
+      version: 1,
+      type: 'SINGLE_CHOICE',
+      content: '隔壁補習班的題目，這一行不該被別人看到',
+      answerKeys: [1],
+      sourceType: 'TEACHER_ORIGINAL',
+      licenseScope: 'TENANT_EXPORTABLE',
+      status: 'PUBLISHED',
+    },
+  });
+  return { tenant, teacher, subject, job, question };
+}
 
-  const { tenant, teacher, subject } = await seed();
+async function main() {
+  // 建置階段是跨租戶的：它要清掉所有租戶、再建出租戶本身。
+  // 這是全檔唯一一處，之後的每一項測試都在租戶脈絡下跑——
+  // 那才是正式環境的樣子，也才驗得到 RLS。
+  const fixture = await withoutTenantScope('端到端測試建置：清庫並建出租戶本身', async () => {
+    await prisma.$executeRawUnsafe(`
+      TRUNCATE TABLE tenants, subjects, publishers, official_source_fetches
+      RESTART IDENTITY CASCADE
+    `);
+    const base = await seed();
+    // 第二個租戶，專門用來驗「看不到別人的資料」。
+    const other = await seedOther();
+    return { ...base, other };
+  });
+  return withTenant(fixture.tenant.id, () => mainScoped(fixture));
+}
+
+async function mainScoped(fixture) {
+  const { tenant, teacher, subject, other } = fixture;
   const pdf = await makePaperPdf();
 
   const storage = await import('@aws-sdk/client-s3');
@@ -121,6 +181,110 @@ async function main() {
       accessKeyId: process.env.S3_ACCESS_KEY,
       secretAccessKey: process.env.S3_SECRET_KEY,
     },
+  });
+
+  // ── 租戶隔離 ───────────────────────────────────────────────
+  //
+  // 這一組是白牌授權的前提。一旦系統給第二家補習班用，
+  // 「A 看得到 B 的資料」就從 bug 變成法律問題——出版社詳解的
+  // 授權範圍是「機構內部使用」，跨機構就是對外散布。
+  //
+  // 全部走真的程式路徑，不是直接下 SQL：要驗的是「應用程式漏了
+  // 條件時資料庫擋不擋得住」，而不是「政策的語法對不對」。
+
+  section('租戶隔離');
+
+  await test('查不到別家補習班的題目——即使完全不帶條件', async () => {
+    // 自己先放一題，這樣「看得到自己的、看不到別人的」兩半都驗得到。
+    // 只驗後半的話，一個「什麼都查不到」的錯誤設定也會通過。
+    const mine = await prisma.question.create({
+      data: {
+        tenantId: tenant.id,
+        subjectId: subject.id,
+        familyId: 'fam-isolation-probe',
+        version: 1,
+        type: 'SINGLE_CHOICE',
+        content: '自己租戶的題目，應該看得到',
+        answerKeys: [1],
+        sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE',
+        status: 'PUBLISHED',
+      },
+    });
+    try {
+      const all = await prisma.question.findMany({});
+      assert.ok(
+        all.some((q) => q.id === mine.id),
+        '連自己的題目都看不到——那不是隔離，是壞掉',
+      );
+      assert.ok(
+        !all.some((q) => q.tenantId === other.tenant.id),
+        '看到了隔壁補習班的題目。**這就是漏掉 where 條件時會發生的事**',
+      );
+    } finally {
+      await prisma.question.deleteMany({ where: { id: mine.id } });
+    }
+  });
+
+  await test('拿著別家的 id 直接查，也查不到', async () => {
+    const q = await prisma.question.findFirst({ where: { id: other.question.id } });
+    assert.equal(q, null, '知道 id 就查得到，等於隔離只擋住列表不擋住直接存取');
+    const job = await prisma.importJob.findFirst({ where: { id: other.job.id } });
+    assert.equal(job, null);
+  });
+
+  await test('看不到別家的使用者與科目', async () => {
+    const users = await prisma.user.findMany({});
+    assert.ok(!users.some((u) => u.id === other.teacher.id), '看到了隔壁的老師帳號');
+    const subs = await prisma.subject.findMany({});
+    assert.ok(!subs.some((x) => x.id === other.subject.id), '看到了隔壁的科目');
+  });
+
+  await test('改不動別家的資料', async () => {
+    const { count } = await prisma.importJob.updateMany({
+      where: { id: other.job.id },
+      data: { title: '被別家改掉了' },
+    });
+    assert.equal(count, 0, '改得動別家的資料，比讀得到更嚴重');
+    const still = await withoutTenantScope('驗證用：回頭確認隔壁的資料沒被動到', () =>
+      prisma.importJob.findFirst({ where: { id: other.job.id } }),
+    );
+    assert.equal(still.title, '隔壁補習班的題本');
+  });
+
+  await test('寫不進別家的租戶', async () => {
+    await assert.rejects(
+      prisma.subject.create({
+        data: {
+          tenantId: other.tenant.id,
+          code: 'CHINESE',
+          name: '偷渡到隔壁的科目',
+          gsatFullScore: 100,
+        },
+      }),
+      /row-level security|policy/i,
+      'WITH CHECK 沒有生效——寫得進去卻讀不到，是最難查的一種資料損壞',
+    );
+  });
+
+  await test('沒有外鍵的子表也擋得住（間接隔離）', async () => {
+    // question_options 沒有 tenantId，靠 questions 掛上去。
+    // 這一類表最容易被漏掉，因為它們看起來與租戶無關。
+    const otherOpt = await withoutTenantScope('驗證用：在隔壁租戶底下建一個選項', () =>
+      prisma.questionOption.create({
+        data: { questionId: other.question.id, order: 1, label: '(1)', content: '隔壁的選項' },
+      }),
+    );
+    const seen = await prisma.questionOption.findFirst({ where: { id: otherOpt.id } });
+    assert.equal(seen, null, '子表沒有跟著父表一起隔離');
+  });
+
+  await test('沒有租戶脈絡時什麼都查不到（fail closed）', async () => {
+    // 忘記包 withTenant 是最常見的錯。它必須是「查不到東西」，
+    // 而不是「查到全部」——後者是安靜的資料外洩。
+    const outside = await exitTenantScope(() => prisma.question.findMany({}));
+    assert.ok(Array.isArray(outside));
+    assert.equal(outside.length, 0, '沒設租戶卻查得到資料——fail open，最糟的一種預設');
   });
 
   // ── 資料庫層的授權約束 ─────────────────────────────────────

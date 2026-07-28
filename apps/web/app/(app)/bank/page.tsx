@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { requireUser } from '@/lib/auth';
+import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
@@ -10,9 +10,8 @@ export default async function BankPage({
 }: {
   searchParams: Promise<{ subject?: string; q?: string }>;
 }) {
-  const user = await requireUser();
-  if (!user) redirect('/login');
   const sp = await searchParams;
+  return scopedPage(async (user) => {
 
   const subjects = await prisma.subject.findMany({
     where: { tenantId: user.tenantId, active: true },
@@ -102,6 +101,7 @@ export default async function BankPage({
       </main>
     </div>
   );
+  });
 }
 
 const TYPE: Record<string, string> = {

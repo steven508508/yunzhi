@@ -13,8 +13,10 @@ import { PrismaClient } from '@prisma/client';
 import { UnrecoverableError, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { runImport, stageLabel } from './import-pipeline.mjs';
+import { tenantScoped } from '../lib/prismaClient.mjs';
+import { withoutTenantScope } from '../lib/tenantContext.mjs';
 
-const prisma = new PrismaClient();
+const prisma = tenantScoped(new PrismaClient());
 const ALIVE_FILE = '/tmp/worker-alive';
 
 // BullMQ 需要一條 maxRetriesPerRequest = null 的連線（它自己會做
@@ -34,8 +36,23 @@ let shuttingDown = false;
 // ─────────────────────────────────────────────────────────────
 
 const jobs = [];
+/**
+ * 週期性維護一律**跨租戶**執行。
+ *
+ * 這些工作本來就是跨租戶的：清掉所有租戶的過期 session、解鎖所有
+ * 租戶的帳號、找出所有租戶卡住的匯入。工作者不屬於任何一家補習班。
+ *
+ * 包在這裡而不是每個工作各自寫，是為了讓「跨租戶」只出現一次——
+ * 那是唯一能繞過隔離的地方，出現次數愈少愈好，而
+ * `tools/rls-check.mjs` 會盯著它。
+ */
 function registerJob(name, intervalMs, fn) {
-  jobs.push({ name, intervalMs, fn, lastRun: 0 });
+  jobs.push({
+    name,
+    intervalMs,
+    fn: () => withoutTenantScope(`背景維護工作：${name}`, fn),
+    lastRun: 0,
+  });
 }
 
 registerJob('cleanup-sessions', 10 * 60 * 1000, async () => {

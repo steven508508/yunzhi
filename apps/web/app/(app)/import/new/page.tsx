@@ -1,14 +1,13 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { requireUser } from '@/lib/auth';
+import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import Upload from './Upload';
 
 export const dynamic = 'force-dynamic';
 
 export default async function NewImportPage() {
-  const user = await requireUser();
-  if (!user) redirect('/login');
+  return scopedPage(async (user) => {
   if (user.systemRole === 'STUDENT' || user.systemRole === 'GUARDIAN') redirect('/');
 
   // 只列這位老師能匯入的科目。
@@ -69,4 +68,5 @@ export default async function NewImportPage() {
       </main>
     </div>
   );
+  });
 }

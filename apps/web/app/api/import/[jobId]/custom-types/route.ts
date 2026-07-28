@@ -7,9 +7,10 @@
  * 這是「向老師確認即可」實際發生的地方。
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { scopedRoute } from '@/lib/route';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
-import { requireUser, canEditSubject } from '@/lib/auth';
+import {canEditSubject } from '@/lib/auth';
 import {
   ANSWER_MODES,
   RIGHTS,
@@ -46,19 +47,13 @@ async function gate(jobId: string, user: { id: string; tenantId: string }) {
   return { job };
 }
 
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ jobId: string }> },
-) {
-  const { jobId } = await params;
-  const user = await requireUser();
-  if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+export const GET = scopedRoute<{ jobId: string }>(async (_req: NextRequest, { user, params }) => {
 
-  const g = await gate(jobId, user);
+  const g = await gate(params.jobId, user);
   if (g.error) return g.error;
 
   const [pending, known] = await Promise.all([
-    pendingTypes(jobId, user.tenantId),
+    pendingTypes(params.jobId, user.tenantId),
     prisma.customQuestionType.findMany({
       where: { tenantId: user.tenantId, active: true },
       orderBy: { usageCount: 'desc' },
@@ -76,7 +71,7 @@ export async function GET(
     answerModes: ANSWER_MODES,
     rights: RIGHTS,
   });
-}
+});
 
 const Body = z.object({
   // 模型提議的名稱。確認之後要用它把同名的候選題接上。
@@ -96,15 +91,9 @@ const Body = z.object({
   }),
 });
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: Promise<{ jobId: string }> },
-) {
-  const { jobId } = await params;
-  const user = await requireUser();
-  if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+export const POST = scopedRoute<{ jobId: string }>(async (req: NextRequest, { user, params }) => {
 
-  const g = await gate(jobId, user);
+  const g = await gate(params.jobId, user);
   if (g.error) return g.error;
 
   const parsed = Body.safeParse(await req.json().catch(() => null));
@@ -121,7 +110,7 @@ export async function POST(
 
   try {
     const saved = await confirmType(user.tenantId, user, b);
-    const applied = await applyType(jobId, user.tenantId, b.proposedName, saved.id);
+    const applied = await applyType(params.jobId, user.tenantId, b.proposedName, saved.id);
     return NextResponse.json({
       ok: true,
       typeId: saved.id,
@@ -138,4 +127,4 @@ export async function POST(
       { status: 400 },
     );
   }
-}
+});

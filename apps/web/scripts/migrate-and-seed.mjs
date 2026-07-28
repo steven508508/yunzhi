@@ -7,6 +7,8 @@
  */
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
+import { tenantScoped } from '../lib/prismaClient.mjs';
+import { withoutTenantScope } from '../lib/tenantContext.mjs';
 import bcrypt from 'bcryptjs';
 
 const SCHEMA = 'packages/db/schema.prisma';
@@ -17,10 +19,16 @@ function run(cmd, args) {
 }
 
 async function main() {
+  // 建租戶本身、跑遷移、塞種子——這支腳本比租戶更早存在，
+  // 所以它必須跨租戶。
+  return withoutTenantScope('遷移與種子：這支腳本比租戶本身更早執行', mainScoped);
+}
+
+async function mainScoped() {
   console.log('── 資料庫遷移 ──────────────────────────────');
   run('npx', ['prisma', 'migrate', 'deploy', '--schema', SCHEMA]);
 
-  const prisma = new PrismaClient();
+  const prisma = tenantScoped(new PrismaClient());
   try {
     console.log('── 初始資料 ────────────────────────────────');
 

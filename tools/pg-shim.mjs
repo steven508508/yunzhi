@@ -18,6 +18,8 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 
+import { currentTenant, guc } from '../apps/web/lib/tenantContext.mjs';
+
 const require = createRequire(import.meta.url);
 const wasm = require('@prisma/prisma-schema-wasm');
 globalThis.PRISMA_WASM_PANIC_REGISTRY ??= { set_message() {} };
@@ -211,7 +213,38 @@ export function createPgShim({ connectionString, schemaPath }) {
   pg.types.setTypeParser(20, (v) => BigInt(v));
   pg.types.setTypeParser(1700, (v) => Number(v));
 
-  const run = async (text, values = []) => (await pool.query(text, values)).rows;
+  /**
+   * 每一次查詢都包成一個交易，並在交易內告訴資料庫「現在是哪個租戶」。
+   *
+   * 與 `apps/web/lib/prisma.ts` 的擴充做同一件事，理由也一樣：
+   * `set_config(key, value, true)` 的第三個參數是 is_local，設定只在
+   * **目前交易**內有效。連線是從池子借來的，若設成 session 層級，
+   * 這次查詢結束後設定會留在那條連線上，下一次借到同一條就繼承了
+   * 上一次的租戶——那種洩漏偶發、無法重現、而且測不出來。
+   *
+   * 租戶脈絡與正式程式共用 `apps/web/lib/tenantContext.mjs` 那一份。
+   * 各寫一份的話，測試會綠燈而正式環境會洩漏。
+   */
+  const run = async (text, values = []) => {
+    const g = guc(currentTenant());
+    const conn = await pool.connect();
+    try {
+      await conn.query('BEGIN');
+      await conn.query(
+        `SELECT set_config('app.tenant_id', $1, true),
+                set_config('app.cross_tenant', $2, true)`,
+        [g.tenantId, g.crossTenant],
+      );
+      const r = await conn.query(text, values);
+      await conn.query('COMMIT');
+      return r.rows;
+    } catch (e) {
+      await conn.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      conn.release();
+    }
+  };
 
   function modelApi(key) {
     const model = models.get(key);
@@ -356,11 +389,20 @@ export function createPgShim({ connectionString, schemaPath }) {
 
   const client = {
     $disconnect: () => pool.end(),
-    $executeRawUnsafe: async (sql, ...params) => (await pool.query(sql, params)).rowCount,
-    $queryRaw: async (strings, ...params) => {
-      const text = strings.reduce((acc, s, i) => acc + s + (i < params.length ? `$${i + 1}` : ''), '');
-      return (await pool.query(text, params)).rows;
+    // 原始 SQL 也要走同一條路。它們最容易被忘記，而 RLS 的價值就在
+    // 「忘記的地方也擋得住」——所以這裡不能圖方便直接用 pool.query。
+    $executeRawUnsafe: async (sql, ...params) => {
+      const rows = await run(sql, params);
+      return rows.length;
     },
+    $queryRaw: async (strings, ...params) => {
+      const text = strings.reduce(
+        (acc, s, i) => acc + s + (i < params.length ? `$${i + 1}` : ''),
+        '',
+      );
+      return run(text, params);
+    },
+    $queryRawUnsafe: async (sql, ...params) => run(sql, params),
   };
 
   for (const key of models.keys()) {

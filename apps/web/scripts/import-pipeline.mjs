@@ -13,6 +13,8 @@
  * 盲目重試三次就是白燒三倍的前四階段。所以 502（設定錯）
  * 直接放棄並把原因寫給老師看，只有 503（限流、暫時故障）才重試。
  */
+import { withTenant, withoutTenantScope } from '../lib/tenantContext.mjs';
+
 const AI_URL = (process.env.AI_SERVICE_URL ?? 'http://ai:8000').replace(/\/+$/, '');
 
 /** 階段順序。與 ImportStatus 的列舉值同名，方便直接寫回。 */
@@ -1075,6 +1077,19 @@ async function monthlyTokensUsed(prisma, tenantId) {
 }
 
 export async function runImport(prisma, jobId, opts = {}) {
+  // 佇列只給了 jobId，所以要先跨租戶查出這個工作屬於誰——與登入時
+  // 查 session 是同一種雞生蛋問題。jobId 是 cuid，猜不到，
+  // 所以「跨租戶查一個給定的 id」不會洩漏任何東西。
+  const owner = await withoutTenantScope('佇列取件：先查出這個工作屬於哪個租戶', () =>
+    prisma.importJob.findUnique({ where: { id: jobId }, select: { tenantId: true } }),
+  );
+  if (!owner) throw new PermanentError(`找不到匯入工作 ${jobId}`, null);
+  // 之後的一切都在這個租戶底下。管線會碰十幾張表，逐一帶 tenantId
+  // 是漏掉一個就洩漏一次——包一次比較安全。
+  return withTenant(owner.tenantId, () => runImportScoped(prisma, jobId, opts));
+}
+
+async function runImportScoped(prisma, jobId, opts = {}) {
   const job = await prisma.importJob.findUnique({ where: { id: jobId } });
   if (!job) throw new PermanentError(`找不到匯入工作 ${jobId}`, null);
   if (job.status === 'COMMITTED') {

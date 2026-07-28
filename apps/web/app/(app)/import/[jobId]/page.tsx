@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
-import { requireUser, canEditSubject } from '@/lib/auth';
+import {canEditSubject} from '@/lib/auth';
+import { scopedPage } from '@/lib/page';
 import { loadJob } from '@/lib/candidates';
 import { loadProgress } from '@/lib/importStatus';
 import Review from './Review';
@@ -13,8 +14,7 @@ const REVIEWABLE = new Set(['READY_FOR_REVIEW', 'COMMITTING', 'COMMITTED']);
 
 export default async function Page({ params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = await params;
-  const user = await requireUser();
-  if (!user) redirect('/login');
+  return scopedPage(async (user) => {
 
   const progress = await loadProgress(jobId, user.tenantId);
   if (!progress) notFound();
@@ -70,4 +70,5 @@ export default async function Page({ params }: { params: Promise<{ jobId: string
       fileNote={fileNote}
     />
   );
+  });
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { scopedRoute } from '@/lib/route';
 import { z } from 'zod';
-import { requireUser } from '@/lib/auth';
+
 import { changePassword } from '@/lib/password';
 
 export const dynamic = 'force-dynamic';
@@ -10,9 +11,7 @@ const Body = z.object({
   newPassword: z.string().min(1),
 });
 
-export async function POST(req: NextRequest) {
-  const user = await requireUser();
-  if (!user) return NextResponse.json({ error: '未登入' }, { status: 401 });
+export const POST = scopedRoute(async (req: NextRequest, { user, params }) => {
 
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: '請求格式錯誤' }, { status: 400 });
@@ -24,4 +23,4 @@ export async function POST(req: NextRequest) {
   const res = NextResponse.json({ ok: true, reloginRequired: true });
   res.cookies.set('yz_session', '', { path: '/', maxAge: 0 });
   return res;
-}
+});

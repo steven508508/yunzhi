@@ -1,14 +1,13 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { requireUser } from '@/lib/auth';
+import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import { STATUS_LABELS } from '@/lib/importStatus';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ImportListPage() {
-  const user = await requireUser();
-  if (!user) redirect('/login');
+  return scopedPage(async (user) => {
 
   const jobs = await prisma.importJob.findMany({
     where: { tenantId: user.tenantId },
@@ -74,4 +73,5 @@ export default async function ImportListPage() {
       </main>
     </div>
   );
+  });
 }

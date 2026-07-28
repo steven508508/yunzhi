@@ -27,7 +27,8 @@
     "test:e2e": "./tools/e2e-import.sh",
     "test:ai": "cd apps/ai && for t in tests/test_*.py; do python3 $t || exit 1; done",
     "check:deploy": "node tools/deploy-check.mjs",
-    "check": "npm run typecheck && node tools/prisma-check.mjs && node tools/schema-drift.mjs && npm run check:deploy"
+    "check": "npm run typecheck && node tools/prisma-check.mjs && node tools/schema-drift.mjs && node tools/rls-check.mjs --static && npm run check:deploy",
+    "check:tenant": "node tools/rls-check.mjs"
   },
   "devDependencies": {
     "@prisma/prisma-schema-wasm": "5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2",

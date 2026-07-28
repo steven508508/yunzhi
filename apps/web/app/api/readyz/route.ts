@@ -18,6 +18,7 @@
  */
 
 import { NextResponse } from 'next/server';
+import { publicRoute } from '@/lib/route';
 import { prisma } from '@/lib/prisma';
 import { redis } from '@/lib/redis';
 
@@ -44,7 +45,9 @@ async function timed(fn: () => Promise<unknown>): Promise<CheckResult> {
   }
 }
 
-export async function GET() {
+export const GET = publicRoute(
+  '就緒探針。負載平衡器與 systemd 會打它，那時沒有任何使用者',
+  async () => {
   // 逾時保護：探測本身不能卡住。資料庫掛住時，沒有逾時的探測
   // 會讓 Caddy 的健康檢查排隊堆積，最後連健康的實例也拿不到流量。
   const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
@@ -76,4 +79,5 @@ export async function GET() {
       headers: { 'Cache-Control': 'no-store, max-age=0' },
     },
   );
-}
+  },
+);

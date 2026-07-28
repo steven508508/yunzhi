@@ -11,6 +11,7 @@
  * 都推到佇列後面 —— 老師按下上傳之後不該盯著轉圈圈。
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { scopedRoute } from '@/lib/route';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { requireUser, canEditSubject } from '@/lib/auth';
@@ -64,9 +65,7 @@ function bad(message: string, status = 400, detail?: unknown) {
   return NextResponse.json({ error: message, detail }, { status });
 }
 
-export async function POST(req: NextRequest) {
-  const user = await requireUser();
-  if (!user) return bad('未登入', 401);
+export const POST = scopedRoute(async (req: NextRequest, { user }) => {
   if (user.systemRole === 'STUDENT' || user.systemRole === 'GUARDIAN') {
     return bad('沒有匯入題目的權限', 403);
   }
@@ -341,7 +340,7 @@ export async function POST(req: NextRequest) {
     },
     { status: 201 },
   );
-}
+});
 
 /**
  * 從檔名猜角色。猜錯不要緊 —— 上傳介面會把猜測結果顯示出來讓老師改，
