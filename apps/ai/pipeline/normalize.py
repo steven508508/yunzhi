@@ -489,15 +489,11 @@ def normalize_pdf(data: bytes, translate=None) -> NormalizeResult:
         pages: list[PageOut] = []
         native_count = 0
 
-        for i, page in enumerate(doc):
+        for page in doc:
             is_native = _page_has_real_text(page)
             native_count += int(is_native)
 
             pix = page.get_pixmap(matrix=matrix, alpha=False)
-            png = pix.tobytes("png")
-
-            notes: list[str] = []
-            quality = 1.0
 
             blocks: list[dict] = []
             if is_native:
@@ -505,36 +501,46 @@ def normalize_pdf(data: bytes, translate=None) -> NormalizeResult:
                 # 文字層直接由區塊組回去，而不是另外呼叫 get_text("text")——
                 # 否則符號字型的還原只會反映在區塊上，文字層仍是原始的
                 # ASCII，兩者對不起來。
-                text = "\n".join(b["text"] for b in blocks)
-            else:
-                text = None
-                # 掃描頁走影像前處理，並據此評估品質
-                png, quality, notes = _enhance_scan(png)
-
-            pages.append(
-                PageOut(
-                    index=i,
-                    width=pix.width,
-                    height=pix.height,
-                    png=png,
-                    text_layer=text,
-                    text_blocks=blocks,
-                    quality=quality,
-                    quality_notes=notes,
+                pages.append(
+                    PageOut(
+                        index=len(pages),
+                        width=pix.width,
+                        height=pix.height,
+                        png=pix.tobytes("png"),
+                        text_layer="\n".join(b["text"] for b in blocks),
+                        text_blocks=blocks,
+                    )
                 )
-            )
+                continue
 
+            # 掃描頁走影像前處理，並據此評估品質。前處理可能把一張
+            # 攤開的書切成兩頁，所以 PDF 的頁數不一定等於輸出頁數，
+            # index 要用累計值而不是迴圈變數。
+            pngs, quality, notes = _enhance_scan(pix.tobytes("png"))
+            for png in pngs:
+                img = _to_cv(png)
+                h, w = img.shape[:2]
+                pages.append(
+                    PageOut(index=len(pages), width=w, height=h, png=png,
+                            text_layer=None, quality=quality, quality_notes=notes)
+                )
+
+        # 比例要用**原始頁數**算。切頁只發生在掃描頁上，用輸出頁數
+        # 當分母會讓一份切過頁的檔案看起來更像掃描件，判定就飄了。
+        source_total = doc.page_count or 1
         total = len(pages) or 1
-        native_ratio = native_count / total
+        native_ratio = native_count / source_total
         kind: SourceKind = "native_pdf" if native_ratio > 0.6 else "scanned_pdf"
         quality = sum(p.quality for p in pages) / total
 
+        split = total - source_total
+        extra = f"　其中 {split} 頁是從攤開的書本切出來的。" if split > 0 else ""
         if kind == "native_pdf":
-            note = f"原生 PDF，{native_count}/{total} 頁有可用文字層，辨識準確率高。"
+            note = f"原生 PDF，{native_count}/{source_total} 頁有可用文字層，辨識準確率高。"
         else:
             note = (
-                f"掃描 PDF（{total - native_count}/{total} 頁無文字層），"
-                f"品質評分 {quality:.2f}。準確率取決於掃描品質，建議抽樣確認。"
+                f"掃描 PDF（{source_total - native_count}/{source_total} 頁無文字層），"
+                f"品質評分 {quality:.2f}。準確率取決於掃描品質，建議抽樣確認。{extra}"
             )
 
         return NormalizeResult(
@@ -739,10 +745,245 @@ def measure_sharpness(gray: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def _enhance_scan(png: bytes) -> tuple[bytes, float, list[str]]:
+def flatten_illumination(img: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    補償光照不均，回傳 (處理後影像, 背景標準差)。
+
+    **只動亮度，不動顏色。** 早期版本把整張圖轉成灰階再轉回 BGR，
+    看起來乾淨，實際上把顏色扔了——而顏色是這個系統最值錢的訊號：
+    教用版的答案是用洋紅色印的（實測 #EC008C / #E4007F），
+    答對率標記、英文講義的表格底色也都靠顏色分辨。灰階化等於
+    在第一步就把教用版與學生版的差別抹平。
+
+    作法是轉到 LAB 只處理 L 通道：以形態學閉運算估計背景亮度，
+    扣掉後正規化。a、b 通道原封不動，色相因此完整保留。
+    """
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    L = lab[:, :, 0]
+    bg = cv2.morphologyEx(L, cv2.MORPH_CLOSE, np.ones((31, 31), np.uint8))
+    shadow = float(np.std(bg))
+    if shadow <= _SHADOW_STD:
+        return img, shadow
+    flat = cv2.normalize(255 - cv2.absdiff(L, bg), None, 0, 255, cv2.NORM_MINMAX)
+    lab[:, :, 0] = flat
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), shadow
+
+
+#: 背景亮度標準差超過這個值就視為光照不均。實測手機翻拍
+#: 落在 52–69，掃描器落在個位數。
+_SHADOW_STD = 22.0
+
+
+def _line_energy(gray: np.ndarray) -> float:
+    """
+    橫向文字行的總長度。頁面轉正時這個值最大——文字行只有在
+    水平時才會被橫向膨脹連成長條。
+    """
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    kw = max(15, gray.shape[1] // 40)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 3))
+    dilated = cv2.dilate(binary, kernel, iterations=1)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    min_w = gray.shape[1] * 0.06
+    total = 0.0
+    for c in contours:
+        _, _, w, h = cv2.boundingRect(c)
+        if w >= min_w and h > 4 and w / h >= 4:
+            total += w
+    return total
+
+
+def _flush_edge(gray: np.ndarray) -> tuple[float, float] | None:
+    """
+    量左右兩側邊緣的「齊整度」，回傳 (左, 右)。
+
+    排版的行首是對齊的、行尾是參差的，**與語言無關**。把頁面轉
+    180° 之後兩者互換，所以哪一邊比較齊就能判斷正反。用「落在
+    同一個直方格的行數比例」而不是變異數——多欄排版會讓變異數
+    失去意義，但每一欄的行首仍然各自對齊，直方圖抓得到。
+    """
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    kw = max(15, gray.shape[1] // 40)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 3))
+    dilated = cv2.dilate(binary, kernel, iterations=1)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    min_w = gray.shape[1] * 0.06
+    lefts, rights = [], []
+    for c in contours:
+        x, _, w, h = cv2.boundingRect(c)
+        if w >= min_w and h > 4 and w / h >= 4:
+            lefts.append(x)
+            rights.append(x + w)
+    if len(lefts) < 8:
+        return None
+
+    def flushness(v: list[int]) -> float:
+        hist, _ = np.histogram(v, bins=40, range=(0, gray.shape[1]))
+        return float(hist.max()) / len(v)
+
+    return flushness(lefts), flushness(rights)
+
+
+#: 橫向行能量至少要是直向的這個倍數，才敢說頁面是正的。
+#: 實測五張翻拍照片落在 5.7–23.4，轉了 90° 的那張是 0.16。
+_ORIENT_RATIO = 2.0
+#: 行首齊整度要領先行尾這個倍數，才敢翻 180°。
+#: 實測差距最小的一張（四欄選項）是 1.14，最大的是 2.0。
+_FLIP_MARGIN = 1.3
+
+
+def estimate_orientation(img: np.ndarray) -> tuple[int, str]:
+    """
+    判定頁面要**順時針**轉幾度才是正的，回傳 (0/90/180/270, 說明)。
+
+    分兩步，因為兩件事的可靠度差很多：
+
+      橫／直：比較橫向文字行能量。訊號極強（實測 5–23 倍），
+              可以放心自動轉。
+      正／反：比較行首與行尾的齊整度。訊號較弱，只有差距夠大
+              才自動轉；不夠大就不動，改在品質說明裡提醒人看一眼。
+
+    **先做光照補償再呼叫這支。** 手機翻拍的背景是桌面與手，全域
+    Otsu 在原圖上會把整片暗處當成文字——實測地理那兩張在原圖上
+    偵測到 0 條文字行，補償後是 33 與 69 條。
+    """
+    gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    horiz = _line_energy(gray)
+    vert = _line_energy(cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE))
+
+    sideways = False
+    if vert > horiz * _ORIENT_RATIO:
+        sideways = True
+        gray = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+    elif horiz <= vert * _ORIENT_RATIO:
+        # 兩邊差不多：多半是圖表為主、文字很少的頁面。不猜。
+        return 0, "頁面方向無法判定（文字行太少），維持原樣"
+
+    edges = _flush_edge(gray)
+    if edges is None:
+        return (90 if sideways else 0), (
+            "已轉正 90°（無法判定正反）" if sideways else ""
+        )
+
+    left, right = edges
+    flipped = right > left * _FLIP_MARGIN
+    unsure = not flipped and right > left
+
+    deg = (90 if sideways else 0) + (180 if flipped else 0)
+    deg %= 360
+
+    if deg == 0:
+        note = "頁面方向可能上下顛倒，請確認" if unsure else ""
+    else:
+        note = f"已將頁面旋轉 {deg}°"
+        if unsure:
+            note += "（正反不確定，請確認）"
+    return deg, note
+
+
+def _rotate(img: np.ndarray, deg: int) -> np.ndarray:
+    if deg == 90:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    if deg == 180:
+        return cv2.rotate(img, cv2.ROTATE_180)
+    if deg == 270:
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return img
+
+
+#: 裝訂線處的墨量最多只能是版面正常墨量的這個比例。
+#: 實測四張照片是 0.00–0.01，一張裝訂處有明顯陰影的是 0.23；
+#: 把一張單頁橫向拉寬當負例測得 0.51。0.30 夾在中間。
+#:
+#: 這個門檻抓不到的代價有限：漏切的話，那一頁會以「攤開的兩頁」
+#: 送進視覺模型，而 `segment_scanned` 本來就是設計成一次看兩頁的。
+#: 漏切會讓 bbox 與頁碼失真，但不會讓內容錯亂。相對地，**誤切**
+#: 會把每一行從中間切斷，那才是災難——所以門檻要往保守的一邊放。
+_GUTTER_DEPTH = 0.30
+#: 切開後每一半至少要有這個比例的墨，否則切到的是空白邊而不是裝訂線。
+_GUTTER_BALANCE = 0.25
+
+
+def find_book_gutter(gray: np.ndarray) -> float | None:
+    """
+    找攤開書本的裝訂線，回傳它在頁寬中的位置比例；找不到回 None。
+
+    翻拍一本攤開的書會**一次拍到兩頁**。系統若把它當成一頁，
+    版面切分會橫跨裝訂線把左頁第一行和右頁第一行接成一句——
+    那是無聲的錯誤，題目看起來很正常，只是內容錯了。
+
+    判斷依據是頁面中段墨量的**山谷**，而不是「完全沒有墨的直帶」。
+    絕對零墨的判準太脆：實測五張照片裡，一本厚書的兩頁幾乎相貼，
+    空白帶只有 28 px（門檻 30），另一張的裝訂處有書頁彎曲的陰影，
+    空白帶只剩 5 px——兩張都會被漏掉，但它們的山谷都很明顯。
+
+    只在**橫幅**影像上找：直幅的中間空白帶是雙欄排版的欄距，
+    切下去會把每一題攔腰折斷。再加一道左右墨量均衡的檢查，避免
+    把一張置中留白的橫幅講義誤切成兩頁。
+    """
+    h, w = gray.shape[:2]
+    if w < h * 1.1:  # 直幅：不是攤開的書
+        return None
+
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    ink = (binary > 0).sum(axis=0).astype(float) / h
+
+    # 以「一個字寬」的窗平滑：比單一像素穩，又不會把裝訂線抹平
+    win = max(3, w // 100) | 1
+    smooth = cv2.blur(ink.reshape(1, -1), (win, 1)).ravel()
+
+    lo, hi = int(w * 0.32), int(w * 0.68)
+    at = lo + int(np.argmin(smooth[lo:hi]))
+
+    # 版面的正常墨量取中位數，而不是最大值——最大值可能落在
+    # 一條表格框線上，那會讓門檻變得毫無鑑別力。
+    body = smooth[smooth > 0]
+    if body.size == 0:
+        return None
+    normal = float(np.median(body))
+    if normal <= 0 or smooth[at] > normal * _GUTTER_DEPTH:
+        return None
+
+    left, right = float(ink[:at].sum()), float(ink[at:].sum())
+    total = left + right
+    if total <= 0:
+        return None
+    if min(left, right) / total < _GUTTER_BALANCE:
+        return None
+
+    return at / w
+
+
+def split_spread(img: np.ndarray) -> list[np.ndarray] | None:
+    """把攤開書本的照片切成左右兩頁；不是攤開的書就回 None。"""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    at = find_book_gutter(gray)
+    if at is None:
+        return None
+    x = int(img.shape[1] * at)
+    return [img[:, :x], img[:, x:]]
+
+
+def _enhance_scan(png: bytes) -> tuple[list[bytes], float, list[str]]:
     """
     掃描頁與照片的前處理，並回報品質。
-    回傳 (處理後的 PNG, 品質 0–1, 說明)。
+    回傳 (處理後的 PNG 清單, 品質 0–1, 說明)。
+
+    **回傳清單而不是單張**：翻拍攤開的書會一次拍到兩頁，這裡會
+    把它切開。呼叫端必須把清單裡的每一張都當成獨立的一頁。
+
+    步驟順序是有原因的，不要隨意調換：
+
+      1. 先在**原圖**上量清晰度與對比度。第 3 步的光照補償會把
+         背景壓成一致的白，量出來的標準差必然變低——早期版本在
+         補償後才量對比度，於是每一張手機照片都被誤判成「淡墨或
+         影本多次複印」（實測原圖 54–66，補償後 27–36，門檻 35）。
+      2. 光照補償要在方向判定之前。翻拍照片的背景是桌面與手，
+         全域二值化在原圖上找不到文字行。
+      3. 方向、透視、歪斜、切頁依序做。切頁放最後，因為裝訂線
+         要在頁面轉正之後才找得準。
     """
     notes: list[str] = []
     quality = 1.0
@@ -750,11 +991,11 @@ def _enhance_scan(png: bytes) -> tuple[bytes, float, list[str]]:
     try:
         img = _to_cv(png)
     except ValueError:
-        return png, 0.3, ["影像無法解碼，已保留原檔"]
+        return [png], 0.3, ["影像無法解碼，已保留原檔"]
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # 清晰度
+    # ① 在原圖上量。補償之後量到的是補償的效果，不是紙的狀況。
     sharp = measure_sharpness(gray)
     if sharp < 40:
         quality -= 0.35
@@ -763,56 +1004,72 @@ def _enhance_scan(png: bytes) -> tuple[bytes, float, list[str]]:
         quality -= 0.12
         notes.append(f"影像清晰度普通（{sharp:.0f}）")
 
-    # 透視校正
-    quad = find_page_quad(gray)
-    if quad is not None:
-        img = warp_to_rect(img, quad)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        notes.append("已偵測頁面四角並做透視校正")
-
-    # 去歪斜。用 correct_skew 而非直接呼叫 estimate_skew + deskew，
-    # 避免正負號用錯——那種錯誤會把頁面轉得更歪，而且不會報錯。
-    img, skew_deg = correct_skew(img)
-    if abs(skew_deg) >= 0.15:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        notes.append(f"已校正傾斜 {skew_deg:+.1f}°")
-        if abs(skew_deg) > 8:
-            quality -= 0.1
-            notes.append("原始傾角偏大，邊緣文字可能受損")
-
-    # 光照不均：手機拍攝時常見的陰影。用形態學估計背景後扣除，
-    # 比全域二值化穩定得多。
-    bg = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, np.ones((31, 31), np.uint8))
-    diff = cv2.absdiff(gray, bg)
-    shadow = float(np.std(bg))
-    if shadow > 22:
-        gray = cv2.normalize(255 - diff, None, 0, 255, cv2.NORM_MINMAX)
-        quality -= 0.08
-        notes.append(f"偵測到光照不均（背景標準差 {shadow:.0f}），已補償")
-        img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-
-    # 對比度過低通常代表鉛筆字或褪色影本
     contrast = float(gray.std())
     if contrast < 35:
         quality -= 0.15
         notes.append(f"對比度偏低（{contrast:.0f}），可能是淡墨或影本多次複印")
 
-    return _to_png(img), max(0.0, min(1.0, quality)), notes
+    # ② 光照補償（保留顏色）
+    img, shadow = flatten_illumination(img)
+    if shadow > _SHADOW_STD:
+        quality -= 0.08
+        notes.append(f"偵測到光照不均（背景標準差 {shadow:.0f}），已補償")
+
+    # ③ 方向
+    deg, note = estimate_orientation(img)
+    if deg:
+        img = _rotate(img, deg)
+    if note:
+        notes.append(note)
+        if "請確認" in note:
+            quality -= 0.05
+
+    # ④ 透視校正
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    quad = find_page_quad(gray)
+    if quad is not None:
+        img = warp_to_rect(img, quad)
+        notes.append("已偵測頁面四角並做透視校正")
+
+    # ⑤ 去歪斜。用 correct_skew 而非直接呼叫 estimate_skew + deskew，
+    #    避免正負號用錯——那種錯誤會把頁面轉得更歪，而且不會報錯。
+    img, skew_deg = correct_skew(img)
+    if abs(skew_deg) >= 0.15:
+        notes.append(f"已校正傾斜 {skew_deg:+.1f}°")
+        if abs(skew_deg) > 8:
+            quality -= 0.1
+            notes.append("原始傾角偏大，邊緣文字可能受損")
+
+    # ⑥ 攤開的書切成兩頁
+    parts = split_spread(img)
+    if parts:
+        notes.append("偵測到攤開的書本，已從裝訂線切成兩頁")
+        return [_to_png(p) for p in parts], max(0.0, min(1.0, quality)), notes
+
+    return [_to_png(img)], max(0.0, min(1.0, quality)), notes
 
 
 def normalize_image(data: bytes) -> NormalizeResult:
-    png, quality, notes = _enhance_scan(data)
-    img = _to_cv(png)
-    h, w = img.shape[:2]
+    pngs, quality, notes = _enhance_scan(data)
 
+    pages: list[PageOut] = []
+    for i, png in enumerate(pngs):
+        img = _to_cv(png)
+        h, w = img.shape[:2]
+        pages.append(
+            PageOut(index=i, width=w, height=h, png=png,
+                    quality=quality, quality_notes=notes)
+        )
+
+    count = f"單張影像切出 {len(pages)} 頁" if len(pages) > 1 else "單張影像"
     note = (
-        f"單張影像，品質評分 {quality:.2f}。"
+        f"{count}，品質評分 {quality:.2f}。"
         + ("；".join(notes) if notes else "")
         + "　照片來源的辨識準確率低於掃描件，**建議逐題確認**。"
     )
     return NormalizeResult(
         kind="image",
-        pages=[PageOut(index=0, width=w, height=h, png=png, quality=quality, quality_notes=notes)],
+        pages=pages,
         quality=quality,
         quality_note=note,
         has_text_layer=False,

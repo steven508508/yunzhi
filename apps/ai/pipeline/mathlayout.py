@@ -615,10 +615,15 @@ def wrap_math(text: str) -> str:
 
     也刻意不吸中文：`'過'.isalnum()` 在 Python 裡是 True，
     照 isalnum 判斷會把「過點」吸進數學區間，變成 `$_{2}過點$`。
+
+    非數學區間裡的 `$` 一律跳脫。原文裡真的會出現這個字元——
+    未還原的符號字型會把 ①②③④ 吐成 `!@#$`，英文講義也會出現
+    「$100」——而多出來的那一個 `$` 會讓後面所有的分隔符配對錯位，
+    整段從此被當成數學式，KaTeX 排出一團亂碼卻沒有任何錯誤訊息。
     """
     spans = _structure_spans(text)
     if not spans:
-        return text
+        return _escape_dollar(text)
 
     # 往左右吸收算式字元
     grown = []
@@ -640,12 +645,17 @@ def wrap_math(text: str) -> str:
     out = []
     cursor = 0
     for a, b in merged:
-        out.append(text[cursor:a])
+        out.append(_escape_dollar(text[cursor:a]))
         inner = _math(text[a:b])
         out.append(f"${inner}$" if inner else "")
         cursor = b
-    out.append(text[cursor:])
+    out.append(_escape_dollar(text[cursor:]))
     return "".join(out)
+
+
+def _escape_dollar(text: str) -> str:
+    """跳脫非數學區間裡的 `$`，避免它被當成數學分隔符。"""
+    return text.replace("\\$", "$").replace("$", "\\$")
 
 
 def _structure_spans(text: str) -> list[tuple[int, int]]:

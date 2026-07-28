@@ -185,10 +185,20 @@ def test_math_is_reconstructed_in_real_content():
     )
     assert r"\frac" in body, "一份數學講義不可能沒有分數"
     assert "^{" in body or "_{" in body, "應該有上下標"
-    # 全形運算符號在數學區間內要換成半形，否則 KaTeX 排不出來
+
     import re
 
-    for m in re.finditer(r"\$([^$]+)\$", body):
+    # 分隔符必須成對。未還原的符號字型會把 ①②③④ 吐成 `!@#$`，
+    # 那個裸奔的 $ 會讓後面所有配對錯位。
+    for e in segd["exercises"]:
+        for field in ("stem", "explanation"):
+            v = e.get(field) or ""
+            assert len(re.findall(r"(?<!\\)\$", v)) % 2 == 0, (
+                f"{e['label']} 的 {field} 有落單的 $：{v[:80]}"
+            )
+
+    # 全形運算符號在數學區間內要換成半形，否則 KaTeX 排不出來
+    for m in re.finditer(r"(?<!\\)\$(.+?)(?<!\\)\$", body):
         assert "＝" not in m.group(1), f"數學區間裡還有全形等號：{m.group(1)[:40]}"
 
 
