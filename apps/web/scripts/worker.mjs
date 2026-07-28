@@ -10,7 +10,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { PrismaClient } from '@prisma/client';
-import { Worker } from 'bullmq';
+import { UnrecoverableError, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { runImport, stageLabel } from './import-pipeline.mjs';
 
@@ -132,12 +132,32 @@ const importWorker = new Worker(
     const { jobId, fromStage } = job.data;
     console.log(`[import] 開始處理 ${jobId}${fromStage ? `（自 ${fromStage} 起）` : ''}`);
 
-    const result = await runImport(prisma, jobId, {
-      fromStage,
-      onProgress: async ({ stage, index, total }) => {
-        await job.updateProgress({ stage, label: stageLabel(stage), index, total });
-      },
-    });
+    let result;
+    try {
+      result = await runImport(prisma, jobId, {
+        fromStage,
+        onProgress: async ({ stage, index, total }) => {
+          await job.updateProgress({ stage, label: stageLabel(stage), index, total });
+        },
+      });
+    } catch (e) {
+      // **不可重試的錯誤要在這裡就轉成 UnrecoverableError。**
+      //
+      // 原本是在 'failed' 事件裡呼叫 job.discard()，但 BullMQ 是
+      // 先 moveToFailed（那時候就已經決定要不要重試了）再發事件，
+      // discard 旗標根本來不及被讀到；而且 discard() 在 5.x 已標成
+      // deprecated，官方的作法就是 UnrecoverableError。
+      //
+      // 差別是真的錢：模型名稱打錯 → 502 → PermanentError →
+      // 照樣重跑最貴的自答階段三次。
+      if (e?.permanent) {
+        const wrapped = new UnrecoverableError(e.message);
+        wrapped.stage = e.stage;
+        wrapped.permanent = true;
+        throw wrapped;
+      }
+      throw e;
+    }
 
     console.log(
       `[import] ${jobId} 完成` +
@@ -155,19 +175,11 @@ const importWorker = new Worker(
   },
 );
 
-importWorker.on('failed', async (job, err) => {
+importWorker.on('failed', (job, err) => {
   const jobId = job?.data?.jobId;
   console.error(`[import] ${jobId ?? '?'} 失敗：${err.message}`);
-
-  // 不可重試的錯誤要立刻停掉，不要走完三次退避。
-  // 每一次重試都是真的錢。
-  if (err.permanent && job) {
-    try {
-      await job.discard();
-      console.error(`[import] ${jobId} 為不可重試的錯誤，已停止重試`);
-    } catch (e) {
-      console.error(`[import] 停止重試失敗：${e.message}`);
-    }
+  if (err?.permanent) {
+    console.error(`[import] ${jobId} 為不可重試的錯誤，不會再重跑`);
   }
 });
 

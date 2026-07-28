@@ -1,8 +1,19 @@
 # 雲端智學 — Caddy 設定
 #
-# 三種 TLS 模式由 TLS_MODE 環境變數選擇，見 .env 第 2 節。
-# Caddy 的設定檔不支援條件式，所以三種模式各寫一個 site block，
-# 由 snippet 匯入共通設定，未使用的 block 因主機名不匹配而不生效。
+# TLS 由 TLS_MODE 決定，見 .env 第 2 節。
+#
+# **Caddy 的設定檔不支援條件式**，所以 TLS_MODE 不能寫成 if。
+# 早期版本把三種模式各寫成一個 site block，指望「未使用的 block
+# 因主機名不匹配而不生效」——那是錯的：`{$APP_DOMAIN} { … }` 會
+# **無條件**觸發公開 ACME 簽發。TLS_MODE=internal 加一個內網主機名
+# 的結果是 Caddy 反覆向 Let's Encrypt 申請失敗（DNS 不通、80 埠
+# 不可達），該主機名的 HTTPS 握手一直失敗，而 `:443 { tls internal }`
+# 因為主機名比對優先級較低而輪不到。開學第一天學生連不進來。
+#
+# 改法：把整個 tls 指示詞交給 TLS_MODE 展開。Caddy 的環境變數
+# 替換發生在解析之前，所以 `tls {$TLS_DIRECTIVE}` 可以展開成
+# `tls internal`、空字串（＝自動 ACME）、或憑證路徑。
+# 展開的內容由 deploy/scripts/render-caddy.sh 依 TLS_MODE 產生。
 
 {
 	admin :2019
@@ -68,31 +79,44 @@
 	}
 }
 
-# ── 模式一：公開網域，Let's Encrypt 自動簽發 ────────────────
-{$APP_DOMAIN} {
-	import common
-}
-
-# ── 模式二：內網部署 ─────────────────────────────────────────
-# TLS_MODE=internal 時，把 APP_DOMAIN 設為內網名稱或 IP。
-# Caddy 會用自己的本地 CA 簽發憑證；根憑證用
-# deploy/scripts/export-ca.sh 匯出後由 MIS 派送到學生電腦，
-# 否則瀏覽器會出現憑證警告。
+# ── 維護模式 ────────────────────────────────────────────────
 #
-# 注意：這裡安裝的是「讓瀏覽器信任本站」的根憑證，
-# 它不會、也不能用來解密任何其他網站的流量 —— 與規格書
+# 升級時 upgrade.sh 會 touch 這個檔。沒有這一段的話，升級的
+# 六到八分鐘裡學生看到的是 Caddy 原始的 502，而不是「你先前的
+# 作答已經儲存」——那會引來一堆電話。
+(maintenance) {
+	@maint file /srv/maintenance/.maintenance
+	handle @maint {
+		root * /srv/maintenance
+		rewrite * /index.html
+		file_server
+		header Retry-After "600"
+	}
+}
+
+# ── 站台 ─────────────────────────────────────────────────────
+#
+# TLS_DIRECTIVE 由 render-caddy.sh 依 TLS_MODE 產生：
+#   public   → 空字串（Caddy 自動向 Let's Encrypt 申請）
+#   internal → internal（Caddy 自己的本地 CA）
+#   custom   → /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
+#
+# internal 模式的根憑證用 deploy/scripts/export-ca.sh 匯出後由 MIS
+# 派送到學生電腦，否則瀏覽器會出現憑證警告。那是「讓瀏覽器信任
+# 本站」的憑證，不會也不能用來解密其他網站的流量——與規格書
 # 文件 08 明確否決的「TLS 攔截」是完全不同的東西。
-:443 {
-	tls internal
+{$APP_DOMAIN} {
+	tls {$TLS_DIRECTIVE}
+	import maintenance
 	import common
 }
 
-# ── 模式三：自備憑證 ─────────────────────────────────────────
-# 憑證放在 deploy/caddy/certs/，並把上面兩個 block 註解掉。
-# https://{$APP_DOMAIN} {
-# 	tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
-# 	import common
-# }
+# 用 IP 直連時也要有得走（internal 模式常見）。
+:443 {
+	tls {$TLS_DIRECTIVE}
+	import maintenance
+	import common
+}
 
 # HTTP 一律轉 HTTPS
 :80 {

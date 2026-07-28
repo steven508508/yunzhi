@@ -133,13 +133,13 @@ cat > "${MAINT_DIR}/index.html" <<HTML
   <p style="color:#8b949e;font-size:13px">開始時間 $(date '+%H:%M')</p>
 </div></body></html>
 HTML
-touch "${YZ_ROOT}/.maintenance"
+touch "${MAINT_DIR}/.maintenance"
 ok "維護頁已啟用"
 
 # 任何時候失敗都要嘗試自動回滾，否則會停在維護模式回不去。
 _upgrade_failed() {
   err "升級失敗。"
-  rm -f "${YZ_ROOT}/.maintenance"
+  rm -f "${MAINT_DIR}/.maintenance"
   if (( NO_AUTO_ROLLBACK )); then
     warn "已指定 --no-auto-rollback，保持現狀供你手動診斷。"
     warn "要回滾：./deploy/scripts/rollback.sh"
@@ -189,10 +189,10 @@ if [[ "${deployed}" != "${NEW_VERSION}" && "${NEW_VERSION}" != "unknown" ]]; the
 fi
 
 trap - ERR
-rm -f "${YZ_ROOT}/.maintenance"
+rm -f "${MAINT_DIR}/.maintenance"
 
 # 升級成功才恢復對外流量
-compose up -d caddy >/dev/null
+if [[ "${PROXY_MODE:-caddy}" == "caddy" ]]; then compose up -d caddy; fi >/dev/null
 ok "維護模式已解除"
 
 if "${YZ_SCRIPTS_DIR}/doctor.sh" >/dev/null 2>&1; then

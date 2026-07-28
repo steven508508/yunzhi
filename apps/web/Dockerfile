@@ -22,7 +22,8 @@ ENV APP_VERSION=${APP_VERSION} NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npx prisma generate --schema packages/db/schema.prisma \
- && npm run build --workspace=apps/web
+ && npm run build --workspace=apps/web \
+ && mkdir -p apps/web/public
 
 # ── 執行 ───────────────────────────────────────────────────────
 FROM node:22-alpine AS runner
@@ -42,7 +43,12 @@ RUN addgroup -g 10001 -S yunzhi && adduser -u 10001 -S yunzhi -G yunzhi
 
 COPY --from=builder --chown=yunzhi:yunzhi /app/apps/web/.next/standalone ./
 COPY --from=builder --chown=yunzhi:yunzhi /app/apps/web/.next/static ./apps/web/.next/static
-COPY --from=builder --chown=yunzhi:yunzhi /app/apps/web/public ./apps/web/public 2>/dev/null || true
+# public/ 目前不存在，但 Next.js 的慣例是有這個目錄。
+# **不可以寫成 `COPY … 2>/dev/null || true`**：Dockerfile 的 COPY
+# 不是 shell，那三個字會被當成第 2、3 個來源與目的地，而多來源時
+# 目的地必須以 / 結尾——整個映像建不起來，全新安裝在第三步就死。
+# builder 階段先確保它存在，這裡就無條件複製。
+COPY --from=builder --chown=yunzhi:yunzhi /app/apps/web/public ./apps/web/public
 
 # migration 與 worker 需要 Prisma CLI 與 schema
 COPY --from=builder --chown=yunzhi:yunzhi /app/node_modules/.prisma ./node_modules/.prisma

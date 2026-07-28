@@ -795,11 +795,47 @@ async function retrieveKpCandidates(prisma, subjectId, stem) {
  * @param opts.fromStage  從哪一階段開始（省略則依 lastCompletedStage 續跑）
  * @param opts.onProgress 進度回呼，用於 BullMQ 的 updateProgress
  */
+/**
+ * 本月已用的 token 數。
+ *
+ * AI_MONTHLY_TOKEN_BUDGET 原本在整個 repo 沒有任何一行程式讀取——
+ * 也就是說老師設了一個上限，帳單來的時候才發現它從來沒有生效過。
+ * 那比沒有這個設定更糟：它給了一個假的安全感。
+ *
+ * 上限只擋**匯入**這條路。考試、客觀題評分、已生成的解析全部
+ * 照常運作（規格書文件 01 §16 的降級原則）——預算用完不該讓
+ * 考試停擺。
+ */
+async function monthlyTokensUsed(prisma, tenantId) {
+  const since = new Date();
+  since.setUTCDate(1);
+  since.setUTCHours(0, 0, 0, 0);
+  const rows = await prisma.aiUsageLog.findMany({
+    where: { tenantId, createdAt: { gte: since } },
+    select: { inputTokens: true, outputTokens: true },
+  });
+  return rows.reduce((n, r) => n + (r.inputTokens ?? 0) + (r.outputTokens ?? 0), 0);
+}
+
 export async function runImport(prisma, jobId, opts = {}) {
   const job = await prisma.importJob.findUnique({ where: { id: jobId } });
   if (!job) throw new PermanentError(`找不到匯入工作 ${jobId}`, null);
   if (job.status === 'COMMITTED') {
     return { skipped: '這個工作已經入庫，不再重跑' };
+  }
+
+  const budget = Number(process.env.AI_MONTHLY_TOKEN_BUDGET ?? 0);
+  if (budget > 0) {
+    const used = await monthlyTokensUsed(prisma, job.tenantId);
+    if (used >= budget) {
+      // 不重試——重試也還是超支。訊息要讓老師知道下一步做什麼。
+      throw new PermanentError(
+        `本月 AI 用量已達上限（${used.toLocaleString()} / ${budget.toLocaleString()} token）。` +
+          `題本匯入暫停，但考試、客觀題評分、既有解析都不受影響。` +
+          `要調整請改 .env 的 AI_MONTHLY_TOKEN_BUDGET 後重啟。`,
+        null,
+      );
+    }
   }
 
   // 從哪裡開始。明確指定優先；否則接續上次完成的階段。

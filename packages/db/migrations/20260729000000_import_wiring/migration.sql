@@ -14,20 +14,28 @@
 -- 錯誤就會出現在上傳當下，代價是零。
 -- ═══════════════════════════════════════════════════════════════
 
+-- NOT VALID：只約束「從現在起」的寫入，不重新檢查既有資料。
+-- 直接 ADD CONSTRAINT 的話，已有資料的資料庫升級時整份遷移會中止，
+-- 而 prisma migrate deploy 會把它標成 failed 卡住整個升級。
+-- 之後立刻 VALIDATE：空庫瞬間完成，有資料的庫也只要 SHARE UPDATE
+-- EXCLUSIVE 鎖（不擋讀寫），而不是全表 ACCESS EXCLUSIVE。
 ALTER TABLE "import_jobs" ADD CONSTRAINT "import_jobs_license_matches_source" CHECK (
   ("sourceType" = 'PUBLISHER_SCAN' AND "licenseScope" IN ('TENANT_NO_EXPORT','INTERNAL_USE_ONLY'))
   OR ("sourceType" <> 'PUBLISHER_SCAN' AND ("licenseScope" <> 'PUBLIC' OR "sourceType" = 'OFFICIAL_PAST'))
-);
+) NOT VALID;
+ALTER TABLE "import_jobs" VALIDATE CONSTRAINT "import_jobs_license_matches_source";
 
 -- 權利聲明是責任歸屬，不能是空的。
 -- 應用層已經擋了，這裡是繞過應用層的最後一道。
 ALTER TABLE "import_jobs" ADD CONSTRAINT "import_jobs_rights_declared" CHECK (
   "rightsDeclaredBy" IS NOT NULL AND "rightsBasis" IS NOT NULL
-);
+) NOT VALID;
+ALTER TABLE "import_jobs" VALIDATE CONSTRAINT "import_jobs_rights_declared";
 
 ALTER TABLE "import_jobs" ADD CONSTRAINT "import_jobs_rights_basis_valid" CHECK (
   "rightsBasis" IN ('OWNED','LICENSED','OFFICIAL_PUBLIC','UNVERIFIED')
-);
+) NOT VALID;
+ALTER TABLE "import_jobs" VALIDATE CONSTRAINT "import_jobs_rights_basis_valid";
 
 -- ═══════════════════════════════════════════════════════════════
 -- 2. 檔案指紋

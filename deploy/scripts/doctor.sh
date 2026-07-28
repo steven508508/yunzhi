@@ -192,7 +192,17 @@ else
   fail web.ready "主應用未就緒" "docker compose logs --tail 50 web；或 journalctl -u yunzhi-web -n 50"
 fi
 
-ai_ready="$(curl -fsS --max-time 8 http://127.0.0.1:8000/readyz 2>/dev/null)"
+# Docker 模式的 AI 服務沒有發布任何埠（它只在 internal 網路上），
+# 所以不能從宿主機打。直接打的話**每次跑 doctor 都會固定出現一則
+# 警告**，而那會訓練維護老師忽略 doctor 的輸出——doctor 正是出事
+# 時唯一的觀測手段。
+if command -v docker >/dev/null 2>&1 && docker compose ps ai >/dev/null 2>&1; then
+  ai_ready="$(docker compose exec -T ai python -c \
+    "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/readyz',timeout=8).read().decode())" \
+    2>/dev/null)"
+else
+  ai_ready="$(curl -fsS --max-time 8 http://127.0.0.1:8000/readyz 2>/dev/null)"
+fi
 if [[ -n "${ai_ready}" ]] && grep -q '"ready":true' <<<"${ai_ready}"; then
   pass ai.ready "AI 服務就緒"
 else

@@ -19,15 +19,20 @@ ALTER TABLE "import_candidates"
 
 -- 比率的定義域。答對率是 0–1，不是百分數——若有人寫成 43 而不是
 -- 0.43，能力分析會算出「比全國高 4200%」這種數字而不報錯。
+-- NOT VALID 再 VALIDATE：直接 ADD CONSTRAINT 會在有資料的資料庫上
+-- 拿全表 ACCESS EXCLUSIVE 鎖，題庫幾萬題時等於停機幾秒；而且只要
+-- 有一列不符合，整份遷移中止並卡住升級。
 ALTER TABLE "questions"
   ADD CONSTRAINT "questions_national_rate_range"
   CHECK ("nationalCorrectRate" IS NULL
-         OR ("nationalCorrectRate" >= 0 AND "nationalCorrectRate" <= 1));
+         OR ("nationalCorrectRate" >= 0 AND "nationalCorrectRate" <= 1)) NOT VALID;
+ALTER TABLE "questions" VALIDATE CONSTRAINT "questions_national_rate_range";
 
 ALTER TABLE "import_candidates"
   ADD CONSTRAINT "import_candidates_national_rate_range"
   CHECK ("nationalCorrectRate" IS NULL
-         OR ("nationalCorrectRate" >= 0 AND "nationalCorrectRate" <= 1));
+         OR ("nationalCorrectRate" >= 0 AND "nationalCorrectRate" <= 1)) NOT VALID;
+ALTER TABLE "import_candidates" VALIDATE CONSTRAINT "import_candidates_national_rate_range";
 
 -- 依年份挑題是老師實際會做的事（「來一份 112 到 115 的考古題」）。
 CREATE INDEX "questions_source_exam_idx" ON "questions" ("tenantId", "sourceExam");

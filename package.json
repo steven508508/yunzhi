@@ -25,7 +25,9 @@
     "typecheck": "npm run db:generate && tsc --noEmit --project apps/web/tsconfig.json",
     "prebuild": "npm run db:generate",
     "test:e2e": "./tools/e2e-import.sh",
-    "test:ai": "cd apps/ai && for t in tests/test_*.py; do python3 $t || exit 1; done"
+    "test:ai": "cd apps/ai && for t in tests/test_*.py; do python3 $t || exit 1; done",
+    "check:deploy": "node tools/deploy-check.mjs",
+    "check": "npm run typecheck && node tools/prisma-check.mjs && node tools/schema-drift.mjs && npm run check:deploy"
   },
   "devDependencies": {
     "@prisma/prisma-schema-wasm": "5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2",

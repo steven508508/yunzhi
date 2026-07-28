@@ -20,7 +20,8 @@ ALTER TABLE "explanations"
   ADD CONSTRAINT "explanations_verbatim_not_public" CHECK (
     "licenseScope" <> 'PUBLIC'
     OR "origin" IN ('AI_REWRITTEN','AI_GENERATED','TEACHER_WRITTEN','OFFICIAL_CEEC')
-  );
+  ) NOT VALID;
+ALTER TABLE "explanations" VALIDATE CONSTRAINT "explanations_verbatim_not_public";
 
 -- ═══════════════════════════════════════════════════════════════
 -- 二、可重跑的權利聲明約束

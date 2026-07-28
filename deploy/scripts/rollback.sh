@@ -68,7 +68,9 @@ info "先備份目前狀態（讓回滾也能被回滾）…"
   || warn "保險備份失敗，仍繼續回滾。"
 
 # ── 維護模式 ────────────────────────────────────────────────────
-touch "${YZ_ROOT}/.maintenance"
+MAINT_DIR="${YZ_ROOT}/deploy/caddy/maintenance"
+mkdir -p "${MAINT_DIR}"
+touch "${MAINT_DIR}/.maintenance"
 app_stop
 
 # ── 還原資料庫 ──────────────────────────────────────────────────
@@ -105,11 +107,11 @@ fi
 
 if [[ "$(detect_mode)" == "docker" ]]; then
   compose up -d --force-recreate web worker ai
-  rm -f "${YZ_ROOT}/.maintenance"
-  compose up -d caddy >/dev/null
+  rm -f "${MAINT_DIR}/.maintenance"
+  if [[ "${PROXY_MODE:-caddy}" == "caddy" ]]; then compose up -d caddy; fi >/dev/null
 else
   app_start
-  rm -f "${YZ_ROOT}/.maintenance"
+  rm -f "${MAINT_DIR}/.maintenance"
 fi
 
 # ── 驗證 ────────────────────────────────────────────────────────
