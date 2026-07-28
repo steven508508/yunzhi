@@ -347,6 +347,11 @@ class ExerciseOut(BaseModel):
     inline_answers: list[str] = Field(default_factory=list)
     #: 這一題的附圖。沒有圖的幾何題是不能用的題目。
     assets: list[dict] = Field(default_factory=list)
+    #: 題目旁邊印的出處：「112學測」。社會與英文的講義幾乎每題都有。
+    source_exam: str | None = None
+    #: 大考中心的**全國**答對率（0–1）。這是校準過的實測難度，
+    #: 與我們自己學生的 correctRate 是兩回事，不可混用。
+    national_correct_rate: float | None = None
 
 
 class SegmentResponse(BaseModel):
@@ -575,7 +580,11 @@ def build_router(get_provider) -> APIRouter:
         if genre == "worksheet":
             figures_by_page = {p.index: p.figures for p in req.pages if p.figures}
             for u in seg.split_by_exercise(merged):
-                stem = u.stem_text()
+                # 出處標籤要在這裡就從題幹拿掉：留著會讓重複題偵測
+                # 把「同一題不同年份標籤」看成兩題，也會讓學生作答時
+                # 先看到「答對率 27%」而心生預設。
+                prov = u.provenance()
+                stem = u.clean_stem_text()
                 exercises.append(
                     ExerciseOut(
                         label=u.label,
@@ -584,6 +593,8 @@ def build_router(get_provider) -> APIRouter:
                         stem=stem,
                         explanation=u.explanation_text(),
                         answer=u.answer,
+                        source_exam=prov.exam,
+                        national_correct_rate=prov.correct_rate,
                         # 優先用顏色（零猜測）；沒有顏色資訊時才退回
                         # 文字啟發式，而那條路只在確定是教用版時走。
                         inline_answers=(

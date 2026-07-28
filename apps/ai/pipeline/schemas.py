@@ -152,6 +152,14 @@ class StructuredQuestion(BaseModel):
     has_figure: bool = False
     figure_alt: str | None = None
     source_bbox: BBox | None = None
+    #: 題目旁邊印的出處標籤：「112學測」。只在原稿真的印了才填。
+    source_exam: str | None = None
+    #: 原稿印的**全國**答對率（0–1）。社會與英文的講義幾乎每題都印。
+    #: 這是大考中心的實測難度，比任何模型估的都準——一道題入庫當天
+    #: 就有校準過的難度，不必等我們自己的學生作答幾百次。
+    #: **只在原稿印了才填，絕對不可推估。** 一個編出來的答對率會被
+    #: 當成實測值寫進題庫，之後再也分不出真假。
+    national_correct_rate: float | None = Field(default=None, ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
     confidence_reasons: list[ConfidenceReason] = Field(default_factory=list)
 

@@ -95,10 +95,18 @@ for (const f of files) {
 
   // 後續遷移的 ADD COLUMN / DROP COLUMN / RENAME 也要跟上，
   // 否則「第二份遷移加的欄位」會被誤判為偏移。
-  for (const m of sql.matchAll(
-    /ALTER TABLE\s+"([^"]+)"\s+ADD COLUMN(?:\s+IF NOT EXISTS)?\s+"([^"]+)"/gi,
-  )) {
-    sqlTables.get(m[1])?.add(m[2]);
+  //
+  // 一句 ALTER TABLE 可以逗號分隔加好幾欄，而 Postgres 完全接受。
+  // 只認第一欄的話，其餘幾欄會被報成「遷移沒建」——那是**假警報**，
+  // 而假警報比沒有檢查更糟：它會讓人養成忽略這支工具的習慣。
+  for (const m of sql.matchAll(/ALTER TABLE\s+"([^"]+)"\s+([\s\S]*?);/gi)) {
+    const cols = sqlTables.get(m[1]);
+    if (!cols) continue;
+    for (const c of m[2].matchAll(
+      /ADD COLUMN(?:\s+IF NOT EXISTS)?\s+"([^"]+)"/gi,
+    )) {
+      cols.add(c[1]);
+    }
   }
   for (const m of sql.matchAll(/ALTER TABLE\s+"([^"]+)"\s+DROP COLUMN(?:\s+IF EXISTS)?\s+"([^"]+)"/gi)) {
     sqlTables.get(m[1])?.delete(m[2]);

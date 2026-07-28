@@ -52,6 +52,8 @@ type CandidateRow = {
   assets: unknown;
   kpSuggestions: unknown;
   sourcePage: number | null;
+  sourceExam: string | null;
+  nationalCorrectRate: number | null;
   questionId: string | null;
 };
 
@@ -129,7 +131,21 @@ export async function commitJob(
             sourceType: job.sourceType,
             licenseScope: job.licenseScope,
             sourceRef: sourceRef(job.title, c),
+            sourceExam: c.sourceExam,
             sourceImportJobId: jobId,
+            // 原稿印的全國答對率，以及由它推得的難度先驗。
+            // difficulty 的慣例是「1 = 最難」，而答對率越高代表越簡單，
+            // 所以是 1 - rate。沒印答對率的題目維持 null，讓標註階段的
+            // 模型估計去填——**估計值不會寫進 nationalCorrectRate**，
+            // 那一欄只放原稿真的印出來的數字。
+            nationalCorrectRate: c.nationalCorrectRate,
+            nationalSampleNote: c.sourceExam
+              ? `原稿標示：${c.sourceExam}`
+              : null,
+            difficulty:
+              c.nationalCorrectRate == null
+                ? undefined
+                : 1 - c.nationalCorrectRate,
             // 一律 DRAFT。校對確認的是「抽取正確」，不是
             // 「可以拿去考學生」——後者要科目老師另外發布。
             status: 'DRAFT',

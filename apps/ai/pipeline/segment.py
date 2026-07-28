@@ -73,22 +73,75 @@ _SECTION_NOTE = re.compile(
 )
 
 #: 「第 37 題至第 39 題為題組」「37-39 為題組」
+#: 「請問 9～10 題」「請回答第 11 至 12 題」——講義的說法不一樣，
+#: 它把題組指示語寫在共用敘述的**結尾**而不是獨立一行。
 _GROUP_LEAD = re.compile(
-    rf"第?\s*[{_D}]+\s*(?:題)?\s*(?:至|[-－—~～])\s*第?\s*[{_D}]+\s*題?\s*為題組"
+    rf"(?:第?\s*[{_D}]+\s*(?:題)?\s*(?:至|[-－—~～])\s*第?\s*[{_D}]+\s*題?\s*為題組"
+    rf"|請\s*(?:問|回?答|依據.{{0,12}}回答)\s*第?\s*[{_D}]+\s*(?:題)?\s*"
+    rf"[至~～\-－—]\s*第?\s*[{_D}]+\s*題)"
 )
 
-#: 題號。「1.」「12、」「１．」「(3)」都算。
+#: 講義的單元標題：「考古題大搜查」「夯時事練非選」「好好練題」
+#: 「綜合演練」「文法選擇」。
+#:
+#: 學測試卷的節標題是「一、單選題（占 30 分）」那種格式化的東西，
+#: 講義則是編輯取的名字，形狀完全不同。認不出來的話，它會依
+#: 「跟著前一塊」的規則被歸成選項或題幹，然後混進上一題的內容裡。
+_WORKSHEET_SECTION = re.compile(
+    r"^\s*[0-9０-９]?\s*(?:"
+    r"考古題[大搜查練]*|夯時事[練習]*[^\s]{0,4}|好好[練做]題|綜合演練|實力養成"
+    r"|牛刀小試|即時練習|學測.{0,4}演練|歷屆試題|試題演練|能力檢測"
+    r"|文法選擇|字彙測驗|閱讀測驗|克漏字[測驗]*|翻譯練習"
+    r")\s*(?:[：:].*)?$"
+)
+
+#: 非選題的作答格：「作答區」「作答欄」「答案欄」。
+#: 那是給學生寫字的空白，不是題目內容——當成表格抽取的話，
+#: 題庫裡會多出一堆內容為空的欄位。
+_ANSWER_AREA = re.compile(r"^\s*(?:作答[區欄格]|答案[區欄格]|請於下方作答)\s*$")
+
+#: 作答括號。英文與社會的講義把它印在題號**前面**：
+#:
+#:     (  ) 6. It was on Sep. 21, 1999 ______ a big earthquake hit Taiwan.
+#:     ( C ) 7. To win the game, all the players have to cooperate with ______.
+#:
+#: 學生版是空的，教用版裡面就是**印出來的答案**。
+#:
+#: 沒有這一條的話，英文講義的每一題都會被判成題幹（實測那一頁
+#: 20 題全部漏掉），整頁變成一團沒有結構的文字。數學講義從來
+#: 不用這個體例，所以先前完全沒有暴露出來——這是五科都要做的
+#: 系統只拿一科的教材驗證會遇到的典型問題。
+_ANSWER_PAREN = re.compile(
+    rf"^\s*{_LP}\s*([A-EＡ-Ｅ①-⑩{_D}]{{0,3}})\s*{_RP}\s*(?=[{_D}]{{1,3}}\s*[.、．·])"
+)
+
+#: 題號。「1.」「12、」「１．」「(3)」都算，前面可以有作答括號。
 #:
 #: **分隔標點是必要的，不是可選的。** 少了這個限制，數學講義裡
 #: 每個以數字開頭的算式片段（分數的分母「2 ，如圖」、「1 ＝－4」）
 #: 都會被當成題號——實測一份 29 頁的講義會抽出 419 個假題號，
 #: 而真正的題目只有 24 個。
 _QUESTION_NO = re.compile(
-    rf"^\s*(?:"
+    rf"^\s*(?:{_LP}\s*[A-EＡ-Ｅ①-⑩{_D}]{{0,3}}\s*{_RP}\s*)?"  # 作答括號（可省略）
+    rf"(?:"
     rf"{_LP}\s*[{_D}]{{1,3}}\s*{_RP}"          # (3) （12）
     rf"|[{_D}]{{1,3}}\s*[.、．·]"                 # 1. 12、
     rf")\s*(?=\S)"
 )
+
+
+def answer_in_paren(text: str) -> str | None:
+    """
+    取出教用版印在作答括號裡的答案：`( C ) 7. …` → `C`。
+
+    這是**零成本**拿到答案的路徑，比 AI 自答便宜也可靠得多。
+    空括號（學生版）回 None——不猜。
+    """
+    m = _ANSWER_PAREN.match(text)
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    return inner or None
 
 #: 選項。學測數學是 5 個 (1)–(5)，英文是 4 個 (A)–(D)，
 #: 舊卷與部分講義用 ①②③④⑤。三種都要認得。
@@ -156,6 +209,95 @@ _CONCEPT_ITEM = re.compile(rf"^\s*[{_D}]{{1,2}}\s*[.、．]\s*\S{{1,20}}\s*[：:
 _CROSSREF = re.compile(r"^\s*[◎★☆●※]\s*搭配")
 
 
+# ─────────────────────────────────────────────────────────────────
+# 出處與全國答對率
+#
+# 社會科與英文的講義在每一道考古題旁邊印兩個小標籤：出處（「112學測」）
+# 與**全國答對率**（「答對率 43%」）。它們看起來只是版面裝飾，實際上
+# 是這整個系統拿得到的**最有價值的一筆資料**：
+#
+#   · 答對率是大考中心的實測難度，比任何模型估的 difficulty 都準。
+#     沒有它，一道新題目要等我們自己的學生作答幾百次才知道難不難；
+#     有它，題目一入庫就有校準過的難度。
+#   · 它讓能力分析能說「你這題錯了，但全國有 73% 的人也錯」，
+#     而不是只給一個分數。訪談時老師抱怨的就是現有系統「分析很淺」。
+#
+# 抓法用規則而非模型：這兩個標籤的格式非常固定，規則抓得準又免費。
+# ─────────────────────────────────────────────────────────────────
+
+#: 「112學測」「115學測」「110指考」「113分科」
+_SOURCE_EXAM = re.compile(r"(1[0-2][0-9])\s*(學測|指考|分科|統測|會考)")
+
+#: 「答對率 95%」「[答對率 39%]」「答對率：43％」
+_CORRECT_RATE = re.compile(r"答對率\s*[：:]?\s*([0-9]{1,3})\s*[%％]")
+
+
+@dataclass
+class Provenance:
+    """題目旁邊印的出處與全國答對率。"""
+
+    exam: str | None = None            # 「112學測」
+    correct_rate: float | None = None  # 0–1
+
+    def __bool__(self) -> bool:
+        return self.exam is not None or self.correct_rate is not None
+
+
+#: 出處標籤要離文字結尾這麼近才算是標籤。留一點餘裕給後綴的
+#: 括號與標點，但不能多——「本題取自 110學測，請作答。」只差
+#: 五個字，那是題幹。
+_BADGE_TAIL = 3
+#: 與答對率標籤相鄰的距離。兩個標籤通常並排印在同一個色塊裡。
+_BADGE_ADJACENT = 12
+
+
+def extract_provenance(text: str) -> tuple[Provenance, str]:
+    """
+    抽出出處與答對率，回傳 (資料, 拿掉標籤後的文字)。
+
+    標籤要從題幹拿掉——它是版面元素不是題目內容，留著會讓
+    重複題偵測把「同一題但年份標籤不同」看成兩題，也會讓學生
+    在作答時看到「答對率 27%」而先入為主。
+
+    但**年份不能見到就抓**。「108學測」也可能是題幹的內容：
+    「自 108 學測起，社會科加考混合題型」——把它當標籤拿掉，
+    題目就被改寫了，而那種損壞在校對介面上看不出來（少了幾個字
+    的句子仍然通順）。所以只認「長得像標籤」的位置：貼在文字的
+    頭或尾，或與答對率標籤相鄰。中間出現的一律視為內容。
+    """
+    prov = Provenance()
+    spans: list[tuple[int, int]] = []
+
+    m = _CORRECT_RATE.search(text)
+    if m:
+        rate = int(m.group(1))
+        if 0 <= rate <= 100:
+            prov.correct_rate = rate / 100
+            spans.append(m.span())
+
+    for m2 in _SOURCE_EXAM.finditer(text):
+        at_tail = len(text) - m2.end() <= _BADGE_TAIL
+        is_whole = m2.end() - m2.start() >= len(text.strip()) - _BADGE_TAIL
+        near_rate = any(
+            abs(m2.start() - e) <= _BADGE_ADJACENT
+            or abs(s - m2.end()) <= _BADGE_ADJACENT
+            for s, e in spans
+        )
+        if at_tail or is_whole or near_rate:
+            prov.exam = prov.exam or f"{m2.group(1)}{m2.group(2)}"
+            spans.append(m2.span())
+
+    if not spans:
+        return prov, text
+
+    cleaned = text
+    for s, e in sorted(spans, reverse=True):
+        cleaned = cleaned[:s] + cleaned[e:]
+    # 標籤常被方括號或全形括號包著，拿掉之後會留下空殼
+    cleaned = re.sub(r"[\[\(（【]\s*[\]\)）】]", "", cleaned)
+    return prov, re.sub(r"[ \t　]{2,}", " ", cleaned).strip()
+
+
 def _classify(text: str, prev: BlockType | None) -> BlockType:
     """
     依文字內容判定區塊類型。
@@ -191,16 +333,23 @@ def _classify(text: str, prev: BlockType | None) -> BlockType:
         return BlockType.EXPLANATION
     if _HEADER_FOOTER.match(t):
         return BlockType.HEADER_FOOTER
-    if _GROUP_LEAD.search(t[:40]):
+    # 題組指示語在試卷裡自成一行、在講義裡黏在共用敘述的結尾，
+    # 所以整塊都要找，不能只看開頭。
+    if _GROUP_LEAD.search(t):
         return BlockType.GROUP_LEAD
-    if _SECTION_HEADER.match(t):
+    if _SECTION_HEADER.match(t) or _WORKSHEET_SECTION.match(t):
         return BlockType.SECTION_HEADER
-    if _ANSWER_ROW.search(t):
+    if _ANSWER_AREA.match(t) or _ANSWER_ROW.search(t):
         return BlockType.ANSWER_AREA
     # 子題編號要排在選項之前判。兩者的形狀很像，而混合題子題
     # 被誤判成選項是會靜默壞掉的那種錯。
     if _SUB_LABEL.match(t):
         return BlockType.STEM  # 混合題子題，題幹的一種
+    # 教用版的作答括號也要排在選項之前：`( C ) 7. To win…` 的開頭
+    # 與選項 `(C) themselves` 只差在括號後面接的是不是「數字＋標點」。
+    # 判成選項的話，整道題會被當成前一題的第五個選項。
+    if _ANSWER_PAREN.match(t):
+        return BlockType.QUESTION_NO
     if _OPTION.match(t):
         return BlockType.OPTION
     if _QUESTION_NO.match(t):
@@ -270,6 +419,11 @@ def segment_native(
             text = student or raw
 
         bt = _classify(text, prev)
+        # 教用版把答案印在題號前的括號裡（`( C ) 7. …`）。這是零成本
+        # 拿到答案的路徑，比 AI 自答便宜也可靠得多。有顏色資訊時
+        # 顏色優先——顏色是排版時就決定好的事實，不需要任何推論。
+        if not answers and (paren := answer_in_paren(text)):
+            answers = [paren]
         blocks.append(
             LayoutBlock(
                 type=bt, bbox=_bbox_of(b, page_index), text=text, answers=answers
@@ -612,6 +766,21 @@ class ExerciseUnit:
         答案收集起來——沒有任何猜測，所以學生版自然是空的。
         """
         return [a for b in self.stem for a in b.answers]
+
+    def provenance(self) -> Provenance:
+        """本題旁邊印的出處與全國答對率。"""
+        merged = Provenance()
+        for b in self.stem:
+            prov, _ = extract_provenance(b.text)
+            merged.exam = merged.exam or prov.exam
+            if merged.correct_rate is None:
+                merged.correct_rate = prov.correct_rate
+        return merged
+
+    def clean_stem_text(self) -> str:
+        """拿掉出處標籤之後的題幹——學生看到的就是這個。"""
+        _, cleaned = extract_provenance(self.stem_text())
+        return cleaned
 
 
 def split_by_exercise(blocks: list[LayoutBlock]) -> list[ExerciseUnit]:

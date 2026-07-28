@@ -534,6 +534,63 @@ async function main() {
     assert.ok(n >= 1, '入庫是題庫異動，一定要留下痕跡');
   });
 
+  await test('全國答對率一路帶到題庫，並成為難度的先驗', async () => {
+    const j4 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id,
+        createdBy: teacher.id,
+        subjectId: subject.id,
+        title: '社會考古題',
+        sourceType: 'OFFICIAL_PAST',
+        licenseScope: 'PUBLIC',
+        rightsBasis: 'OFFICIAL_PUBLIC',
+        rightsDeclaredBy: teacher.id,
+        stageDetail: { stages: {} },
+      },
+    });
+    await prisma.importCandidate.create({
+      data: {
+        jobId: j4.id,
+        order: 1,
+        type: 'SINGLE_CHOICE',
+        content: '某公司違反勞動基準法第 49 條，下列敘述何者正確？',
+        options: [
+          { order: 1, label: '(A)', content: '司法院大法官' },
+          { order: 2, label: '(B)', content: '最高行政法院' },
+        ],
+        sourceExam: '115學測',
+        nationalCorrectRate: 0.39,
+        state: 'CONFIRMED',
+        reviewedBy: teacher.id,
+        reviewedAt: new Date(),
+      },
+    });
+
+    await commitJob(prisma, j4.id, tenant.id, teacher.id);
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: j4.id } });
+    assert.equal(q.nationalCorrectRate, 0.39);
+    assert.equal(q.sourceExam, '115學測');
+    // difficulty 的慣例是 1 = 最難，而答對率越高越簡單
+    assert.ok(
+      Math.abs(q.difficulty - 0.61) < 1e-9,
+      `難度應由答對率推得，實得 ${q.difficulty}`,
+    );
+    // 本班的答對率是另一回事，不可以被外部數字污染
+    assert.equal(q.correctRate, null, '全國答對率不該寫進本班的 correctRate');
+  });
+
+  await test('答對率超出 0–1 會被資料庫擋下來', async () => {
+    // 應用層寫錯成百分數（43 而不是 0.43）的時候，能力分析會算出
+    // 「比全國高 4200%」這種數字而完全不報錯。約束要在資料庫，
+    // 因為應用層的檢查會被下一個直接寫 SQL 的人繞過。
+    await assert.rejects(
+      prisma.$executeRawUnsafe(
+        `UPDATE questions SET "nationalCorrectRate" = 43 WHERE "sourceExam" = '115學測'`,
+      ),
+      /national_rate_range|violates check constraint/i,
+    );
+  });
+
   // ── 收尾 ───────────────────────────────────────────────────
 
   console.log(`\n${passed}/${passed + failed} 通過`);

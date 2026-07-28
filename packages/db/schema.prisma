@@ -781,7 +781,18 @@ model Question {
   irtDiscrimination  Float?
   irtGuessing        Float?
   responseCount      Int    @default(0)
+  // 本班學生的答對率。由自己的作答記錄累積而來，會被重算。
   correctRate        Float?
+
+  // 大考中心公布的**全國**答對率，講義上印成「答對率 43%」。
+  // 與 correctRate 是兩回事，不可混用：那一個會被本班的作答重算，
+  // 這一個是外部給定的常數，寫進去就不再改變。
+  //
+  // 這是題庫最值錢的一欄：一道考古題入庫當天就有校準過的難度，
+  // 不必等本班學生作答幾百次；能力分析也才說得出「你錯的這題
+  // 全國有 57% 的人也錯」，而不是只給一個分數。
+  nationalCorrectRate Float?
+  nationalSampleNote  String? // 出處與年份的補充，例如「大考中心 112 學測試題分析」
 
   bloomLevel       BloomLevel?
   bloomLevelLegacy BloomLevelLegacy?
@@ -789,6 +800,7 @@ model Question {
 
   sourceType        SourceType
   sourceRef         String? // 「115學測數學A第12題」
+  sourceExam        String? // 「112學測」——講義上印的出處標籤，供年份篩選
   licenseScope      LicenseScope
   sourceImportJobId String?
 
@@ -1069,6 +1081,11 @@ model ImportCandidate {
   explanationRaw  String? // 教用版的詳解。著作權地位與試題不同，分開判斷
   sourceAnswerRaw String? // 原稿印出的答案
   label           String? // 講義的題目標頭（「範例 3」「類題 1」）
+
+  // 原稿印在題目旁的出處與全國答對率（「112學測」「答對率 43%」）。
+  // 只在原稿真的印了才有值——推估出來的難度不可以存進這裡。
+  sourceExam          String?
+  nationalCorrectRate Float?
 
   state      CandidateState @default(PENDING)
   reviewedBy String?

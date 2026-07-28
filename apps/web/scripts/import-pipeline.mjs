@@ -414,6 +414,13 @@ async function extractWorksheet(ctx, seg, existing) {
         confidenceReasons: q.confidence_reasons ?? [],
         sourceBbox: q.source_bbox ?? null,
         sourcePage: q.source_bbox?.page ?? src.page ?? null,
+        // 出處與全國答對率優先採**切分階段用規則抓到的**，
+        // 模型的回覆只當補漏。規則是逐字比對，模型會「幫忙」
+        // 把沒印的數字補一個看起來合理的——而這一欄一旦混進
+        // 估計值，就再也分不出哪些是大考中心的實測值。
+        sourceExam: src.source_exam ?? q.source_exam ?? null,
+        nationalCorrectRate:
+          src.national_correct_rate ?? q.national_correct_rate ?? null,
       });
     }
 

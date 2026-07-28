@@ -14,7 +14,7 @@
     "dev": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspace=apps/web",
     "start": "npm run start --workspace=apps/web",
-    "db:generate": "prisma generate --schema packages/db/schema.prisma",
+    "db:generate": "bash tools/prisma-generate.sh",
     "db:check": "node tools/prisma-check.mjs && node tools/schema-drift.mjs",
     "db:migrate": "prisma migrate deploy --schema packages/db/schema.prisma",
     "db:migrate:dev": "prisma migrate dev --schema packages/db/schema.prisma",
