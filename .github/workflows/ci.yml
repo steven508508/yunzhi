@@ -1,0 +1,88 @@
+# 每次推送都跑一次「這一版還能不能裝」。
+#
+# 挑這幾項的原則：**只放不需要外部服務就跑得完的檢查**。
+# 端到端那 91 項要真的 Postgres、Redis、S3 相容儲存與 AI 服務，
+# 在 CI 上維護那一整套的成本遠高於它擋下來的東西——那些在本機用
+# `./tools/e2e-import.sh` 跑，一次三分鐘。
+#
+# 這裡的四項各自擋一種「合併之後才會發現」的事：
+#
+#   typecheck      欄位改名之後還有誰沒跟上
+#   test           計分、放行時機、名冊解析這些純邏輯
+#   rls-check      schema 新增了模型而沒有決定它屬於哪個租戶
+#   deploy-check   Dockerfile 的 COPY 指到不存在的路徑、
+#                  文件裡的版本字串與 VERSION 對不上
+#
+# 最後一項最容易被低估：它擋的是「照著文件做卻裝到舊版」。
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # deploy-check 會比對 VERSION 與最新的 git tag，
+          # 淺層 clone 拿不到 tag。
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # --ignore-scripts 與 Dockerfile 的做法一致。Prisma 的查詢引擎
+      # 是執行期相依，產生型別不需要它——而在 CI 上下載它只是白花
+      # 兩分鐘，何況封閉網段的部署機本來就得走離線退路。
+      - run: npm ci --ignore-scripts
+
+      - name: 產生 Prisma Client
+        run: npm run db:generate
+
+      - name: TypeScript
+        run: npx tsc --noEmit --project apps/web/tsconfig.json
+
+      - name: 單元測試
+        run: npm test
+
+      - name: 租戶隔離
+        run: node tools/rls-check.mjs --static
+
+      # compose 那一段要 .env 才展開得出設定。沒有它的話那九項
+      # 不會執行，而檢查器會明確報失敗——所以這裡先造一份。
+      - name: 部署設定
+        run: |
+          cp .env.example .env
+          node tools/deploy-check.mjs
+
+      - name: schema 漂移
+        run: node tools/schema-drift.mjs
+
+      - name: shell 腳本
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          find deploy tools -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          shellcheck -x -P deploy/scripts deploy/scripts/*.sh
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r apps/ai/requirements.txt
+      - name: AI 管線測試
+        run: |
+          cd apps/ai
+          for t in tests/test_*.py; do python3 "$t" || exit 1; done

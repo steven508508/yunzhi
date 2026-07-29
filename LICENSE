@@ -1,0 +1,56 @@
+著作權聲明 / Copyright Notice
+
+Copyright (c) 2026 陳菘鋐 (Chen Sung-Hung). All rights reserved.
+保留一切權利。
+
+---
+
+## 中文
+
+本儲存庫的原始碼、文件與設計內容為著作權人所有。**公開於 GitHub
+不代表授權任何人使用。**
+
+未經著作權人事前書面同意，任何人不得重製、散布、公開傳輸、改作、
+編輯、出租，或以本專案為基礎建立衍生著作，亦不得用於商業目的。
+
+允許的行為僅限於：閱讀原始碼、為評估或學習目的在本機執行、
+以及依 GitHub 服務條款所必然發生的重製（例如 fork 與 clone 的技術
+行為本身）。
+
+**第三方素材不在本聲明範圍內。** 本專案處理的題本、講義與詳解，
+其著作權屬於原出版社或大學入學考試中心。本專案不散布任何此類內容，
+`samples/` 目錄已排除於版本控制之外。使用本系統匯入受著作權保護的
+教材時，使用者應自行確認其權利基礎。
+
+本專案使用的開源相依套件各自適用其原本的授權條款，不受本聲明影響。
+
+## English
+
+The source code, documentation, and design contained in this repository
+are the property of the copyright holder. **Public visibility on GitHub
+does not grant any license to use them.**
+
+No person may reproduce, distribute, publicly transmit, adapt, edit,
+rent, or create derivative works based on this project, nor use it for
+commercial purposes, without the prior written consent of the copyright
+holder.
+
+Permitted uses are limited to: reading the source, running it locally
+for evaluation or study, and the reproduction inherent in GitHub's own
+terms of service (i.e. the technical act of forking or cloning).
+
+**Third-party material is outside the scope of this notice.** The
+worksheets, handouts, and explanatory content this system processes
+remain the copyright of their original publishers or of Taiwan's College
+Entrance Examination Center. This project distributes none of it; the
+`samples/` directory is excluded from version control. Users importing
+copyrighted teaching material are responsible for establishing their own
+rights basis.
+
+Open-source dependencies remain under their own respective licenses and
+are unaffected by this notice.
+
+---
+
+要洽談授權或白牌合作，請透過本儲存庫的 Issues 聯絡。
+For licensing or white-label enquiries, please open an issue.
