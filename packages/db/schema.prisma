@@ -49,6 +49,11 @@ model Tenant {
   examPapers  ExamPaper[]
   assignments Assignment[]
   @@map("tenants")
+  tutorSessions     TutorSession[]
+  abilitySnapshots  AbilitySnapshot[]
+  admissionProfiles AdmissionProfile[]
+  academicRanks     AcademicRank[]
+  wishes            Wish[]
 }
 
 model AcademicYear {
@@ -157,6 +162,11 @@ model User {
   @@index([tenantId, status])
   @@index([tenantId, systemRole])
   @@map("users")
+  tutorSessions     TutorSession[]     @relation("TutorStudent")
+  abilitySnapshots  AbilitySnapshot[]  @relation("AbilityUser")
+  admissionProfile  AdmissionProfile[] @relation("AdmissionUser")
+  academicRanks     AcademicRank[]     @relation("RankUser")
+  wishes            Wish[]             @relation("WishUser")
 }
 
 model GuardianLink {
@@ -662,6 +672,7 @@ model KnowledgePoint {
   @@unique([subjectId, name])
   @@index([tenantId, subjectId])
   @@map("knowledge_points")
+  abilitySnapshots AbilitySnapshot[]
 }
 
 model KpCurriculumLink {
@@ -906,6 +917,7 @@ model Question {
   @@index([sourceType])
   @@index([sourceImportJobId])
   @@map("questions")
+  tutorSessions TutorSession[]
 }
 
 // 選項獨立成表而非 JSON 陣列：選項數不固定（數學 5、英文 4），
@@ -1499,6 +1511,8 @@ model Attempt {
   @@index([userId, status])
   @@index([assignmentId, status])
   @@map("attempts")
+  tutorSessions TutorSession[]
+  proctorEvents ProctorEvent[]
 }
 
 model AttemptAnswer {
@@ -1528,4 +1542,323 @@ model AttemptAnswer {
   @@unique([attemptId, questionId])
   @@index([questionId])
   @@map("attempt_answers")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 智慧老師、能力分析、考試行為偵測、家長端、升學輔導
+//
+// 這一批的共同點是**它們都建立在既有資料之上**：作答記錄早就逐題
+// 存著 isCorrect，知識點與題目的關聯在匯入時就標好了，家長與學生的
+// 連結表從第一版就在 schema 裡。缺的一直是「把它們接起來的那一層」。
+//
+// 四個貫穿的決定：
+//
+// **一、能力分析用快照，不是每次即時算。**
+// 200 位學生 × 每學期約 40 份任務 × 25 題 = 20 萬列作答。每次打開
+// 頁面都 join `attempt_answers` 與 `question_knowledge_points` 再
+// 分組，是一個會隨學期線性變慢的設計——而它變慢的時間點正好是
+// 資料開始有意義的時候。所以計分完成時順手更新快照。
+//
+// **二、智慧老師的對話要留下來，而且要能被老師看到。**
+// 這是未成年人與 AI 的對話，發生在補習班的系統裡。不留紀錄的話，
+// 出事時沒有人說得出發生過什麼；而只留給學生自己看，等於補習班對
+// 自己場域內的 AI 互動沒有任何監督能力。留存期限與可見範圍寫在
+// TutorSession 的欄位註解裡。
+//
+// **三、考試行為只記錄，不中斷。**
+// 切換分頁與離開全螢幕會被記下來給老師看，但**系統不會自動判定
+// 作弊、不會自動交卷、不會鎖住畫面**。理由在 ProctorEvent 的註解。
+//
+// **四、升學輔導的管道狀態用兩個正交欄位，不用單一列舉。**
+// 這是規格書文件 06 第 5.2 節點名的坑：學生放棄繁星之後，如果狀態
+// 塌縮成「已放棄」，系統就再也分不出他原本是第 1-7 類（永久封鎖
+// 個人申請）還是第 8 類（可報名但不可登記志願序）。見 AdmissionProfile。
+// ═══════════════════════════════════════════════════════════════
+
+// ── 智慧老師 ────────────────────────────────────────────────
+
+enum TutorRole {
+  STUDENT
+  TUTOR
+  /// 系統插入的脈絡（題目、學生的作答、正確答案）。不顯示在對話裡。
+  CONTEXT
+}
+
+enum TutorStatus {
+  OPEN
+  /// 學生說他懂了，或關掉了。
+  CLOSED
+  /// 觸發了安全規則而停止（見 TutorMessage.blocked）。
+  HALTED
+}
+
+/// 一次針對某一題的引導式教學對話。
+///
+/// **綁在 attempt + question 上，不是綁在學生身上。** 同一位學生對
+/// 同一題在不同次考試後的對話是分開的兩段——他第二次問的時候，
+/// 上一次的理解程度已經不同了，把兩段接在一起會讓 AI 以為他還停在
+/// 三個月前的位置。
+model TutorSession {
+  id           String      @id @default(cuid())
+  tenantId     String
+  userId       String
+  attemptId    String?
+  questionId   String
+  status       TutorStatus @default(OPEN)
+
+  /// 學生自陳的卡點，開場時問的第一件事。引導的起點。
+  stuckAt      String?
+  /// 這一段對話涵蓋了哪些知識點。用於能力分析的「問過但仍不會」。
+  kpIds        String[]    @default([])
+
+  /// 學生按「我懂了」。沒有按不代表沒懂，所以不拿它當成效指標的分母。
+  resolvedAt   DateTime?
+  messageCount Int         @default(0)
+  tokensIn     Int         @default(0)
+  tokensOut    Int         @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User           @relation("TutorStudent", fields: [userId], references: [id], onDelete: Cascade)
+  attempt  Attempt?       @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  question Question       @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  messages TutorMessage[]
+
+  @@index([tenantId, userId, createdAt])
+  @@index([questionId])
+  @@map("tutor_sessions")
+}
+
+model TutorMessage {
+  id        String    @id @default(cuid())
+  sessionId String
+  role      TutorRole
+  content   String
+
+  /// 被安全規則擋下來的訊息仍然存，但不送給學生。
+  /// 刪掉的話，事後沒有人查得出「他問了什麼才觸發的」。
+  blocked       Boolean @default(false)
+  blockedReason String?
+
+  modelUsed     String?
+  promptVersion String?
+  latencyMs     Int?
+
+  createdAt DateTime @default(now())
+
+  session TutorSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("tutor_messages")
+}
+
+// ── 能力分析 ────────────────────────────────────────────────
+
+/// 一位學生在一個知識點上的掌握度快照。計分完成時更新。
+///
+/// **`mastery` 不是答對率。** 答對率把三個月前的一題與昨天的一題
+/// 算成一樣重，而遺忘是真的——`KnowledgePoint.decayRate` 存在就是
+/// 為了這件事。掌握度是時間加權的，公式與理由寫在 lib/ability 那一層。
+///
+/// 保留 `correct`／`total` 原始計數，因為老師會問「這個 0.35 是怎麼
+/// 算出來的」，而一個算不出來的數字沒有人會相信。
+model AbilitySnapshot {
+  id               String @id @default(cuid())
+  tenantId         String
+  userId           String
+  knowledgePointId String
+
+  correct Int   @default(0)
+  total   Int   @default(0)
+  /// 0 到 1。時間加權，越近期的作答權重越高。
+  mastery Float @default(0)
+  /// 樣本太少時掌握度不可靠。低於門檻時介面要說「資料不足」而不是
+  /// 顯示一個看起來精確的小數。
+  reliable Boolean @default(false)
+
+  lastAnsweredAt DateTime?
+  /// 連續答錯幾次。用於「這個知識點卡住了」的主動提示。
+  streakWrong    Int       @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user           User           @relation("AbilityUser", fields: [userId], references: [id], onDelete: Cascade)
+  knowledgePoint KnowledgePoint @relation(fields: [knowledgePointId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, knowledgePointId])
+  @@index([tenantId, knowledgePointId])
+  @@map("ability_snapshots")
+}
+
+// ── 考試行為偵測 ────────────────────────────────────────────
+
+enum ProctorEventType {
+  /// 分頁被切走（visibilitychange）
+  TAB_HIDDEN
+  /// 切回來
+  TAB_VISIBLE
+  /// 視窗失去焦點（blur）——切到別的應用程式，或開了另一個視窗
+  WINDOW_BLUR
+  WINDOW_FOCUS
+  /// 離開全螢幕
+  FULLSCREEN_EXIT
+  FULLSCREEN_ENTER
+  /// 貼上。大段貼上多半是從別處抄來的。
+  PASTE
+  /// 作答畫面在背景超過門檻時間之後才回來
+  LONG_ABSENCE
+}
+
+/// 考試期間的行為事件。
+///
+/// # 為什麼只記錄不中斷
+///
+/// 業主原本要的是驅動程式等級的監考 Client。那條路我們沒有走
+/// （文件 04 的理由），改成瀏覽器層的偵測——而瀏覽器層的偵測**一定
+/// 會有偽陽性**：手機來電、系統通知、輸入法切換、螢幕旋轉，都會產生
+/// blur。自動判定作弊並中斷考試，代價是一個沒有作弊的學生在考試中
+/// 被踢出去，而那件事無法補救。
+///
+/// 所以這裡的定位是**給老師看的證據**，不是自動裁判。老師看到「這位
+/// 學生在 60 分鐘裡切走 14 次、其中一次 4 分鐘」時，他有足夠的資訊
+/// 決定要不要處理；系統不替他決定。
+///
+/// 學生端在考試開始前會被明確告知這件事會被記錄——不告知而偷偷記錄
+/// 是另一個問題。
+model ProctorEvent {
+  id        String           @id @default(cuid())
+  attemptId String
+  type      ProctorEventType
+  at        DateTime         @default(now())
+
+  /// 這一段離開持續了多久（毫秒）。TAB_VISIBLE／WINDOW_FOCUS 才有值。
+  durationMs Int?
+  /// 當下在第幾題。老師要判斷「他是在難題上離開的嗎」。
+  questionOrder Int?
+  /// 貼上的字元數等。刻意不存貼上的內容——那可能是學生自己打的草稿。
+  meta Json?
+
+  attempt Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@index([attemptId, at])
+  @@map("proctor_events")
+}
+
+// ── 升學輔導（第一階段：制度規則與繁星校內賽局）──────────────
+
+enum AdmissionChannel {
+  SPECIAL   // 特殊選才
+  STAR      // 繁星推薦
+  APPLY     // 個人申請
+  PLACEMENT // 分發入學
+}
+
+/// 繁星的錄取類別。**一經錄取即固定，放棄不清空。**
+///
+/// 這是文件 06 第 5.2 節點名的坑。用單一列舉（未錄取／已錄取／已放棄）
+/// 的話，學生放棄之後系統就分不出他原本是哪一類——而第 1-7 類是
+/// 永久封鎖個人申請（放棄也沒用），第 8 類只封鎖登記志願序。
+/// 兩者的輔導建議完全相反，而搞錯的代價是學生錯過一整個管道。
+enum StarCategory {
+  NONE
+  GROUP_1_7
+  GROUP_8
+}
+
+/// 一位學生在某學年度的升學狀態。
+///
+/// 管道狀態刻意用「錄取」與「已放棄」兩個正交的布林值，見 StarCategory
+/// 的註解。判定邏輯在 lib/admission 那一層，有完整笛卡兒積的測試。
+model AdmissionProfile {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+  /// 民國學年度，例如 115。
+  year     Int
+
+  /// 非應屆。影響繁星資格。
+  isRepeater    Boolean @default(false)
+  /// 全程就讀同一高中未轉學。繁星資格。
+  sameSchoolAll Boolean @default(true)
+
+  specialAdmitted Boolean      @default(false)
+  specialWaived   Boolean      @default(false)
+  starCategory    StarCategory @default(NONE)
+  starWaived      Boolean      @default(false)
+  applyAdmitted   Boolean      @default(false)
+  applyWaived     Boolean      @default(false)
+
+  /// 實際學測成績（公布後填入）。形狀 { CHINESE: 13, MATH_A: 12, ... }
+  gsatScores Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("AdmissionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, year])
+  @@index([tenantId, year])
+  @@map("admission_profiles")
+}
+
+/// 五學期在校成績的全校排名百分比。**本模組最敏感的一張表。**
+///
+/// 越小越好（1% 是全校第一）。由教務處匯入，**不進入任何學生可查詢
+/// 的 API**——學生端只拿得到「自己在某個志願上的校內序位」這一個
+/// 整數，而且參與人數少於 3 人時連序位都不給（否則排第 2 的人可以
+/// 反推出排第 1 的是誰）。
+model AcademicRank {
+  id         String @id @default(cuid())
+  tenantId   String
+  userId     String
+  year       Int
+  percentile Float
+  /// 採計學期數。繁星是 5。
+  semesters  Int    @default(5)
+
+  importedBy String
+  importedAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("RankUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, year])
+  @@index([tenantId, year])
+  @@map("academic_ranks")
+}
+
+/// 一個志願。繁星的校內賽局模擬吃的就是這張表。
+model Wish {
+  id       String           @id @default(cuid())
+  tenantId String
+  userId   String
+  year     Int
+  channel  AdmissionChannel
+  rank     Int
+
+  /// 大學名稱。第一階段不建完整的校系資料庫（歷年篩選資料禁止爬取，
+  /// 見文件 07），所以這裡先收自由輸入的文字，之後接得上正式的
+  /// Program 表時再遷移。
+  institutionName String
+  programName     String?
+  /// 繁星學群 1-8。
+  starGroup       Int?
+
+  /// 學生自述的興趣理由。用於偵測「志願完全依錄取機率排、與興趣脫節」。
+  interestTag String?
+  note        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("WishUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, year, channel, rank])
+  @@index([tenantId, year, channel])
+  @@map("wishes")
 }

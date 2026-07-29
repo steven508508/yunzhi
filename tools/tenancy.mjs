@@ -76,6 +76,10 @@ export const GLOBAL = {
  * → textbook_nodes → textbook_editions）不必特別處理。
  */
 export const INDIRECT = {
+  // 智慧老師與考試行為（掛在既有的父表上，不自己帶 tenantId）
+  tutor_messages: ['tutor_sessions', 'sessionId'],
+  proctor_events: ['attempts', 'attemptId'],
+
   // 考卷、任務、作答（B2–B4）
   exam_paper_items: ['exam_papers', 'paperId'],
   assignment_targets: ['assignments', 'assignmentId'],
