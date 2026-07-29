@@ -28,6 +28,18 @@
  * 它只有數字。這一頁有全班的姓名與學號，那是 `mayViewGrades` 管的
  * 東西——**列表濾掉不等於內頁擋住**，而這一類漏洞最常見的形狀正是
  * 「把網址列的 id 換成別科那一份」。
+ *
+ * # 考試行為那一段只陳述事實
+ *
+ * 「切走 14 次、最長一次 4 分鐘」是事實，「疑似作弊」是判斷——而判斷
+ * 是老師的事。理由寫在 schema.prisma 的 `ProctorEvent` 註解裡：
+ * 瀏覽器層的偵測一定有偽陽性（來電、通知、輸入法、螢幕旋轉都會產生
+ * 同樣的訊號），而自動判定的代價是一位沒有作弊的學生在考試中被踢出去。
+ *
+ * 所以這一段上沒有分數、沒有等級、沒有紅色的「可疑」標籤，只有數字與
+ * 一句可以驗證的比較（「全班中位數 2 次」）。老師看完之後要做的事
+ * ——作廢那一份——用的是既有的入口（`VoidOne`，要填理由、進稽核、
+ * 可撤銷），不另做一套。
  */
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
@@ -42,9 +54,11 @@ import {
 } from '@/lib/assignment';
 import { mayComposeArea } from '@/lib/paper';
 import { scopedPage } from '@/lib/page';
+import { durationText, PROCTOR } from '@/lib/proctor.mjs';
+import { assignmentProctorReport, type ProctorStudentRow } from '@/lib/proctorDb';
 import { mayGrade, mayViewGrades } from '@/lib/scoring';
 import { FinalizeOne } from '../../grades/[assignmentId]/Finalize';
-import { VoidOne } from '../../grades/[assignmentId]/Void';
+import { UnvoidOne, VoidOne } from '../../grades/[assignmentId]/Void';
 import { AssignmentClock, ExtendOne } from './Clock';
 
 export const dynamic = 'force-dynamic';
@@ -132,6 +146,10 @@ export default async function AssignmentDetailPage({
     // 而它正是跨班洩題那個洞的偵測方式。
     const cohort = await paperCohort(roster.paperId, roster.assignmentId);
     const pending = unfinishedCohort(cohort);
+
+    // 考試行為。**只有真的有人開過考卷才查**——沒有作答就沒有事件，
+    // 而多一次查詢會出現在每一次打開這一頁的時候。
+    const proctor = roster.started > 0 ? await assignmentProctorReport(roster.assignmentId) : null;
 
     const running = roster.entries.filter((e) => e.state === 'IN_PROGRESS');
     const stranded = running.filter((e) => e.stranded);
@@ -364,6 +382,151 @@ export default async function AssignmentDetailPage({
               rowKey={(r) => r.userId}
               empty={<Empty title="每一位都動過了" />}
             />
+          </section>
+        )}
+
+        {/* ── 考試行為 ─────────────────────────────────────────── */}
+        {proctor && (
+          <section style={{ marginBottom: 22 }}>
+            <h2 className="yz-grade-h">考試行為</h2>
+            {proctor.total === 0 ? (
+              // 「沒有記錄」與「沒有人離開過」是兩件事，而畫面上很容易
+              // 被讀成同一件。舊的作答、偵測上線之前考的那幾份、
+              // 送不出去的瀏覽器，看起來全都是這個樣子。
+              <p className="yz-grade-hint">
+                這份任務目前<strong>沒有收到任何行為記錄</strong>。
+                這句話的意思是「沒有收到訊號」，<strong>不等於「沒有人離開過考卷」</strong>
+                ——在這個功能上線之前考的、或者瀏覽器送不出去的，都會是這個樣子。
+              </p>
+            ) : (
+              <>
+                <p className="yz-grade-hint">
+                  學生的瀏覽器離開這份考卷幾次、多久、當時在第幾題。
+                  系統<strong>不判斷這些是不是作弊</strong>——手機來電、系統通知、
+                  切換輸入法、螢幕旋轉會產生一模一樣的訊號，而自動判定的代價是
+                  一位沒有作弊的學生在考試中被踢出去。這裡只列事實。
+                </p>
+
+                {/* 全班都這樣的時候，這一段要擋在名單前面：老師的視線
+                    一落到表格上就會挑出最上面那一位，而那時他挑到的
+                    只是網路最差的那一位。 */}
+                {proctor.baseline.widespread && (
+                  <Note tone="info">
+                    有作答的 {proctor.baseline.students} 位裡，{proctor.baseline.busy} 位都有{' '}
+                    {PROCTOR.WIDESPREAD_MIN_COUNT} 次以上的離開記錄。全班一致的模式通常
+                    來自環境而不是個人——同一個熱點斷斷續續、教室裡的裝置每隔幾分鐘
+                    跳一次通知、某個瀏覽器版本在捲動時誤送訊號。
+                    <strong>先看環境，不要先看人。</strong>
+                    所以下面不標記任何一位「與全班不同」。
+                  </Note>
+                )}
+
+                <Table
+                  caption="每一位學生的考試行為"
+                  columns={[
+                    { key: 'n', head: '姓名', cell: (r: ProctorStudentRow) => r.displayName },
+                    { key: 'u', head: '學號', cell: (r: ProctorStudentRow) => r.username },
+                    {
+                      key: 'c',
+                      head: '離開次數',
+                      numeric: true,
+                      cell: (r: ProctorStudentRow) => r.summary.awayCount,
+                    },
+                    {
+                      key: 't',
+                      head: '總離開時間',
+                      numeric: true,
+                      cell: (r: ProctorStudentRow) => (
+                        <>
+                          {durationText(r.summary.awayMs)}
+                          {/* 沒有回來的那幾次量不到長度，所以總時間是
+                              **下限**而不是實際值。不講的話，「總共離開
+                              12 秒」會被讀成「他只離開了 12 秒」。 */}
+                          {r.summary.unfinished > 0 && (
+                            <span className="yz-grade__sub">
+                              另有 {r.summary.unfinished} 次沒有回來，長度不明
+                            </span>
+                          )}
+                        </>
+                      ),
+                    },
+                    {
+                      key: 'm',
+                      head: '最長一次',
+                      numeric: true,
+                      cell: (r: ProctorStudentRow) =>
+                        r.summary.longestMs > 0 ? durationText(r.summary.longestMs) : '—',
+                    },
+                    {
+                      key: 'o',
+                      head: '其他',
+                      cell: (r: ProctorStudentRow) => {
+                        const bits: string[] = [];
+                        if (r.summary.fullscreenExits > 0) {
+                          bits.push(`離開全螢幕 ${r.summary.fullscreenExits} 次`);
+                        }
+                        if (r.summary.pastes > 0) {
+                          // 只有字數。內容刻意不存——那可能是他自己打的草稿。
+                          bits.push(`貼上 ${r.summary.pastes} 次共 ${r.summary.pasteChars} 字`);
+                        }
+                        return bits.length > 0 ? bits.join('、') : <span className="yz-muted">—</span>;
+                      },
+                    },
+                    {
+                      key: 'w',
+                      head: '與全班的差別',
+                      cell: (r: ProctorStudentRow) =>
+                        r.why.length > 0 ? (
+                          <span className="yz-proctor__why">{r.why.join('；')}</span>
+                        ) : (
+                          <span className="yz-muted">—</span>
+                        ),
+                    },
+                    ...(mayEdit
+                      ? [
+                          {
+                            key: 'x',
+                            head: <span className="yz-sr">操作</span>,
+                            cell: (r: ProctorStudentRow) =>
+                              // 看到之後要做的事已經有了：作廢那一份
+                              // （要填理由、進稽核、可撤銷）。這裡只是
+                              // 把入口接上，不另做一套。
+                              r.status === 'VOIDED' ? (
+                                <UnvoidOne
+                                  attemptId={r.attemptId}
+                                  who={r.displayName}
+                                  wasSubmitted={r.submittedAt != null}
+                                />
+                              ) : (
+                                <VoidOne
+                                  attemptId={r.attemptId}
+                                  who={r.displayName}
+                                  wasSubmitted={r.submittedAt != null}
+                                />
+                              ),
+                          },
+                        ]
+                      : []),
+                  ]}
+                  rows={proctor.rows.filter((r) => r.summary.total > 0)}
+                  rowKey={(r) => r.attemptId}
+                  empty={<Empty title="沒有任何一位留下記錄" />}
+                />
+
+                <p className="yz-grade-hint">
+                  {proctor.silent > 0 && (
+                    <>
+                      {/* 同上：沒有訊號不等於沒有離開。 */}
+                      另外 {proctor.silent} 位沒有任何記錄——那代表沒有收到訊號，
+                      不代表他一次都沒有切走。{' '}
+                    </>
+                  )}
+                  <Link href={`/assignments/${roster.assignmentId}/proctor`}>
+                    看每一位的時間軸（第幾題、什麼時候、多久）
+                  </Link>
+                </p>
+              </>
+            )}
           </section>
         )}
 

@@ -70,6 +70,21 @@
  * 收掉全站導覽列。那一列在手機上把「登出」推成獨立的一整排、就在
  * 螢幕最頂端，而誤觸它的代價是重打一次密碼、而倒數不會停。
  * 同一個屬性也把捲動的連鎖關掉，擋掉隨時待發的下拉重新整理。
+ *
+ * # 行為記錄是輔助資料，不是這一頁的主線
+ *
+ * 切換分頁、離開全螢幕、貼上會被記下來給老師看（合併與去抖動在
+ * `lib/proctor.mjs`，為什麼只記錄不中斷寫在 schema 的 `ProctorEvent`）。
+ * 這一段在這一頁裡的地位必須非常清楚：
+ *
+ *   · **它自己一條送出管線，與存檔佇列完全不相干。** 送不出去就丟掉，
+ *     絕不放進 `pending`、絕不讓 `flush` 等它、絕不出現在存檔指示器裡。
+ *     學生的答案不可以為了一筆「他切走了 4 秒」而慢一拍
+ *   · 全螢幕是**建議**不是強制：iPad 上 Safari 的全螢幕 API 有限制，
+ *     而強制失敗會讓學生開不了考卷。離開全螢幕只記錄並溫和提示，
+ *     不擋鍵盤、不 preventDefault——那擋不住真的想作弊的人，
+ *     只會讓正常學生按到 Esc 之後不知所措
+ *   · 開始之前那一頁**明講**會記錄什麼。不告知而偷偷記錄是另一個問題
  */
 
 import Link from 'next/link';
@@ -81,6 +96,13 @@ import { ConfirmDialog } from '@/components/Dialog';
 import { Empty, ErrorBox, Loading, Note } from '@/components/Feedback';
 import { MathText } from '@/components/MathText';
 import type { StudentTask, TakeQuestion, TakeView } from '@/lib/attempt';
+import {
+  createProctorTracker,
+  PROCTOR,
+  toProctorPayload,
+  type ProctorRecord,
+  type ProctorTracker,
+} from '@/lib/proctor.mjs';
 import {
   answeredGap,
   FETCH_TIMEOUT_MS,
@@ -144,6 +166,14 @@ export default function TakeAssignmentPage() {
   const [phase, setPhase] = useState<Phase>('loading');
   const [fatal, setFatal] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * 現在不在全螢幕，而剛才在。
+   *
+   * 只在**離開過**之後才為真：一開始就進不了全螢幕的裝置（iPad 上的
+   * Safari）不該看到這句話——他沒有做錯任何事，而那句提示會讓他
+   * 以為自己已經被記上一筆。
+   */
+  const [fsLeft, setFsLeft] = useState(false);
 
   const [task, setTask] = useState<StudentTask | null>(null);
   const [view, setView] = useState<TakeView | null>(null);
@@ -178,6 +208,18 @@ export default function TakeAssignmentPage() {
   attemptRef.current = attemptId;
   const answersRef = useRef<Record<string, AnswerState>>({});
   answersRef.current = answers;
+
+  /**
+   * 行為事件的合併器。**與存檔佇列平行的一條線，兩者不共用任何東西。**
+   * 建在 ref 裡而不是 state：它每幾秒就變一次，而它的內容不影響畫面。
+   */
+  const proctor = useRef<ProctorTracker | null>(null);
+  if (!proctor.current) proctor.current = createProctorTracker();
+  /**
+   * 上一批送失敗的。**只留一次**——這是輔助資料，為了它反覆重試等於
+   * 拿學生的頻寬去換一筆「他切走了 4 秒」。滿了就丟掉最舊的。
+   */
+  const proctorRetry = useRef<ProctorRecord[]>([]);
 
   /**
    * 校時後的時鐘。`base` 是伺服器說的剩餘秒數，`at` 是收到它的那一刻
@@ -279,6 +321,13 @@ export default function TakeAssignmentPage() {
     if (starting) return;
     setStarting(true);
     setFatal(null);
+    // **在 await 之前要求全螢幕。** 瀏覽器只在使用者手勢的當下允許這件事，
+    // 而一個 await 之後手勢的效力可能已經過期——那時候的失敗完全看不出
+    // 原因（沒有錯誤、也沒有全螢幕）。
+    //
+    // 這是建議不是強制：iPad 上的 Safari 對 `requestFullscreen` 有限制，
+    // 而**強制失敗會讓學生開不了考卷**。失敗就算了，考試照樣開始。
+    enterFullscreen();
     try {
       const res = await fetchT('/api/attempts', {
         method: 'POST',
@@ -471,6 +520,166 @@ export default function TakeAssignmentPage() {
     );
   }, []);
 
+  // ── 行為記錄 ────────────────────────────────────────────────
+  //
+  // 自己的一條送出管線。它與上面那一條唯一的共同點是都用 `fetchT`，
+  // 而那正是重點：**存檔失敗會重試、會擋交卷、會在畫面上講重話；
+  // 這一條失敗只是丟掉。** 兩條線不共用佇列、不共用狀態、不互相等待。
+
+  /**
+   * 取一批要送的。上一次失敗的排在前面（它比較舊），超過一批的量留在
+   * 重試緩衝裡下一輪再送——這條線不趕時間。
+   */
+  const proctorTake = useCallback((): ProctorRecord[] => {
+    const all = [...proctorRetry.current, ...(proctor.current?.drain() ?? [])];
+    proctorRetry.current = all.slice(PROCTOR.MAX_BATCH, PROCTOR.MAX_QUEUE);
+    return all.slice(0, PROCTOR.MAX_BATCH);
+  }, []);
+
+  /**
+   * 送失敗的放回去。**上限之外的直接丟掉**——這是輔助資料，
+   * 而一個斷線的分頁裡真正要保住的是學生的答案，不是行為記錄。
+   */
+  const proctorRequeue = useCallback((batch: ProctorRecord[]) => {
+    proctorRetry.current = [...batch, ...proctorRetry.current].slice(0, PROCTOR.MAX_QUEUE);
+  }, []);
+
+  const proctorSend = useCallback(async () => {
+    const id = attemptRef.current;
+    const t = proctor.current;
+    if (!id || !t) return;
+    if (t.pending() === 0 && proctorRetry.current.length === 0) return;
+    const batch = proctorTake();
+    if (batch.length === 0) return;
+    try {
+      const res = await fetchT(`/api/attempts/${id}/proctor`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ events: toProctorPayload(batch, now()) }),
+        timeoutMs: FETCH_TIMEOUT_MS.status,
+      });
+      // 4xx 是「這一批本來就送不進去」（格式不對、作答已經結束、不是
+      // 你的卷子）。重送不會變成 2xx，只會再打一次伺服器。
+      // 5xx 與斷線才留著——那兩種下一輪可能就好了。
+      if (res.status >= 500) proctorRequeue(batch);
+    } catch {
+      proctorRequeue(batch);
+    }
+  }, [proctorRequeue, proctorTake]);
+
+  const proctorSendRef = useRef(proctorSend);
+  proctorSendRef.current = proctorSend;
+
+  /**
+   * 用 beacon 把待送的送出去。
+   *
+   * `closeOpen` 決定要不要把**還沒結束的那一段離開**也一併結掉：
+   *
+   *   · `pagehide`／元件卸載 → true。「他切走之後就沒有再回來」只有在
+   *     這一刻送得出去，而那正是最值得記下來的一種
+   *   · `visibilitychange` 切到背景 → **false**。切到背景的人絕大多數
+   *     幾秒後就回來了，那時我們要的是一列帶長度的記錄。這裡若順手
+   *     `close()`，每一次正常的切分頁都會變成一列「離開之後沒有回來、
+   *     長度不明」——而真正沒有回來的那幾次就再也分不出來了
+   *
+   * 代價是分頁在背景被系統直接回收（沒有 pagehide）時，那一段會遺失。
+   * 那是可以接受的：作答的答案走的也是同一條路，而答案比這重要得多。
+   */
+  const proctorBeacon = useCallback(
+    (closeOpen: boolean) => {
+      const id = attemptRef.current;
+      const t = proctor.current;
+      if (!id || !t) return;
+      if (closeOpen) t.close(now());
+      const batch = proctorTake();
+      if (batch.length === 0) return;
+      const payload = JSON.stringify({ events: toProctorPayload(batch, now()) });
+      navigator.sendBeacon?.(
+        `/api/attempts/${id}/proctor`,
+        new Blob([payload], { type: 'application/json' }),
+      );
+    },
+    [proctorTake],
+  );
+
+  /**
+   * 接線。
+   *
+   * **與上面校時那一個 effect 分開掛，即使兩者都聽 visibilitychange。**
+   * 合在一起的話，這裡拋出來的任何例外都會讓同一個處理函式裡後面那幾行
+   * 不執行——而後面那幾行是「把還沒存的答案 beacon 出去」。
+   * 行為記錄不可以有機會弄丟一題答案。
+   */
+  useEffect(() => {
+    if (phase !== 'taking') return;
+    const t = proctor.current;
+    if (!t) return;
+
+    // 進來的當下把全螢幕狀態同步一次。「開始作答」那一顆按鈕在這個
+    // effect 掛上之前就先要求了全螢幕（見 `start`），不補這一次的話，
+    // 老師端分不出「這台裝置進不了全螢幕」與「他進去之後一直待著」。
+    t.fullscreen(isFullscreen(), now());
+    setFsLeft(false);
+
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        t.visible(now());
+        return;
+      }
+      t.hidden(now());
+      // 切到背景是**最後一個可靠的送出時機**：手機可能在下一秒就把這個
+      // 分頁回收掉。這一次 beacon 只送已經合併完成的那些，**不結束
+      // 剛開始的這一段**——他多半幾秒後就回來了，而那時我們要的是
+      // 一列帶長度的記錄，不是一列「長度不明」。
+      proctorBeacon(false);
+    };
+    const onBlur = () => t.blur(now());
+    const onFocus = () => t.focus(now());
+    const onFs = () => {
+      const full = isFullscreen();
+      t.fullscreen(full, now());
+      setFsLeft(!full);
+      // 離開全螢幕當下就送出去。學生按了 Esc 之後很可能接著就關掉分頁，
+      // 而這是這一頁上最該送到的一件事。
+      if (!full) void proctorSendRef.current();
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      // **只取長度。** 內容一個字都不留——那可能是學生自己在別處打的
+      // 草稿，而記下來就是在蒐集他的作答內容。
+      t.paste(e.clipboardData?.getData('text')?.length ?? 0, now());
+    };
+
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('fullscreenchange', onFs);
+    // Safari 要到 16.4 才支援不帶前綴的那一個，而補習班的自備裝置
+    // 什麼版本都有。多掛一個不會重複計數：`fullscreen()` 只在狀態
+    // 真的變了才動作。
+    document.addEventListener('webkitfullscreenchange', onFs);
+    document.addEventListener('paste', onPaste);
+    // 分頁真的要走了。**這一個才 close**，理由見 `proctorBeacon`。
+    const onLeave = () => proctorBeacon(true);
+    window.addEventListener('pagehide', onLeave);
+
+    // 攢一段時間再送，**不是每一個事件送一次**。手機切一次輸入法會
+    // 產生一連串 blur/focus，而那一連串合併之後往往一列都不留——
+    // 為它打一次伺服器是純粹的浪費，而它跟學生的答案搶同一條網路。
+    const flush = setInterval(() => void proctorSendRef.current(), PROCTOR.FLUSH_DEBOUNCE_MS);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('fullscreenchange', onFs);
+      document.removeEventListener('webkitfullscreenchange', onFs);
+      document.removeEventListener('paste', onPaste);
+      window.removeEventListener('pagehide', onLeave);
+      clearInterval(flush);
+      proctorBeacon(true);
+    };
+  }, [phase, proctorBeacon]);
+
   // ── 校時 ────────────────────────────────────────────────────
 
   /** 自動交卷（含退避重試）。定義在下面，這裡先留一個把手給校時用。 */
@@ -655,6 +864,12 @@ export default function TakeAssignmentPage() {
     setCur(i);
     document.querySelector('.yz-shell__main')?.scrollTo({ top: 0 });
   }, []);
+
+  // 事件要記在**當下那一題**上。老師要判斷的是「他是在難題上離開的嗎」，
+  // 而只記一個時刻的話那個問題答不出來——他得自己去比對版面快照。
+  useEffect(() => {
+    proctor.current?.setQuestion(questions[cur]?.order ?? null);
+  }, [cur, questions]);
 
   const navRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
@@ -866,6 +1081,25 @@ export default function TakeAssignmentPage() {
                 這一份可以作答 {task.maxAttempts} 次，你已經用掉 {task.attemptsUsed} 次。
               </li>
             )}
+            {/*
+              不告知而偷偷記錄是另一個問題。所以這一條寫得很白：
+              記什麼、誰看得到、以及**它不會做什麼**。
+
+              措辭刻意平實。威脅的寫法（「系統將全程監控你的行為」）
+              會讓一個沒有要作弊的學生整場都在擔心自己不小心按到什麼，
+              而那件事本身就會影響他的成績。
+            */}
+            <li>
+              作答期間系統會記錄<b>切換分頁、離開全螢幕的次數與時間長度</b>，
+              以及貼上了幾個字（<b>不會記錄貼上的內容</b>），這些老師看得到。
+              系統<b>不會據此自動判定任何事，也不會中斷你的考試</b>——
+              手機來電、系統通知、切換輸入法都會被記到，有狀況直接告訴監考老師就好。
+            </li>
+            <li>
+              按下開始時會嘗試切換到全螢幕。中途按 Esc 離開全螢幕
+              <b>不會被扣分也不會被鎖住</b>，只會留下一筆記錄；
+              有些平板不支援全螢幕，那不影響作答。
+            </li>
           </ul>
 
           <div className="yz-actions">
@@ -1046,6 +1280,37 @@ export default function TakeAssignmentPage() {
                 onClick={() => setNotice(null)}
               >
                 我知道了
+              </button>
+            </div>
+          )}
+
+          {/*
+            離開全螢幕的提示。**溫和，而且說得出後果**——後果就是
+            「留下一筆記錄」，沒有別的。
+
+            這裡刻意不擋鍵盤、不 preventDefault、不自動再進全螢幕：
+            擋不住真的想作弊的人（他可以直接開第二台裝置），
+            只會讓一個按到 Esc 的正常學生反覆被彈回去而不知所措。
+          */}
+          {fsLeft && (
+            <div className="yz-take__notice">
+              <Note tone="warn">
+                你離開了全螢幕，這件事會被記錄下來給老師看。
+                <b>它不會影響你的成績，也不會中斷考試。</b>
+              </Note>
+              <button
+                type="button"
+                className="yz-take__noticex"
+                onClick={() => enterFullscreen()}
+              >
+                回到全螢幕
+              </button>
+              <button
+                type="button"
+                className="yz-take__noticex"
+                onClick={() => setFsLeft(false)}
+              >
+                知道了
               </button>
             </div>
           )}
@@ -1378,6 +1643,48 @@ function submitFailNote(reason: string, stuck: number, auto: boolean): string {
 /** 單調時鐘。`Date.now()` 會被使用者改系統時間影響，這一個不會。 */
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+/* ── 全螢幕 ─────────────────────────────────────────────────── */
+
+/**
+ * 現在是不是全螢幕。
+ *
+ * 兩個屬性都要看：Safari 到 16.4 才有不帶前綴的那一個，而補習班的
+ * 自備裝置什麼版本都有。只看標準那一個的話，舊 iPad 上會一直判成
+ * 「沒有進入全螢幕」——於是每一位用 iPad 的學生都被記上一筆
+ * 「離開全螢幕」，而他根本沒有離開過。
+ *
+ * 用 `||` 而不是 `??`：標準那一個**沒有全螢幕時是 `null` 不是
+ * `undefined`**，所以 `??` 一樣會落到帶前綴的那一個上，兩者結果相同，
+ * 但 `||` 讀起來就是「任何一個說在全螢幕就算」，不會讓下一個人
+ * 去想 null 與 undefined 的差別。
+ */
+function isFullscreen(): boolean {
+  if (typeof document === 'undefined') return false;
+  const d = document as Document & { webkitFullscreenElement?: Element | null };
+  return Boolean(d.fullscreenElement || d.webkitFullscreenElement);
+}
+
+/**
+ * 建議進入全螢幕。**失敗是正常的，而且不可以有任何後果。**
+ *
+ * iPad 上的 Safari 對 `requestFullscreen` 有限制、使用者也可能在
+ * 瀏覽器設定裡關掉它。這裡把兩種失敗（同步丟出的例外與 rejected
+ * promise）都吞掉——沒有被處理的 rejection 會在主控台留下一行紅字，
+ * 而一個在考試中看到紅字的學生會以為考卷壞了。
+ */
+function enterFullscreen(): void {
+  if (typeof document === 'undefined') return;
+  const el = document.documentElement as HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void> | void;
+  };
+  try {
+    const p = el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen?.();
+    void Promise.resolve(p).catch(() => {});
+  } catch {
+    /* 進不去就算了，考試照樣進行 */
+  }
 }
 
 function mmss(sec: number): string {

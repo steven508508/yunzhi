@@ -2637,3 +2637,51 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-ability__head .yz-rate { grid-template-columns: 42px; }
   .yz-ability__head .yz-rate__bar { display: none; }
 }
+
+/* ── 考試行為 ──────────────────────────────────────────────────
+   切換分頁與離開全螢幕的記錄。
+
+   這一段的視覺約束比別處更嚴：**它不可以看起來像一個指控。**
+   紅色的標籤、警示的底色、驚嘆號的圖示，全部沒有——那些東西會讓
+   老師在讀到數字之前就先有了結論，而系統沒有結論（理由在
+   schema.prisma 的 ProctorEvent 註解）。硃砂只用在一個地方：
+   「切走之後沒有回來」，因為那一種的長度量不到，不標的話它在
+   畫面上看起來像 0 秒。 */
+
+/* 學生的時間軸。摺疊起來的清單，一位一塊。 */
+.yz-proctor__one { margin-top: 14px; }
+.yz-proctor__one:first-of-type { margin-top: 18px; }
+
+/* 摺疊標題右邊那一串數字。與姓名同一行、字級小一級——
+   姓名是這一列的主體，數字是它的註腳。 */
+.yz-proctor__sum {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「與全班的差別」。一句可以驗證的比較句，不是一個標籤——
+   所以它是文字，沒有邊框也沒有底色。 */
+.yz-proctor__why {
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  line-height: var(--lh-ui);
+  color: var(--ink-2);
+  border-left: 2px solid var(--rule);
+  padding-left: 8px;
+}
+
+/* 作廢的入口。放在時間軸底下、用 quiet 樣式：老師要先看完記錄
+   再決定，而一顆擺在上面的按鈕等於在建議他按下去。 */
+.yz-proctor__act {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--rule-2);
+}
+
+@media (max-width: 620px) {
+  /* 摘要那一串在手機上會折成三四行。讓它自己斷，不要撐開表格。 */
+  .yz-proctor__sum { line-height: 1.7; }
+}

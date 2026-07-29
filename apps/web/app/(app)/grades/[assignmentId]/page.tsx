@@ -276,6 +276,11 @@ export default async function AssignmentGradesPage({
             {/* 「這份任務派給了誰」在另一頁上，而這一頁只查得到動過的人。
                 「有人說沒收到」時要從那一頁查起，所以連結一定要在。 */}
             　·　<Link href={`/assignments/${assignmentId}`}>收件名單與進行中的作答</Link>
+            {/* 考試行為（切換分頁、離開全螢幕）在另一頁。這一頁講的是
+                分數，而那一頁講的是過程——放在同一頁會讓「這位學生
+                切走了 14 次」與他的分數並排出現，而那個並排本身就是
+                一種暗示。系統不做暗示，判斷是老師的事。 */}
+            　·　<Link href={`/assignments/${assignmentId}/proctor`}>考試行為記錄</Link>
           </p>
         </div>
 
