@@ -635,6 +635,33 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
    而黏在一起的兩顆按鈕裡有一顆是破壞性的。 */
 .yz-rowacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 
+/* 科目代碼、題號這類「機器讀的字串」。與旁邊給人看的名稱區分開，
+   免得有人以為那一欄也可以編輯。等寬＋沉底色，不用顏色。 */
+.yz-code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px; letter-spacing: .02em;
+  padding: 1px 5px;
+  background: var(--paper-sunk); border: 1px solid var(--rule-2);
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+}
+
+/* 「選兩個下拉再按一顆鈕」的指派列（班級頁的授課老師與導師）。
+   欄位仍然是 `SelectField`（標籤、id、aria 都接好了），這裡只負責
+   把它們排成一列：`align-items: flex-end` 讓按鈕落在欄位的基線上，
+   而不是被標籤那一行往上推。
+
+   窄畫面上換行而不是橫向捲動——這一區在平板上會被用到（老師在
+   教室裡開班級頁），而橫向捲動會把最右邊那顆按鈕藏起來。 */
+.yz-assign {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: flex-end;
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid var(--rule-2);
+}
+/* 欄位在表單裡靠 margin-bottom 分行，排成一列時那個間距變成錯位。 */
+.yz-assign .yz-field { margin-bottom: 0; min-width: 12em; }
+.yz-assign .yz-btn { margin-bottom: 1px; }
+
 /* ── 收合區塊 ─────────────────────────────────────────────────
    已移出的學生、已作廢的作答——**必須看得到，但不該每天佔著版面**。
    看不到就復原不了（那正是這一輪在清的「有入口沒出口」），

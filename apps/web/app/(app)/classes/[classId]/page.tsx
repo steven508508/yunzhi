@@ -5,12 +5,14 @@ import { isHomeroomOf } from '@/lib/auth';
 import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
+import { assignableStaff, classHomerooms, classSubjectTeachers } from '@/lib/teaching';
 import { Denied, Empty, Note } from '@/components/Feedback';
 import { Table } from '@/components/Table';
 import ConsentButton from './ConsentButton';
 import { LeaveClass, RejoinClass } from './Membership';
 import { ResetClass, ResetOne } from './ResetPassword';
 import RosterImport from './RosterImport';
+import Teachers from './Teachers';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,6 +87,24 @@ export default async function ClassPage({
     });
 
     const waiting = members.filter((m) => !m.user.consentAt).length;
+
+    // 授課老師與導師只有管理員動得了（見 lib/teaching.ts 的檔頭：
+    // 指派發出去的是權限，不是排課表）。所以不是管理員的話連查都不查
+    // ——多四次查詢換一個他看不到的區塊，而班級頁是每天都會開的頁面。
+    const [subjectTeachers, homerooms, staffPool, activeSubjects] = isAdmin
+      ? await Promise.all([
+          classSubjectTeachers(classId),
+          classHomerooms(classId),
+          assignableStaff(),
+          // 只列啟用中的科目：停用的科目指派了也選不到，
+          // 而伺服器端本來就會擋（見 lib/teaching.ts 的 loadTargets）。
+          prisma.subject.findMany({
+            where: { active: true },
+            orderBy: { order: 'asc' },
+            select: { id: true, name: true },
+          }),
+        ])
+      : [null, null, null, null];
 
     return (
       <main className="yz-panel">
@@ -226,6 +246,40 @@ export default async function ClassPage({
               />
             </div>
           </details>
+        )}
+
+        {/* 授課老師排在名冊之後：開一個班的順序就是「先有學生，
+            再決定誰教他們」，而且指派時要選的科目與人都與名冊無關，
+            混在名冊表格旁邊只會讓每天在看名冊的人多掃過一區。 */}
+        {subjectTeachers && homerooms && staffPool && activeSubjects && (
+          <Teachers
+            classId={classId}
+            className={klass.name}
+            subjects={activeSubjects}
+            candidates={staffPool.map((s) => ({
+              id: s.id,
+              displayName: s.displayName,
+              username: s.username,
+            }))}
+            teachers={subjectTeachers.map((t) => ({
+              id: t.id,
+              subjectId: t.subjectId,
+              subjectName: t.subject.name,
+              subjectActive: t.subject.active,
+              userId: t.userId,
+              teacherName: t.user.displayName,
+              teacherUsername: t.user.username,
+              teacherActive: t.user.status === 'ACTIVE',
+              isPrimary: t.isPrimary,
+            }))}
+            homerooms={homerooms.map((h) => ({
+              id: h.id,
+              userId: h.userId,
+              teacherName: h.user.displayName,
+              teacherUsername: h.user.username,
+              teacherActive: h.user.status === 'ACTIVE',
+            }))}
+          />
         )}
 
         {/* 整班重設密碼擺在最下面，而且與名冊之間隔著一段。

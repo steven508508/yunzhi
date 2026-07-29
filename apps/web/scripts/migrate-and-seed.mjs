@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import { tenantScoped } from '../lib/prismaClient.mjs';
 import { withoutTenantScope } from '../lib/tenantContext.mjs';
+import { seedStandardSubjects } from '../lib/subjects.mjs';
 import bcrypt from 'bcryptjs';
 
 const SCHEMA = 'packages/db/schema.prisma';
@@ -59,6 +60,23 @@ async function mainScoped() {
         },
       });
       console.log(`  建立學年度：${yearName}`);
+    }
+
+    // 學測的 13 個標準科目。
+    //
+    // 這不是示範資料，是**安裝的一部分**：沒有科目就匯不了題、建不了
+    // 卷子、開不了知識點——`/import/new` 的科目下拉是空的，`/papers`
+    // 按「新增卷子」直接失敗。也就是說少了這一段，系統裝起來就是
+    // 一條死路，而畫面上沒有任何地方說得出原因。
+    //
+    // 每一家補習班的學測考科都一樣，所以它不該是人工作業。
+    // 冪等靠「先查再補」（見 lib/subjects.mjs）——升級重跑不會變成 26 筆，
+    // 也不會把管理員改過的科目名稱覆蓋回標準值。
+    const seeded = await seedStandardSubjects(prisma, tenant.id);
+    if (seeded.created.length > 0) {
+      console.log(`  建立科目 ${seeded.created.length} 筆：${seeded.created.join('、')}`);
+    } else {
+      console.log(`  科目已存在：${seeded.existing} 筆`);
     }
 
     // 初始管理員。只在不存在時建立 —— 改 .env 不會覆蓋既有帳號，

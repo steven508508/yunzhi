@@ -380,8 +380,12 @@ export async function applyRoster(
  *
  * 一次抓兩倍的量，是因為抽樣會丟掉落在 31 的倍數之外的位元組
  * （見那邊的註解），一次抓足就不必回頭再要。
+ *
+ * 教職員帳號（`lib/staff.ts`）也用這一支。**不要在那邊再寫一個**：
+ * 兩份實作遲早會分岐，而分岐的那一天，管理員會發現老師的初始密碼
+ * 與學生的長得不一樣，然後開始懷疑其中一邊是壞的。
  */
-function newPassword(): string {
+export function newPassword(): string {
   return oneTimePassword(() => randomBytes(OTP_LENGTH * 2));
 }
 

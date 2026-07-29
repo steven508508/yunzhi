@@ -197,6 +197,40 @@ export default async function HomePage() {
       },
     });
 
+    /**
+     * 卡在「進行中」而其實已經寫不進去的作答。
+     *
+     * # 為什麼這一項一定要主動出現
+     *
+     * 學生寫到一半關掉分頁、筆電沒電、網路斷了而且沒有再回來——
+     * 時間到之後那一份還掛在 IN_PROGRESS。伺服器不收他的答案了，
+     * 但也沒有人按下交卷，所以**它永遠不會被計分**。
+     *
+     * 而三個畫面都看不到他：學生的清單上作答次數已經用完（沒有按鈕），
+     * 老師的成績列表只查已交卷的（這個人整個不出現，看起來跟沒來考
+     * 一模一樣），班級統計把他當成缺考。他寫過的東西就停在那裡。
+     *
+     * **伺服器沒有排程自動收卷**，而那是刻意的：收卷會把狀態改成
+     * 不可逆的 SUBMITTED，那個決定該由人按下去。代價是必須有人知道
+     * 有這件事要做——所以它出現在這裡，而不是等某位老師剛好點進
+     * 那一份任務的「未完成的作答」區塊才發現。
+     *
+     * 200 人的考試裡這幾乎一定會發生至少一次。
+     */
+    const now = new Date();
+    const strandedAttempts = await prisma.attempt.count({
+      where: {
+        status: 'IN_PROGRESS',
+        assignment: gradeScope,
+        // 「已經寫不進去」的兩種：時限到了，或者截止了而且不收遲交。
+        // 還在計時的不算——那些人正在考試。
+        OR: [
+          { expiresAt: { lt: now } },
+          { assignment: { allowLate: false, dueAt: { lt: now } } },
+        ],
+      },
+    });
+
     // 管理員專屬的兩項：沒有它們，後面每一步都做不下去。
     const [years, pendingConsent] = admin
       ? await Promise.all([
@@ -226,6 +260,16 @@ export default async function HomePage() {
         why: '班級是派任務、看成績、算能力分析的單位。學生要先在某個班裡，才收得到任何東西。',
         href: '/classes',
         label: '開一個班',
+        act: true,
+      });
+    }
+    if (strandedAttempts > 0) {
+      todo.push({
+        n: strandedAttempts,
+        what: '份作答卡在「進行中」',
+        why: '這些學生的時間已經到了，但沒有人按下交卷（多半是斷線或關掉分頁）。系統不會自動收——收卷是不可逆的，要由你決定。在他沒被收掉之前，成績列表上看不到這個人，班級統計也把他當成缺考。',
+        href: '/grades',
+        label: '去結算',
         act: true,
       });
     }

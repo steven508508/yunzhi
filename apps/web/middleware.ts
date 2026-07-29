@@ -10,7 +10,25 @@ import { NextRequest, NextResponse } from 'next/server';
  * 也就是說 middleware 只負責「沒有 cookie 就導去登入」這件便宜的事，
  * 「cookie 有效嗎」是後面的事。
  */
-const PUBLIC = ['/login', '/api/auth/login', '/api/healthz', '/api/readyz'];
+/**
+ * 不需要登入的路徑。
+ *
+ * `/api/version` 在這裡的理由與其他四個不同，值得寫下來：**部署腳本
+ * 靠它判斷現在跑的是哪一版**（`upgrade.sh`、`rollback.sh`、
+ * `ubuntu-install.sh` 都 curl 它），而腳本沒有 session cookie。
+ * 少了這一行，那三支拿到的是 401、把版本印成 `unknown`，
+ * 而回滾手冊第一句話就是「回滾之前先看 /api/version 確認版本號」。
+ * 那是一個在最需要它正確的時候安靜失效的東西。
+ *
+ * 它只吐版本號與建置時間，沒有任何租戶資料。
+ */
+const PUBLIC = [
+  '/login',
+  '/api/auth/login',
+  '/api/healthz',
+  '/api/readyz',
+  '/api/version',
+];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

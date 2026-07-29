@@ -60,9 +60,18 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: '/grades', label: '成績', roles: STAFF },
   { href: '/classes', label: '班級', roles: STAFF },
   { href: '/knowledge', label: '知識點', roles: STAFF },
-  // 學年度排在最後而且只有管理員看得到：它一年只碰一兩次，
-  // 但沒有它就一個班都建不了，所以不能只留在資料庫裡。
+  // 這三項排在最後而且只有管理員看得到：它們一年只碰一兩次，
+  // 但少了任何一項，前面那幾項就都動不了，所以不能只留在資料庫裡。
+  //
+  //   學年度  沒有它就一個班都建不了
+  //   科目    沒有它就匯不了題、也建不了卷子
+  //   教職員  沒有它就只有安裝時那一個管理員帳號，老師連登入都沒有
+  //
+  // 順序照「裝好之後要照著做的順序」排，而不是照字面：先有學年度與
+  // 科目，才輪得到把老師放進去。
   { href: '/settings/years', label: '學年度', roles: ADMIN },
+  { href: '/settings/subjects', label: '科目', roles: ADMIN },
+  { href: '/settings/staff', label: '教職員', roles: ADMIN },
 ];
 
 /** 這個角色的導覽列。在伺服器端呼叫，client 只會拿到他該看的那幾項。 */
