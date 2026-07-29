@@ -84,6 +84,7 @@ fi
 need_root
 need_cmd nginx || die "找不到 nginx。"
 info "nginx $(nginx_version)"
+# shellcheck disable=SC2015  # 兩側都是 info()，必定回 0，只是二選一的訊息
 has_ipv6 && info "IPv6 已啟用" || info "IPv6 未啟用，設定中的 listen [::] 會自動註解"
 
 section "檢查設定"

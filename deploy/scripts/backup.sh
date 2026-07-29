@@ -166,6 +166,7 @@ if [[ -n "${BACKUP_REMOTE_ENDPOINT:-}" ]] && [[ -n "${BACKUP_REMOTE_BUCKET:-}" ]
   info "複製到異地…"
   if command -v mc >/dev/null 2>&1; then
     mc alias set yzremote "${BACKUP_REMOTE_ENDPOINT}" "${BACKUP_REMOTE_ACCESS_KEY}" "${BACKUP_REMOTE_SECRET_KEY}" >/dev/null 2>&1
+    # shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，warn 不會被誤觸發
     mc cp --quiet "${ARCHIVE}" "yzremote/${BACKUP_REMOTE_BUCKET}/" \
       && mc cp --quiet "${ARCHIVE}.sha256" "yzremote/${BACKUP_REMOTE_BUCKET}/" \
       && ok "異地複製完成" || warn "異地複製失敗，本機備份仍然有效。"

@@ -330,6 +330,7 @@ YZ_LOG_DIR=${LOG_DIR}
 EOF
 record file /etc/default/yunzhi
 
+# shellcheck disable=SC2015  # 只在 install 成功時記錄；兩者皆非必要，失敗一律容忍
 install -m 644 "${YZ_ROOT}/deploy/logrotate/yunzhi" /etc/logrotate.d/yunzhi 2>/dev/null && record file /etc/logrotate.d/yunzhi || true
 
 systemctl daemon-reload

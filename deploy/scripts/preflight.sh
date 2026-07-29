@@ -133,9 +133,15 @@ port_in_use() {
 # 這套系統。維護老師的合理反應是去把它停掉，於是補習班在營業時間
 # 斷線一次，只為了改一行設定。
 port_is_ours() {
-  local port="$1" name
+  local port="$1" name names
   command -v docker >/dev/null 2>&1 || return 1
-  for name in $(docker ps --filter 'name=yunzhi' --format '{{.Names}}' 2>/dev/null); do
+  # `|| true` 的理由見 ubuntu-install.sh 的同名函式：docker 裝了但
+  # daemon 沒起來時，$( ) 子 shell 裡的 ERR trap 會印出誤導人的
+  # 「腳本失敗」。這支腳本目前把 ERR trap 關掉了所以看不到，
+  # 但兩份要一致 —— 哪天有人把 trap 加回來，不該再踩一次。
+  names="$(docker ps --filter 'name=yunzhi' --format '{{.Names}}' 2>/dev/null || true)"
+  # shellcheck disable=SC2086  # 容器名稱不含空白，這裡要的就是斷詞
+  for name in ${names}; do
     docker port "${name}" 2>/dev/null | grep -qE ":${port}\$" && return 0
   done
   return 1
@@ -173,10 +179,6 @@ if [[ "${_proxy_mode}" == "external" ]]; then
     ok "連接埠 ${_bind_port} 可用（供 nginx 轉發）"
   fi
 
-  _bind_addr="$(grep -E '^WEB_BIND=' "${YZ_ROOT}/.env" 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo 127.0.0.1)"
-  if [[ "${_bind_addr}" == "0.0.0.0" ]]; then
-    check_fail "WEB_BIND=0.0.0.0 會讓應用直接暴露在網路上，繞過 nginx 的 TLS 與速率限制。請改為 127.0.0.1。"
-  fi
 else
   for port in 80 443; do
     if port_is_ours "${port}"; then
@@ -244,6 +246,7 @@ if [[ "${MODE}" == "docker" ]]; then
     # 開機自動啟動。少了它，機房停電復電之後補習班早上開門是關的，
     # 而且 docker ps 一個容器都沒有、日誌裡沒有任何錯誤。
     if command -v systemctl >/dev/null 2>&1; then
+      # shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，check_warn 不會被誤觸發
       systemctl is-enabled --quiet docker.service 2>/dev/null \
         && ok "docker.service 開機自動啟動" \
         || check_warn "docker.service 沒有設為開機啟動，重開機後整套系統不會回來：sudo systemctl enable docker"
@@ -252,15 +255,39 @@ if [[ "${MODE}" == "docker" ]]; then
     check_fail "未安裝 Docker。全新的 Ubuntu 請執行：sudo ./deploy/scripts/ubuntu-install.sh（它會用 Docker 官方 apt 儲存庫安裝，並處理群組、防火牆與開機啟動）"
   fi
 else
-  command -v node >/dev/null 2>&1 && {
-    nv="$(node -v | tr -d 'v' | cut -d. -f1)"
-    (( nv >= 22 )) && ok "Node.js $(node -v)" || check_fail "Node.js $(node -v) 過舊，需要 22 以上。"
-  } || check_fail "未安裝 Node.js 22+"
-  command -v psql >/dev/null 2>&1 && ok "PostgreSQL client" || check_fail "未安裝 postgresql-client"
-  command -v python3 >/dev/null 2>&1 && {
-    pv="$(python3 -c 'import sys;print(sys.version_info[1])')"
-    (( pv >= 11 )) && ok "Python 3.${pv}" || check_fail "Python 3.${pv} 過舊，需要 3.11 以上。"
-  } || check_fail "未安裝 Python 3.11+"
+  # 這三項刻意寫成 if／else 而不是 `A && { … } || C`。
+  #
+  # 後者能成立只因為 check_fail 的最後一行是賦值、剛好回 0；哪天有人
+  # 讓它回非零，「版本過舊」就會**連帶**觸發「未安裝」，而使用者看到的是
+  # 兩行互相矛盾的訊息：node 明明裝了，卻被告知沒裝。這種相依不該存在
+  # 於兩個檔案之間。
+  if command -v node >/dev/null 2>&1; then
+    nv="$(node -v 2>/dev/null | tr -d 'v' | cut -d. -f1)"
+    if (( ${nv:-0} >= 22 )); then
+      ok "Node.js $(node -v)"
+    else
+      check_fail "Node.js $(node -v) 過舊，需要 22 以上。"
+    fi
+  else
+    check_fail "未安裝 Node.js 22+"
+  fi
+
+  if command -v psql >/dev/null 2>&1; then
+    ok "PostgreSQL client"
+  else
+    check_fail "未安裝 postgresql-client"
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    pv="$(python3 -c 'import sys;print(sys.version_info[1])' 2>/dev/null)"
+    if (( ${pv:-0} >= 11 )); then
+      ok "Python 3.${pv}"
+    else
+      check_fail "Python 3.${pv:-?} 過舊，需要 3.11 以上。"
+    fi
+  else
+    check_fail "未安裝 Python 3.11+"
+  fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -376,6 +403,26 @@ if [[ -f "${YZ_ROOT}/.env" ]]; then
       check_fail "TLS_MODE 與 TLS_DIRECTIVE 不一致。執行 ./deploy/scripts/render-caddy.sh 修正（安裝腳本會自動跑，手動改過 .env 才會出現這一項）。"
     fi
   fi
+
+  # WEB_BIND 決定 web 容器的連接埠**綁在哪一個位址**，而 compose 是
+  # 無條件發布它的（`${WEB_BIND:-127.0.0.1}:${WEB_BIND_PORT:-3000}:3000`，
+  # web 服務沒有 profile）。所以這一項與 PROXY_MODE 無關 ——
+  # 綁在 0.0.0.0 就是把應用的 HTTP 埠直接開在網際網路上：
+  # 明文、沒有 Caddy 的 HSTS 與安全標頭、沒有速率限制，
+  # 而網站本身仍然從 https:// 正常打得開，所以不會有人發現。
+  #
+  # **本來這一項只在 PROXY_MODE=external 時檢查**，但預設的 caddy 模式
+  # 才是絕大多數人用的那一條路，漏掉的正好是會出事的那一邊。
+  _bind_addr="${WEB_BIND:-127.0.0.1}"
+  case "${_bind_addr}" in
+    127.0.0.1|localhost|::1|'') ok "WEB_BIND=${_bind_addr:-（空，取預設 127.0.0.1）}，應用只聽本機" ;;
+    0.0.0.0|'*'|'::')
+      check_fail "WEB_BIND=${_bind_addr} 會把應用的 HTTP 埠 ${WEB_BIND_PORT:-3000} 直接開在網路上，繞過 TLS、安全標頭與速率限制。請改為 127.0.0.1。"
+      ;;
+    *)
+      check_warn "WEB_BIND=${_bind_addr} 不是回送位址。請確認這個位址只有反向代理到得了。"
+      ;;
+  esac
 
   if [[ "${AI_PROVIDER:-mock}" != "mock" ]] && [[ -z "${AI_API_KEY:-}" ]]; then
     check_fail "AI_PROVIDER=${AI_PROVIDER} 需要 AI_API_KEY。僅驗證安裝時可先設為 mock。"

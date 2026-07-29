@@ -662,10 +662,16 @@ check('文件與腳本裡提到的每一支腳本都真的存在', () => {
     ...allShellScripts(),
   ].filter((f) => existsSync(join(ROOT, f)));
 
+  // 副檔名要含 .mjs 與 .py，不是只有 .sh。
+  //
+  // tools/ 底下一半的工具不是 shell（install-dryrun.sh、rls-check.mjs、
+  // ai-preflight.py 混在一起），而文件是照著功能寫的、不會照副檔名分。
+  // 只掃 .sh 的話，「文件教人跑一支不存在的 .mjs」這一類錯誤剛好是
+  // 檢查不到的那一半 —— 而使用者得到的同樣是 No such file or directory。
   const missing = new Set();
   for (const f of sources) {
     const text = read(f);
-    for (const m of text.matchAll(/(?:deploy\/scripts|tools)\/([a-z0-9-]+\.sh)/g)) {
+    for (const m of text.matchAll(/(?:deploy\/scripts|tools)\/([a-z0-9-]+\.(?:sh|mjs|py))/g)) {
       const rel = m[0];
       if (!existsSync(join(ROOT, rel))) missing.add(`${rel}（在 ${f} 被提到）`);
     }
@@ -703,7 +709,9 @@ check('文件裡示範的每一個腳本參數，腳本真的認得', () => {
 
   const bad = [];
   for (const f of docs) {
-    for (const m of read(f).matchAll(/(deploy\/scripts\/[a-z0-9-]+\.sh)((?:\s+--[a-z][a-z-]*)+)/g)) {
+    // tools/ 也要含進來：乾跑檢查（tools/install-dryrun.sh）是文件教的
+    // 第一個指令，寫錯參數的話使用者連機器能不能裝都還沒問到就被擋下。
+    for (const m of read(f).matchAll(/((?:deploy\/scripts|tools)\/[a-z0-9-]+\.sh)((?:\s+--[a-z][a-z-]*)+)/g)) {
       const script = m[1];
       if (!existsSync(join(ROOT, script))) continue; // 上一項會抓
       const flags = knownFlags(script);

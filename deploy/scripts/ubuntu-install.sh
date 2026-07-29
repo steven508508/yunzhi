@@ -59,8 +59,19 @@ step() { STEP=$((STEP + 1)); section "${STEP}／${TOTAL_STEPS}  $*"; }
 
 FAILURES=0
 WARNINGS=0
+
+# 警告要留一份副本，最後再列一次。
+#
+# **理由是這支腳本會印超過一個螢幕的東西。** 建置映像那一段動輒幾分鐘、
+# 幾百行輸出，而「DOCKER-USER 規則未生效」或「設定時區失敗」是在那之前
+# 印的。維護老師回到終端機時看到的是最後一頁 ——「安裝完成」的方框 ——
+# 於是一台防火牆沒設好、或考試時間會差八小時的機器，就這樣上線了。
+#
+# 需求檢查那一關擋的是「裝不起來」，這一份留的是「裝起來了，但有事
+# 要處理」。後者沒有任何其他機制會再提起。
+WARN_LOG=()
 req_fail() { err "$*"; FAILURES=$((FAILURES + 1)); }
-req_warn() { warn "$*"; WARNINGS=$((WARNINGS + 1)); }
+req_warn() { warn "$*"; WARNINGS=$((WARNINGS + 1)); WARN_LOG+=("$*"); }
 
 # ════════════════════════════════════════════════════════════════
 step "服務的擁有者"
@@ -292,9 +303,25 @@ port_holder() {
 # 教的正常做法）會被自己擋下來，訊息是「連接埠 80 已被佔用」——
 # 而佔用它的正是這套系統。維護老師的合理反應是去把它停掉。
 port_is_ours() {
-  local port="$1" name
+  local port="$1" name names
   command -v docker >/dev/null 2>&1 || return 1
-  for name in $(docker ps --filter 'name=yunzhi' --format '{{.Names}}' 2>/dev/null); do
+
+  # **`|| true` 不能省，而且要先存進變數。**
+  #
+  # 「docker 裝了、但 daemon 沒起來」是重跑安裝時最常見的狀態
+  # （上一次跑到一半失敗、或機器剛重開）。這時 docker ps 回非零，
+  # 而 `$( )` 是子 shell —— 繼承來的 ERR trap 在裡面觸發，印出
+  #     ✗ 腳本在第 N 行失敗（結束碼 1）
+  #     ✗ 指令：docker ps --filter 'name=yunzhi' …
+  # 然後 trap 裡的 exit 只結束那個子 shell，外層若無其事地繼續。
+  #
+  # 結果是畫面上出現兩行紅色的「腳本失敗」，夾在正常的檢查結果中間，
+  # 而安裝其實好好的。維護老師看到那兩行的合理反應是按 Ctrl-C。
+  names="$(docker ps --filter 'name=yunzhi' --format '{{.Names}}' 2>/dev/null || true)"
+
+  # 容器名稱不含空白，這裡要的就是斷詞。
+  # shellcheck disable=SC2086
+  for name in ${names}; do
     docker port "${name}" 2>/dev/null | grep -qE ":${port}\$" && return 0
   done
   return 1
@@ -506,6 +533,7 @@ for unit in docker.service containerd.service; do
   if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
     ok "${unit} 已設為開機啟動"
   else
+    # shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，req_warn 不會被誤觸發
     systemctl enable --now "${unit}" >/dev/null 2>&1 \
       && ok "${unit} 已設為開機啟動" \
       || req_warn "無法 enable ${unit}，重開機後可能不會自動啟動。"
@@ -628,7 +656,17 @@ else
 
   # ── DOCKER-USER：讓 ufw 的「拒絕」對容器也算數 ──
   if (( LOCK_DOCKER_PORTS )); then
-    PUBIF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)"
+    # **要抓 `dev` 後面那個字，不能數第幾個欄位。**
+    # `default via 10.0.0.1 dev eth0 …` 的介面確實在第 5 欄，但
+    # `default dev tun0 scope link`（PPP、WireGuard、某些雲主機）
+    # 的第 5 欄是 "link"。寫成 `! -i link -j RETURN` 之後 ufw reload
+    # 會失敗，於是走進下面的還原分支 —— 結果是防火牆規則靜默地沒套上，
+    # 而使用者看到的訊息是「規則套用失敗」，看不出是介面名稱抓錯。
+    #
+    # `-o` 讓多重路徑（nexthop 分行）的 default 也擠成一行，
+    # 否則 awk 會讀到只有 "default" 三個字的第一行而抓不到任何東西。
+    PUBIF="$(ip -o route show default 2>/dev/null \
+      | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
     if [[ -z "${PUBIF}" ]]; then
       req_warn "找不到預設路由的網路介面，跳過 DOCKER-USER 規則。"
     else
@@ -761,6 +799,7 @@ if [[ -f "${UNIT_SRC}" ]]; then
       -e "s|__YZ_GROUP__|${TARGET_GROUP}|g" \
       "${UNIT_SRC}" >"${UNIT_DST}"
   systemctl daemon-reload
+  # shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，req_warn 不會被誤觸發
   systemctl enable yunzhi-docker.service >/dev/null 2>&1 \
     && ok "yunzhi-docker.service 已設為開機啟動" \
     || req_warn "無法 enable yunzhi-docker.service。"
@@ -877,6 +916,16 @@ cat <<EOF
   回滾        ./deploy/scripts/rollback.sh
 
 EOF
+
+if ((${#WARN_LOG[@]})); then
+  warn "安裝過程中有 ${#WARN_LOG[@]} 項警告，捲上去之前先看這裡："
+  for _w in "${WARN_LOG[@]}"; do
+    dim "· ${_w}"
+  done
+  echo
+  dim "這些不會擋住系統啟動，但每一項都會在某一天變成故障。"
+  echo
+fi
 
 warn "接下來請務必做這三件事："
 dim "1. 重新登入一次（exit 再 ssh 進來），docker 群組才會對你的 shell 生效。"

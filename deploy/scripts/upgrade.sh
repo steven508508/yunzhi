@@ -68,6 +68,7 @@ if [[ "${active_exams}" == "1" ]]; then
   fi
 fi
 
+# shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，warn 不會被誤觸發
 "${YZ_SCRIPTS_DIR}/doctor.sh" >/dev/null 2>&1 \
   && ok "升級前系統健康" \
   || warn "升級前已有異常。建議先執行 ./deploy/scripts/doctor.sh 處理完再升級。"

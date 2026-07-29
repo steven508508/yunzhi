@@ -55,6 +55,7 @@ section "將要移除的項目"
 # 實際去查而不是印死表。印死表的清單會隨版本演進而失準，
 # 而失準的清單正是殘留物的來源。
 containers="$(docker ps -a --filter 'name=yunzhi' --format '{{.Names}}' 2>/dev/null || true)"
+# shellcheck disable=SC2015  # cd 失敗時要的就是空清單，不是中止移除流程
 compose_containers="$(cd "${YZ_ROOT}" && docker compose ps -aq 2>/dev/null || true)"
 volumes="$(docker volume ls --filter 'name=yunzhi' --format '{{.Name}}' 2>/dev/null || true)"
 networks="$(docker network ls --filter 'name=yunzhi' --format '{{.Name}}' 2>/dev/null || true)"

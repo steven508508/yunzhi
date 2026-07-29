@@ -50,7 +50,18 @@ if (( USE_LATEST )); then
   [[ -n "${ARCHIVE}" ]] || die "在 ${BACKUP_DIR} 找不到任何備份。"
 fi
 
-[[ -n "${ARCHIVE}" ]] || die "請指定備份檔，或用 --latest。可用備份：$(ls -1 "${BACKUP_DIR}" 2>/dev/null | head -5 | tr '\n' ' ')"
+# 提示裡要列**最新的**五份，而且只列真的能還原的檔案。
+#
+# 本來這裡是 `ls -1 | head -5`：檔名開頭是 yunzhi-YYYYMMDD，
+# 字典序等於時間由舊到新，於是保留三十天的機器上列出來的是**最舊的
+# 五份**（第一份還在的通常是一個月前）。而且 .sha256 沿檔也一起列進去，
+# 看起來像是可以拿來還原的檔案。要還原的人正處在最需要正確資訊的時刻。
+_recent_backups() {
+  find "${BACKUP_DIR}" -maxdepth 1 -name 'yunzhi-*.tar.gz*' ! -name '*.sha256' \
+    -type f -printf '%T@ %f\n' 2>/dev/null \
+    | sort -rn | head -5 | cut -d' ' -f2- | tr '\n' ' '
+}
+[[ -n "${ARCHIVE}" ]] || die "請指定備份檔，或用 --latest。最近的備份：$(_recent_backups)"
 [[ -f "${ARCHIVE}" ]] || die "找不到檔案：${ARCHIVE}"
 
 RESTORE_DB="${INTO_DB:-${POSTGRES_DB}}"
@@ -66,6 +77,7 @@ section "還原：$(basename "${ARCHIVE}")"
 # ── 校驗碼 ──────────────────────────────────────────────────────
 if [[ -f "${ARCHIVE}.sha256" ]]; then
   info "驗證校驗碼…"
+  # shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，不會誤判成校驗失敗
   ( cd "$(dirname "${ARCHIVE}")" && sha256sum -c "$(basename "${ARCHIVE}").sha256" >/dev/null 2>&1 ) \
     && ok "校驗碼相符" \
     || die "校驗碼不符，備份檔已損壞。不要用它還原。"
