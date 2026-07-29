@@ -947,6 +947,34 @@ check('PostgreSQL 映像帶得動初始化 SQL 要建的擴充功能', () => {
   }
 });
 
+check('sharp 還有 CVE 時，圖片最佳化必須是關的', () => {
+  // 這一項盯的是 next.config.mjs 的 `images: { unoptimized: true }`。
+  //
+  // 那一行是資安措施：next/image 的最佳化用 sharp 解碼，而 sharp
+  // 0.34.x 繼承 libvips 的四個 CVE（修在 0.35.0）。這個系統收學生
+  // 手機拍的題本照片，攻擊者控制的影像位元組是常態輸入。
+  //
+  // **會被關掉的方式不是有人蓄意改它**，是有人要用 <Image> 做圖片
+  // 縮放、發現不生效、把 unoptimized 拿掉、功能正常了、送出。
+  // 那一刻沒有任何錯誤訊息。所以這裡把它釘住。
+  const lock = JSON.parse(read('package-lock.json'));
+  const sharp = lock.packages?.['node_modules/sharp']?.version;
+  if (!sharp) return; // 沒裝 sharp 就沒有這個問題
+
+  const [maj, min] = sharp.split('.').map(Number);
+  const patched = maj > 0 || min >= 35;
+  if (patched) return; // 升上去了，這一項自動失效
+
+  const cfg = read('apps/web/next.config.mjs');
+  assert(
+    /images:\s*\{[^}]*unoptimized:\s*true/.test(cfg),
+    `sharp 是 ${sharp}（<0.35.0，有 libvips 的 CVE），` +
+      `但 next.config.mjs 沒有 images: { unoptimized: true }。\n` +
+      `       /_next/image 會把使用者上傳的影像餵進有漏洞的解碼器。\n` +
+      `       要嘛把這一行加回去，要嘛把 sharp 升到 0.35 以上。`,
+  );
+});
+
 check('容器映像都釘了版本，沒有 latest', () => {
   // `docker compose build --pull` 與 `docker pull` 在半年後跑一次，
   // latest 可能已經是下一個大版本。Postgres 大版本換掉之後資料目錄
