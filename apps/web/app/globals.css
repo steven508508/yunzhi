@@ -2554,3 +2554,86 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   margin: 14px 0 0;
   font-family: var(--font-ui); font-size: 12px; color: var(--ink-2);
 }
+
+/* ── 能力分析 ─────────────────────────────────────────────────
+   這一區只有兩種版面：一列一個知識點（學生看的，重點是那句「接下來
+   練什麼」），以及一張表（老師看的，重點是掃視全班）。表格沿用
+   .yz-table，掌握度的長條沿用 .yz-rate——那條線本來就是為了「掃得出
+   哪一段全班都不會」而做的，能力分析問的是同一件事。
+
+   **沒有圖表套件。** 這套系統部署在補習班機房的封閉網段，為了一條
+   3px 的線引入一個要下載的相依，是把一個離線安裝的問題換一個裝飾。 */
+
+/* 科目切換。用連結列而不是下拉：老師會來回切兩三科，而下拉是
+   「點開、找、點選」三個動作。 */
+.yz-ability__tabs {
+  display: flex; flex-wrap: wrap; gap: 14px;
+  margin: 0 0 18px; font-size: 12.5px;
+}
+.yz-ability__tab { padding-bottom: 2px; border-bottom: 2px solid transparent; }
+.yz-ability__tab--on { font-weight: 600; border-bottom-color: var(--ink); }
+
+.yz-ability__list { list-style: none; margin: 6px 0 0; padding: 0; }
+/* 一列一個知識點，之間只有髮絲線。卡片會讓每一列都像一個要處理的
+   東西，而這份清單本來就是「弱的排前面」——愈往下愈不必看。 */
+.yz-ability__item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-ability__item:first-child { border-top: 1px solid var(--rule); }
+
+.yz-ability__head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px;
+}
+.yz-ability__name { font-family: var(--font-doc); font-size: 14px; }
+.yz-ability__subject { font-size: 11px; color: var(--ink-3); }
+.yz-ability__count {
+  font-family: var(--font-num); font-size: 11.5px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.yz-ability__tag {
+  font-size: 10.5px; letter-spacing: .04em;
+  border: 1px solid var(--rule); padding: 0 4px; white-space: nowrap;
+}
+.yz-ability__tag.yz-warn { border-color: var(--mark); }
+
+/* 「接下來練什麼」。這是整頁真正要交付的東西，所以它是每一列的主體
+   而不是收在角落的補充說明——字級與內文一樣大，不打折。 */
+.yz-ability__step {
+  margin: 6px 0 0; font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink);
+}
+/* 卡住了：連續錯三題的那一種。它是唯一一種「再多練也沒用」的狀態，
+   所以是這一頁上唯一用到硃砂的地方。 */
+.yz-ability__step--stuck {
+  border-left: 2px solid var(--mark); padding-left: 8px; color: var(--mark);
+}
+.yz-ability__step--prereq { border-left: 2px solid var(--rule); padding-left: 8px; }
+.yz-ability__step--unknown { color: var(--ink-2); }
+
+.yz-ability__prereq {
+  margin: 4px 0 0; font-size: 11.5px; color: var(--ink-3);
+}
+
+/* 資料不足的那一批。**沒有掌握度、沒有長條**——只有名字與題數。
+   給一個看起來精確的小數，學生會照著它決定不用複習。 */
+.yz-ability__thin { list-style: none; margin: 6px 0 0; padding: 0; }
+.yz-ability__thin li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  padding: 5px 0; border-bottom: 1px solid var(--rule-2);
+  color: var(--ink-2);
+}
+
+/* 重建快照。放在頁尾、用 quiet 樣式：它是維運動作，不是每天要按的
+   東西，但需要它的那一刻正是「這一頁看起來壞掉了」的那一刻。 */
+.yz-ability__rebuild {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--rule-2);
+}
+.yz-ability__rebuild .yz-hint { flex: 1 1 260px; margin: 0; }
+
+@media (max-width: 620px) {
+  /* 手機上把掌握度那一條收掉，數字留著。一列裡塞三個資訊已經滿了，
+     而長條是第二層資訊——沒有它也讀得懂。 */
+  .yz-ability__head .yz-rate { grid-template-columns: 42px; }
+  .yz-ability__head .yz-rate__bar { display: none; }
+}

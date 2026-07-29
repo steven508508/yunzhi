@@ -339,9 +339,11 @@ export default async function ClassGradesPage({
         )}
 
         <Note tone="info">
-          <strong>這一頁還給不出「哪一個章節全班都不會」。</strong>
-          逐題答對率在單份任務的成績頁上算得出來，但要把它對到章節需要題目的知識點
-          標註，而那份圖譜目前還沒有資料。
+          <strong>「哪一個章節全班都不會」在另一頁。</strong>
+          這一張表是分數，而分數答不了那個問題——它跨越好幾份卷子，要把逐題對錯
+          對到知識點才算得出來。
+          <Link href={`/classes/${classId}/ability`}>這個班的能力分析</Link>
+          就是那一頁，那裡還有依題型（單選、多選、選填…）的表現。
         </Note>
       </main>
     );

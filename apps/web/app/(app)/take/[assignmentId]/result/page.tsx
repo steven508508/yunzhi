@@ -189,6 +189,16 @@ export default async function ResultPage({
             {view.late && <Note tone="warn">這一份是逾期交卷，老師看得到。</Note>}
             {view.autoSubmitted && <Note>這一份是時間到之後由系統自動交卷的。</Note>}
 
+            {/* 能力分析的入口。**這一頁回答的是「這一份我錯在哪」，
+                而看完之後學生心裡的下一個問題是「所以我接下來要幹嘛」**
+                ——那個問題要跨越好幾份卷子才答得出來，所以在另一頁。
+                入口放在這裡是因為導覽列沒有這一項（`lib/nav.ts` 是全系統
+                唯一一份角色對照表，不為了一個入口去動它）。 */}
+            <p className="yz-hint">
+              這一份之外，<Link href="/ability">我的能力分析</Link>
+              會把你所有考過的題目依章節整理，告訴你哪一個單元最弱、接下來該先練什麼。
+            </p>
+
             {level === 'SCORE_ONLY' ? (
               <div className="yz-card">
                 <h2 className="yz-card__title">逐題檢討還沒開放</h2>

@@ -27,6 +27,7 @@
  */
 import type { Prisma } from '@prisma/client';
 
+import { refreshAbilityAfterGrading, refreshAbilityForUser } from '@/lib/abilityDb';
 import { resolveRecipients, type Recipient } from '@/lib/assignment';
 import type { SessionUser } from '@/lib/auth';
 import { attemptStranded } from '@/lib/attemptClock.mjs';
@@ -302,6 +303,17 @@ export async function gradeAttemptById(
   );
 
   await prisma.$transaction(writes);
+
+  // 能力快照。**這裡剛剛才知道每一題的對錯，所以順手更新。**
+  //
+  // 重算而不是累加，所以老師改標準答案、送分、人工給分之後，快照會
+  // 跟著對——那三件事全部會走到這一行。
+  //
+  // `refreshAbilityAfterGrading` 自己吞掉所有例外（見 lib/abilityDb.ts），
+  // 理由與 `lib/attempt.ts` 的 `gradeOnSubmit` 完全相同：**交卷與計分
+  // 不能因為統計算不出來而失敗**。算不出快照的後果是能力分析少一格，
+  // 而且下一次計分或整批重建就補回來了。
+  await refreshAbilityAfterGrading(attempt.userId, source.map((s) => s.questionId));
 
   if (opts.audit !== false && opts.actorId) {
     await prisma.auditLog.create({
@@ -642,6 +654,15 @@ export async function voidAttempt(
     },
   });
 
+  // **作廢的作答不能留在能力分析裡。** `refreshAbility` 只讀
+  // SUBMITTED / GRADED 的作答，所以狀態改成 VOIDED 之後重算一次，
+  // 那一份的每一題就從掌握度裡退出去了。
+  //
+  // 不做的話，一份因為作弊而作廢的滿分卷會繼續把掌握度撐高，而畫面上
+  // 那是一個看起來完全正常的數字——分數已經抽掉了，能力分析沒有。
+  // 一樣吞掉錯誤：作廢本身已經成功，不能被統計拖回去。
+  await refreshAbilityForUser(attempt.user.id);
+
   return { attemptId: attempt.id, displayName: attempt.user.displayName, status: 'VOIDED' };
 }
 
@@ -702,6 +723,9 @@ export async function unvoidAttempt(
       } as Prisma.InputJsonValue,
     },
   });
+
+  // 撤銷作廢：那一份又算數了，掌握度要把它加回去。與作廢同一支。
+  await refreshAbilityForUser(attempt.user.id);
 
   return { attemptId: attempt.id, displayName: attempt.user.displayName, status: allowed.status };
 }

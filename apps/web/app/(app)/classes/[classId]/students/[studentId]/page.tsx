@@ -26,14 +26,21 @@
  * 做得到：每一份的日期、任務、科目、分數、班級平均、遲交與否，
  * 以及依科目分開的平均。這些全部是現成的資料，一次 group by。
  *
- * **做不到「哪些單元一直錯」**，而且要在畫面上誠實說。那需要同時
- * join `attempt_answers` 與 `question_knowledge_points`，
- * 而全 repo 沒有任何一處這樣查——知識點的標註本身還沒有資料。
- * 不寫出來的話，看的人會以為是這個學生沒有錯題。
+ * # 「哪些單元一直錯」
+ *
+ * 這一頁原本寫著做不到，理由是「要同時 join `attempt_answers` 與
+ * `question_knowledge_points`，而全 repo 沒有任何一處這樣查」。
+ * 現在有了（`lib/abilityDb.ts`），所以那一段換成真的分析。
+ *
+ * 但**前提沒有變**：知識點圖譜是老師自己建的，題目要標上知識點才對得到
+ * 章節。所以這一段有三種狀態，而且要分得出來——有分析、沒有分析因為
+ * 圖譜還沒建、沒有分析因為考過的題目沒標。三種的下一步完全不同，
+ * 都畫成空白的話，看的人會以為這個學生沒有錯題。
  */
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { abilityReadiness, studentSubjectAbility, SOLID, WEAK } from '@/lib/abilityDb';
 import { isHomeroomOf } from '@/lib/auth';
 import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
@@ -236,6 +243,25 @@ export default async function StudentPage({
       .sort((a, b) => b.n - a.n);
     type Sub = (typeof subjects)[number];
 
+    /**
+     * 章節（知識點）層級的狀況。
+     *
+     * **不依科目過濾**，與這一頁其他每一塊一致：上面的成績表也列出
+     * 這位學生所有科目的分數。這一頁的存取判定是「你帶不帶這個班」，
+     * 而不是「你教哪一科」——在同一頁裡讓兩塊用不同的規則，
+     * 遲早會有人以為其中一塊壞了。
+     *
+     * 可靠與不可靠分開放：資料不足的知識點**只給題數、不給掌握度**。
+     * 一個看起來精確的小數會被家長當成結論，而它背後可能只有兩題。
+     */
+    const [kp, readiness] = await Promise.all([
+      studentSubjectAbility(studentId),
+      abilityReadiness(),
+    ]);
+    const solidPoints = kp.filter((p) => p.reliable);
+    const thinPoints = kp.filter((p) => !p.reliable);
+    type Kp = (typeof kp)[number];
+
     return (
       <main className="yz-panel">
         <div className="yz-panel__head">
@@ -386,14 +412,100 @@ export default async function StudentPage({
           }
         />
 
-        {/* 做不到的事要寫出來。空白會被讀成「這個學生沒有錯題」，
-            而那與「系統算不出來」是完全不同的兩件事。 */}
-        <Note tone="info">
-          <strong>這一頁還給不出「哪些單元一直錯」。</strong>
-          逐題對錯有記，但要把它對到章節需要題目的知識點標註，
-          而那份圖譜目前還沒有資料。在它建起來之前，各題答對率請到
-          單份任務的成績頁看——那一頁算得出「這次哪一題全班最不會」。
-        </Note>
+        <h2 className="yz-card__title" style={{ marginTop: 30, marginBottom: 6 }}>
+          哪些單元一直錯
+        </h2>
+
+        {solidPoints.length === 0 && thinPoints.length === 0 ? (
+          // 空的時候要說得出卡在哪一關。三種情況的下一步完全不同，
+          // 而空白會被讀成「這個學生沒有錯題」。
+          <Empty
+            title="還算不出章節層級的分析"
+            hint={
+              readiness.points === 0
+                ? '要把逐題對錯對到章節，題目得先掛在知識點上，而目前全系統一個知識點都還沒有建。建知識點是老師的工時（一科大約 4 到 8 小時），建議先做一科試看看。'
+                : readiness.taggedQuestions === 0
+                  ? `已經有 ${readiness.points} 個知識點，但一題都還沒有標上去，所以對不到任何章節。到題庫逐題補標註，或重新匯入題本讓自動標註處理。`
+                  : `知識點與標註都有了，但這位學生還沒有算出快照——他考過的題目可能都還沒標到知識點，或者快照還沒重建過。到班級的能力分析頁按一次「重建快照」。`
+            }
+            action={
+              readiness.points === 0 ? (
+                <Link href="/knowledge">去建立知識點</Link>
+              ) : (
+                <Link href={`/classes/${classId}/ability`}>這個班的能力分析</Link>
+              )
+            }
+          />
+        ) : (
+          <>
+            <Table
+              caption={`${student.displayName}各知識點的掌握度`}
+              columns={[
+                { key: 'k', head: '知識點', cell: (p: Kp) => p.name },
+                { key: 's', head: '科目', cell: (p: Kp) => p.subjectName },
+                {
+                  key: 'm',
+                  head: '掌握度',
+                  numeric: true,
+                  cell: (p: Kp) => (
+                    <span className={p.mastery < WEAK ? 'yz-warn' : undefined}>
+                      {Math.round(p.mastery * 100)}%
+                    </span>
+                  ),
+                },
+                {
+                  key: 'c',
+                  head: '答對 / 作答',
+                  numeric: true,
+                  // 掌握度是算出來的，這一欄是數出來的。家長問「這個
+                  // 35% 怎麼來的」時，這是當場驗證得了的東西。
+                  cell: (p: Kp) => `${p.correct} / ${p.total}`,
+                },
+                {
+                  key: 'w',
+                  head: '狀況',
+                  cell: (p: Kp) =>
+                    p.streakWrong >= 3 ? (
+                      <span className="yz-warn">連續錯 {p.streakWrong} 題</span>
+                    ) : p.mastery >= SOLID ? (
+                      '穩'
+                    ) : p.mastery < WEAK ? (
+                      <span className="yz-warn">要補</span>
+                    ) : (
+                      ''
+                    ),
+                },
+              ]}
+              rows={solidPoints}
+              rowKey={(p) => p.id}
+              empty={
+                <Empty
+                  title="還沒有一個知識點累積到足夠的作答"
+                  hint="下面那幾個題數還太少，給不出可靠的掌握度。"
+                />
+              }
+            />
+            <p className="yz-hint" style={{ marginTop: 10 }}>
+              掌握度<strong>不是答對率</strong>：愈久以前的作答權重愈低（所以一個學期沒碰的
+              單元會往下掉），難度高的題目權重較高。低於 {Math.round(WEAK * 100)}% 算要補、
+              {Math.round(SOLID * 100)}% 以上算穩。全班的狀況在
+              <Link href={`/classes/${classId}/ability`}>這個班的能力分析</Link>。
+            </p>
+
+            {thinPoints.length > 0 && (
+              <Note tone="info">
+                另外 {thinPoints.length} 個知識點的作答太少（
+                {thinPoints
+                  .slice(0, 6)
+                  .map((p) => `${p.name} ${p.total} 題`)
+                  .join('、')}
+                {thinPoints.length > 6 && ' 等'}
+                ），<strong>刻意不給掌握度</strong>——兩三題算出來的小數看起來很精確，
+                但它站不住，而約談時被拿去當結論的正是那種數字。
+              </Note>
+            )}
+          </>
+        )}
       </main>
     );
   });

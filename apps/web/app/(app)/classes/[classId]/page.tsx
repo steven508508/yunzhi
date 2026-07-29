@@ -170,6 +170,10 @@ export default async function ClassPage({
             　·　<Link href="/classes">回到班級列表</Link>
             {' '}·{' '}
             <Link href={`/classes/${classId}/grades`}>這個班整學期的成績</Link>
+            {' '}·{' '}
+            {/* 成績回答「誰在退步」，能力分析回答「下一堂課要重講哪一個章節」。
+                兩個問題不同，資料來源也不同，所以是兩頁。 */}
+            <Link href={`/classes/${classId}/ability`}>能力分析</Link>
           </p>
         </div>
 
