@@ -9,22 +9,29 @@
 #   ./deploy/scripts/docker-install.sh --yes            # 不互動
 #   ./deploy/scripts/docker-install.sh --skip-preflight # 已確認過環境
 #   ./deploy/scripts/docker-install.sh --monitoring     # 一併啟用監控
+#   ./deploy/scripts/docker-install.sh --offline        # 離線包安裝（不建置、不拉取）
 
 # shellcheck source=lib/common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
 SKIP_PREFLIGHT=0
 WITH_MONITORING=0
+OFFLINE=0
+OFFLINE_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y) export YZ_ASSUME_YES=1; shift ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
     --monitoring) WITH_MONITORING=1; shift ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --offline) OFFLINE=1; shift ;;
+    --offline-dir) OFFLINE=1; OFFLINE_DIR="$2"; shift 2 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) die "不認得的參數：$1" ;;
   esac
 done
+
+OFFLINE_DIR="${OFFLINE_DIR:-${YZ_ROOT}/offline}"
 
 acquire_lock "docker-install"
 
@@ -61,6 +68,10 @@ else
   "${YZ_SCRIPTS_DIR}/gen-secrets.sh" >/dev/null
   ok "設定檔就緒"
 fi
+
+# TLS_MODE 與 TLS_DIRECTIVE 是同一件事的兩個變數，而只有後者是
+# Caddy 真正讀的。放在 load_env 之前，讓下面載進來的就是修正過的值。
+"${YZ_SCRIPTS_DIR}/render-caddy.sh"
 
 load_env
 require_env APP_DOMAIN APP_URL POSTGRES_PASSWORD REDIS_PASSWORD AUTH_SECRET S3_SECRET_KEY
@@ -102,12 +113,26 @@ fi
 #
 # 建不出來時容器仍然能跑（Docker 會自己建，backup 容器是 root），
 # 真正受影響的是宿主機上手動執行的 backup.sh，所以講清楚就好。
-if ! mkdir -p "${BACKUP_DIR:-${YZ_ROOT}/data/backups}" 2>/dev/null; then
-  warn "建不出備份目錄 ${BACKUP_DIR}（權限不足）。容器仍會正常備份，"
+_backup_dir="${BACKUP_DIR:-${YZ_ROOT}/data/backups}"
+if ! mkdir -p "${_backup_dir}" 2>/dev/null; then
+  warn "建不出備份目錄 ${_backup_dir}（權限不足）。容器仍會正常備份，"
   warn "但宿主機上直接執行 ./deploy/scripts/backup.sh 會失敗。要修的話："
-  dim "  sudo install -d -o \"\$(id -u)\" -g \"\$(id -g)\" '${BACKUP_DIR}'"
+  dim "  sudo install -d -o \"\$(id -u)\" -g \"\$(id -g)\" '${_backup_dir}'"
 fi
 
+# **每一個 bind mount 的宿主機目錄都要先建好。**
+#
+# Docker 對不存在的 bind 來源不會報錯 —— 它以 root:root 幫你建一個。
+# 這幾個目錄都在 .gitignore 裡（憑證與維護頁不進版控），所以全新
+# clone 上必然不存在，必然由 Docker 建成 root 的。之後：
+#
+#   · upgrade.sh 以一般使用者身分寫 deploy/caddy/maintenance/index.html
+#     → Permission denied。而那一步發生在「備份已做完、遷移還沒開始」，
+#       升級中斷在最尷尬的位置，訊息只有一行 cat: Permission denied。
+#   · TLS_MODE=custom 的人把憑證放進 deploy/caddy/certs 時同樣寫不進去。
+#
+# 先建好就沒有這些事。已存在的目錄不會被動到（冪等）。
+mkdir -p "${YZ_ROOT}/deploy/caddy/certs" "${YZ_ROOT}/deploy/caddy/maintenance"
 mkdir -p "${YZ_ROOT}/data/models"
 # AI 容器以 uid 10001 執行，而 bind mount 一律沿用宿主機的擁有者
 # （通常是執行安裝的那個人）。不放寬權限的話，字形對照快取
@@ -119,11 +144,25 @@ chmod 0777 "${YZ_ROOT}/data/models"
 section "3／7  建置映像"
 # ═══════════════════════════════════════════════════════════════
 
-info "建置中。第一次會下載基底映像，視網路可能需要 5 至 15 分鐘。"
-export YZ_ERROR_HINT="建置失敗常見原因：對外網路不通（離線環境請用 build-offline-bundle.sh）、或磁碟空間不足。"
-compose build --pull
-unset YZ_ERROR_HINT
-ok "映像建置完成"
+if (( OFFLINE )); then
+  # 離線包：映像是別台機器建好、docker save 出來的，這裡只載入。
+  # **不可以退回去建置** —— 封閉網段上 `docker compose build` 會在
+  # 拉基底映像時卡住好幾分鐘才逾時，而使用者以為安裝正在進行。
+  info "離線模式：從 ${OFFLINE_DIR} 載入映像。"
+  _arch="$(uname -m)"
+  export YZ_ERROR_HINT="載入失敗。請確認離線包已解開到 ${OFFLINE_DIR}，且是在**同架構**（${_arch}）的機器上打包的。"
+  "${YZ_SCRIPTS_DIR}/build-offline-bundle.sh" --load "${OFFLINE_DIR}"
+  unset YZ_ERROR_HINT
+  ok "映像載入完成"
+else
+  info "建置中。第一次會下載基底映像，視網路可能需要 5 至 15 分鐘。"
+  # Prisma 的查詢引擎在這一步從 binaries.prisma.sh 下載並烤進映像，
+  # 它是執行期的硬相依 —— 連不到就沒有可用的映像，不是「少了某個功能」。
+  export YZ_ERROR_HINT="建置失敗常見原因：連不到 Docker Hub 或 binaries.prisma.sh、記憶體不足（next build 需要約 2GB）、或磁碟空間不足。封閉網段請改用離線包：在有網路的同架構機器上執行 ./deploy/scripts/build-offline-bundle.sh，再於此處 ./deploy/scripts/docker-install.sh --offline"
+  compose build --pull
+  unset YZ_ERROR_HINT
+  ok "映像建置完成"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 section "4／7  啟動基礎服務"

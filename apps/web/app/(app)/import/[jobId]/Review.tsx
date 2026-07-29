@@ -1,7 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MathText } from '@/components/MathText';
 import type { CandidateView } from '@/lib/candidates';
+import { hasMath } from '@/lib/math.mjs';
 
 /**
  * 題本匯入校對。
@@ -14,6 +16,20 @@ import type { CandidateView } from '@/lib/candidates';
  *  · 全部資料一次載入，切題不打 API（網路是熱點分享，往返很貴）
  *  · 變更累積在前端，定期批次送出
  *  · 右上角即時對照 20 分鐘目標
+ *
+ * # 數學式在這一頁是兩種東西
+ *
+ * 老師要在這裡確認「AI 抽出來的式子對不對」，而那需要同時看到兩樣：
+ *
+ *   **排出來的樣子**——拿去跟手上的題本比對。`$\ce{2H2 + O2 -> 2H2O}$`
+ *     這一串沒有辦法跟紙上的反應式比，排成 2H₂ + O₂ → 2H₂O 才能比。
+ *   **原始碼**——發現錯了要改的就是它。
+ *
+ * 所以可編輯的欄位裡放原始碼，底下多一條排好的預覽。**不可以反過來
+ * 把可編輯欄位換成排好的式子**：contentEditable 存回去的是
+ * `textContent`，而 KaTeX 的輸出同時含 MathML 與 HTML 兩份，
+ * 那一讀會把式子讀成重複兩次的亂碼寫進資料庫——老師只要點過那一欄
+ * 再點走，題目的原文就毀了，而且畫面上完全看不出來。
  */
 
 type Change = { id: string; state?: string; patch?: Record<string, unknown>; note?: string };
@@ -261,14 +277,16 @@ export default function Review({
             <div className="yz-scan">
               {items.map((it, i) => (
                 <div key={it.id} className={`yz-q ${i === cur ? 'yz-q--current' : ''}`} data-current={i === cur ? '1' : '0'}>
-                  {it.stimulus && i === cur && <div style={{ marginBottom: 6 }}>{it.stimulus}</div>}
+                  {/* 這一欄是拿來跟紙本比對的，所以一律排出來——
+                      這裡沒有任何可編輯的欄位，不必擔心 contentEditable。 */}
+                  {it.stimulus && i === cur && <div style={{ marginBottom: 6 }}><MathText>{it.stimulus}</MathText></div>}
                   <span style={{ fontWeight: 600 }}>{it.questionNo ?? it.order}.</span>{' '}
                   {it.subLabel && <span style={{ fontWeight: 600 }}>{it.subLabel}</span>}
-                  {it.content}
+                  <MathText>{it.content}</MathText>
                   {it.options.length > 0 && (
                     <div style={{ marginLeft: '1.6em' }}>
                       {it.options.map((o) => (
-                        <span key={o.order} style={{ display: 'block' }}>({o.label}) {o.content}</span>
+                        <span key={o.order} style={{ display: 'block' }}>({o.label}) <MathText>{o.content}</MathText></span>
                       ))}
                     </div>
                   )}
@@ -353,6 +371,7 @@ function Editor({
                onBlur={(e) => onPatch({ stimulus: e.currentTarget.textContent })}>
             {c.stimulus}
           </div>
+          <Preview source={c.stimulus} />
         </div>
       )}
 
@@ -365,6 +384,7 @@ function Editor({
                onBlur={(e) => onPatch({ content: e.currentTarget.textContent })}>
             {c.content}
           </div>
+          <Preview source={c.content} />
 
           {c.options.length > 0 && (
             <div style={{ marginTop: 6 }}>
@@ -374,7 +394,10 @@ function Editor({
                      onClick={() => onToggle(o.order)}
                      role="checkbox" aria-checked={c.answerKeys.includes(o.order)} tabIndex={0}>
                   <span className="yz-opt__label">({o.label})</span>
-                  <span>{o.content}</span>
+                  {/* 選項不是可編輯欄位（點下去是設定答案），所以直接排出來。
+                      物理的四個選項常常只差在向量箭頭，那個差別在原始碼
+                      狀態下要一個字一個字比——而老師只有 24 秒。 */}
+                  <span><MathText>{o.content}</MathText></span>
                 </div>
               ))}
               {multi && (
@@ -413,6 +436,7 @@ function Editor({
                    onBlur={(e) => onPatch({ answerText: e.currentTarget.textContent })}>
                 {c.answerText}
               </div>
+              <Preview source={c.answerText} />
             </div>
           )}
 
@@ -453,7 +477,11 @@ function Editor({
                   <div key={i} style={{ marginBottom: 8 }}>
                     <b style={{ fontWeight: 500 }}>{t.approach}</b>
                     {t.answer_keys?.length ? ` → (${t.answer_keys.join(')(')})` : ''}
-                    <div style={{ color: 'var(--ink-2)', lineHeight: 1.7 }}>{t.reasoning}</div>
+                    {/* 推導過程本身就是式子。老師是靠讀這幾段來裁決哪一次
+                        算對的，讀的是算式而不是反斜線。 */}
+                    <div style={{ color: 'var(--ink-2)', lineHeight: 1.7 }}>
+                      <MathText>{t.reasoning}</MathText>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -461,6 +489,23 @@ function Editor({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 可編輯欄位底下那一條「排出來的樣子」。
+ *
+ * **沒有數學式就不畫。** 一頁五十題，每一題的題幹、前導敘述、參考答案
+ * 底下都多一條一模一樣的重複內容，老師要多捲一倍的距離才看得完一題——
+ * 而 24 秒的預算裡沒有那個空間。有式子的那幾題才是需要對照的那幾題。
+ */
+function Preview({ source }: { source: string | null }) {
+  if (!hasMath(source)) return null;
+  return (
+    <div className="yz-mathpreview">
+      <span className="yz-mathpreview__label">排出來</span>
+      <MathText>{source}</MathText>
     </div>
   );
 }

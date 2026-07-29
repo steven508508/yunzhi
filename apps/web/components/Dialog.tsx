@@ -92,6 +92,7 @@ export function ConfirmDialog({
   consequence,
   confirmLabel = '確認',
   busy = false,
+  confirmDisabled = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -100,6 +101,17 @@ export function ConfirmDialog({
   consequence: ReactNode;
   confirmLabel?: string;
   busy?: boolean;
+  /**
+   * 確認鈕還不能按。
+   *
+   * 給「確認之前要先填一格」的那幾種對話框用：作廢要填理由、整班
+   * 重設要打出班級名稱。沒有這個參數的話，呼叫端只能讓 `onConfirm`
+   * 在條件不足時直接 return——而畫面上那是**一顆按了沒反應的按鈕**，
+   * 使用者會再按兩次然後認為系統壞了。
+   *
+   * 預設 false，所以既有的呼叫端行為完全不變。
+   */
+  confirmDisabled?: boolean;
 }) {
   return (
     <Dialog
@@ -111,7 +123,12 @@ export function ConfirmDialog({
           <Button variant="quiet" onClick={onClose} disabled={busy}>
             取消
           </Button>
-          <Button variant="danger" onClick={onConfirm} busy={busy}>
+          <Button
+            variant="danger"
+            onClick={onConfirm}
+            busy={busy}
+            disabled={confirmDisabled}
+          >
             {confirmLabel}
           </Button>
         </>

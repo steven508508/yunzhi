@@ -2,6 +2,11 @@
 
 適用於 Ubuntu Server 22.04 LTS 以上（建議 24.04 LTS）。
 
+> **從一台全新的 Ubuntu 開始，請看 [`docs/UBUNTU.md`](UBUNTU.md)。**
+> 那份是逐指令的操作手冊：Docker 怎麼裝、docker 群組為什麼要重新登入、
+> ufw 為什麼擋不住容器、時區與語系要設什麼、出事先看哪裡。
+> 這一份講的是安裝的**選項**（原生安裝、外部 nginx、TLS、AI、離線）。
+
 兩條路徑：**Docker（建議）** 與 **原生安裝**。兩者的功能完全一致，
 差別只在相依套件由誰管理。除非貴機構有不能跑 Docker 的政策，
 否則選 Docker —— 它的升級與解除安裝乾淨得多。
@@ -23,13 +28,37 @@
 
 ## Docker 安裝
 
-### 1. 安裝 Docker
+### 全新的 Ubuntu：一支腳本做完
 
 ```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker "$USER"
-newgrp docker          # 或重新登入
+git clone <你的儲存庫> yunzhi && cd yunzhi
+cp .env.example .env
+./deploy/scripts/gen-secrets.sh
+nano .env                                  # 見下方「至少要改的幾項」
+sudo ./deploy/scripts/ubuntu-install.sh
 ```
+
+`ubuntu-install.sh` 會處理 Docker 安裝（官方 apt 儲存庫）、docker 群組、
+系統需求檢查、時區與語系、ufw 防火牆（**含 Docker 繞過 ufw 這件事**）、
+目錄權限、開機自動啟動，然後才進安裝流程並驗收。
+逐步說明與手動做法見 [`docs/UBUNTU.md`](UBUNTU.md)。
+
+已經有 Docker 的機器直接跳到第 3 步。
+
+### 1. 安裝 Docker
+
+用 **Docker 官方的 apt 儲存庫**，不要用 snap ——
+snap 的 confinement 會讓本系統的 bind mount 靜默變成空目錄
+（Postgres 起得來但吃預設設定，WAL 歸檔沒開，而健康檢查全綠）。
+完整指令見 [`docs/UBUNTU.md` 第 4.1 節](UBUNTU.md)。
+
+```bash
+sudo usermod -aG docker "$USER"
+exit && ssh 回來             # 群組要**重新登入**才生效
+```
+
+`newgrp docker` 只對當前那個子 shell 有效，換一個視窗就沒了 ——
+會造成「剛剛還好好的」這種很難理解的狀況。乾脆重新登入。
 
 ### 2. 取得程式並設定
 
@@ -50,6 +79,17 @@ APP_URL=https://yunzhi.你的網域
 TLS_MODE=letsencrypt        # 內網部署用 internal
 ACME_EMAIL=你的信箱          # letsencrypt 才需要
 BOOTSTRAP_ADMIN_EMAIL=管理員信箱
+```
+
+`TLS_DIRECTIVE` 那一行**不要手動改**。Caddyfile 不支援條件式，
+所以 `tls` 指示詞是用那個變數展開的，而它由 `render-caddy.sh` 依
+`TLS_MODE` 自動寫入（安裝腳本會先跑一次）。兩邊不一致的後果特別難查：
+Caddy 會用本地 CA 簽一張憑證發給全校，服務起得來、`doctor.sh` 全過，
+但每一台學生電腦都看到「你的連線不是私人連線」。手動改過 `.env` 之後：
+
+```bash
+./deploy/scripts/render-caddy.sh        # 依 TLS_MODE 更新 TLS_DIRECTIVE
+./deploy/scripts/render-caddy.sh --check # 只檢查一致性
 ```
 
 AI 的部分見下方「AI 設定」。第一次安裝可以保持 `AI_PROVIDER=mock`，
@@ -271,18 +311,41 @@ EMBEDDING_DIM=1024
 
 ## 離線安裝
 
-在一台有網路的同架構機器上打包：
+建置需要連到兩個地方，**兩個都是硬需求**：
+
+- **Docker Hub** —— 基底映像（pgvector、redis、minio、caddy）
+- **binaries.prisma.sh** —— Prisma 的查詢引擎。它是執行期的硬相依，
+  建置時下載並烤進映像。抓不到就沒有可用的映像，不是「少了某個功能」。
+
+企業防火牆很常放行前者卻擋掉後者。`preflight.sh` 會分開測這兩個目標，
+因為只測 Docker Hub 的話，建置會在第 8 分鐘才以一個看不出原因的錯誤失敗。
+
+在一台有網路、**架構相同**的機器上打包：
 
 ```bash
-./deploy/scripts/build-offline-bundle.sh    # 產出 yunzhi-offline-<版本>.tar.gz
+./deploy/scripts/build-offline-bundle.sh
+# 產出 yunzhi-offline-<版本>-<架構>.tar.gz（約 3 至 5 GB）與 .sha256
 ```
+
+架構必須一致。x86_64 上打的包在 aarch64 機器上 `docker load` 得進去，
+但容器一啟動就 `exec format error` —— 載入時腳本會擋下來。
 
 複製到目標機器後：
 
 ```bash
+sha256sum -c yunzhi-offline-*.tar.gz.sha256    # 先確認搬運途中沒有損毀
 tar -xzf yunzhi-offline-*.tar.gz && cd yunzhi
-./deploy/scripts/docker-install.sh --offline
+cp .env.example .env && ./deploy/scripts/gen-secrets.sh
+
+sudo ./deploy/scripts/ubuntu-install.sh --offline   # 全新的 Ubuntu（會一併裝 Docker）
+./deploy/scripts/docker-install.sh --offline        # 已經有 Docker
 ```
+
+`--offline` 會跳過建置，改成從 `offline/images.tar.gz` 載入映像，
+並逐一確認每個映像都真的載進來了。
+
+**目標機器仍然需要 Docker Engine 本身。** 封閉網段請把 deb 檔一起帶過去，
+做法見 [`docs/UBUNTU.md` 第 5 節](UBUNTU.md)。
 
 ---
 

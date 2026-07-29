@@ -167,10 +167,28 @@ export default function RosterImport({
               </ul>
             </>
           ) : (
-            <Note>
-              讀到 {plan.rows.length} 位學生：新增 {plan.creating.length} 個帳號，
-              {plan.existing.length} 位已經有帳號（會加進「{className}」，不會重建）。
-            </Note>
+            <>
+              <Note>
+                讀到 {plan.rows.length} 位學生：新增 {plan.creating.length} 個帳號，
+                {plan.existing.length} 位已經有帳號（會加進「{className}」，不會重建）。
+              </Note>
+              {/*
+                每一個新帳號都要算一次密碼雜湊，那是刻意慢的運算
+                （擋暴力破解），約三分之一秒一個。人多的時候按下確認
+                之後畫面會停很久，而**看起來像當掉的東西會被重新整理**
+                ——重整不會產生重複帳號（同一個學號會走到「已經有帳號」
+                那條路），但老師會以為第一次失敗了而開始找人問。
+                先說出來，比事後解釋便宜。
+              */}
+              {plan.creating.length >= 40 && (
+                <Note tone="warn">
+                  要建 {plan.creating.length} 個新帳號，按下確認之後大約需要{' '}
+                  {Math.ceil((plan.creating.length * 0.35) / 5) * 5} 秒才會有結果——
+                  系統正在為每一位學生產生初始密碼。這段時間畫面會停著，
+                  <b>請不要重新整理或重複按</b>。
+                </Note>
+              )}
+            </>
           )}
         </div>
       )}

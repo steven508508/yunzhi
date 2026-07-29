@@ -2,9 +2,11 @@ import Link from 'next/link';
 import type { ReactNode } from 'react';
 
 import { Empty } from '@/components/Feedback';
+import { listStudentTasks } from '@/lib/attempt';
 import { mayUse, ROLE_LABELS } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
+import { gradeScopeWhere } from '@/lib/scoring';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,10 +29,9 @@ export default async function HomePage() {
     const staff = mayUse(user.systemRole, '/bank');
     const admin = mayUse(user.systemRole, '/settings/years');
 
-    if (!staff) {
-      // 學生與家長。**誠實地說還沒做好**，不要給一個空畫面——
+    if (user.systemRole === 'GUARDIAN') {
+      // 家長端**確實還沒做**。誠實地說，不要給一個空畫面——
       // 空畫面會被讀成「壞了」或「我的資料不見了」，然後變成一通電話。
-      const who = user.systemRole === 'GUARDIAN' ? '家長端' : '學生端';
       return (
         <main className="yz-panel">
           <div className="yz-panel__head">
@@ -38,16 +39,120 @@ export default async function HomePage() {
             <p className="yz-panel__sub">{ROLE_LABELS[user.systemRole] ?? user.systemRole}</p>
           </div>
           <Empty
-            title={`${who}還在開發中`}
+            title="家長端還在開發中"
             hint={
               <>
-                你的帳號已經開好了，登入也正常。線上作答、成績與解析、
-                能力分析這些功能還沒有上線，所以現在這裡沒有東西可以做。
+                你的帳號已經開好了，登入也正常。查看孩子的作業進度與成績
+                這些功能還沒有上線，所以現在這裡沒有東西可以做。
                 <br />
-                需要幫忙時請直接找班級老師。
+                需要了解孩子的狀況時請直接找班級老師。
               </>
             }
           />
+        </main>
+      );
+    }
+
+    if (!staff) {
+      // 學生。這一頁與老師版問的是同一個問題——現在該做什麼——
+      // 只是他的答案是「哪一份要寫」。
+      //
+      // 這裡刻意不重畫一次 `/take` 的完整清單：首頁只回答「有沒有事」
+      // 與「最急的是哪一份」，細節在那一頁。兩個畫面列同一份資料時，
+      // 學生會不確定哪一個是準的。
+      const tasks = await listStudentTasks(user.id);
+      const running = tasks.filter((t) => t.state === 'IN_PROGRESS');
+      const open = tasks.filter((t) => t.state === 'OPEN');
+      const missed = tasks.filter((t) => t.state === 'MISSED');
+      const upcoming = tasks.filter((t) => t.state === 'UPCOMING');
+
+      const todo: TodoItem[] = [];
+      if (running.length > 0) {
+        // 寫到一半的排最前面而且是唯一的硃砂色：有時限的那幾份正在
+        // 倒數，而學生看不到伺服器的時鐘。
+        todo.push({
+          n: running.length,
+          what: '份寫到一半',
+          why:
+            `${running[0].title}${running.length > 1 ? ' 等' : ''}還沒交。` +
+            '有時限的會繼續倒數，時間到了系統會自動收卷。',
+          href: running[0].openAttemptId
+            ? `/take/${running[0].assignmentId}`
+            : '/take',
+          label: '繼續作答',
+          act: true,
+        });
+      }
+      if (open.length > 0) {
+        todo.push({
+          n: open.length,
+          what: '份可以開始寫',
+          why: '按下開始之後才會計時。有時限的作業建議確定有時間再開。',
+          href: '/take',
+          label: '去看看',
+          act: true,
+        });
+      }
+      if (missed.length > 0) {
+        todo.push({
+          n: missed.length,
+          what: '份已經過了截止時間',
+          why: '這幾份不能再作答了。想補交或有特殊狀況，直接找班級老師處理。',
+          href: '/take',
+          label: '看是哪幾份',
+          act: false,
+        });
+      }
+
+      return (
+        <main className="yz-panel">
+          <div className="yz-panel__head">
+            <h1>現在該做什麼</h1>
+            <p className="yz-panel__sub">
+              {user.displayName}　·　{ROLE_LABELS[user.systemRole] ?? user.systemRole}
+            </p>
+          </div>
+
+          {todo.length > 0 ? (
+            <ul className="yz-todo">
+              {todo.map((item) => (
+                <li
+                  key={item.what}
+                  className={`yz-todo__item${item.act ? ' yz-todo__item--act' : ''}`}
+                >
+                  <span className="yz-todo__n">{item.n || '—'}</span>
+                  <span>
+                    <span className="yz-todo__what">{item.what}</span>
+                    <span className="yz-todo__why">{item.why}</span>
+                  </span>
+                  <Link href={item.href}>{item.label}</Link>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty
+              title={tasks.length === 0 ? '現在沒有任務' : '沒有待完成的作業'}
+              hint={
+                tasks.length === 0
+                  ? '老師派新的作業或考試時會出現在這裡。如果你知道有一份但這裡沒有，請告訴班級老師。'
+                  : '交出去的都收到了。之後派新的會出現在這裡。'
+              }
+            />
+          )}
+
+          <h2 className="yz-card__title" style={{ marginTop: 30, marginBottom: 6 }}>
+            目前的狀況
+          </h2>
+          <ul className="yz-todo">
+            <Stat n={tasks.length} what="份任務（全部）" href="/take" label="看清單" />
+            <Stat
+              n={tasks.filter((t) => t.state === 'DONE').length}
+              what="份已完成"
+              href="/take"
+              label="看成績"
+            />
+            <Stat n={upcoming.length} what="份還沒開放" href="/take" label="看時間" />
+          </ul>
         </main>
       );
     }
@@ -67,6 +172,30 @@ export default async function HomePage() {
           : prisma.classMembership.count({ where: { userId: user.id, leftAt: null } }),
         prisma.knowledgePoint.count(),
       ]);
+
+    /**
+     * 等老師手動放行的考試。
+     *
+     * # 為什麼這一項要出現在首頁
+     *
+     * 因為它是這個系統裡唯一一件「不做也完全不會有人告訴你」的事。
+     * `releasePolicy = MANUAL` 的任務，學生交完卷之後看到的是
+     * 「老師還沒有開放」，而老師那邊分數都算好了、答對率也畫出來了，
+     * 畫面上沒有任何一個地方說「這些學生還看不到」。
+     * 唯一的提醒必須主動出現在他每天會看的這一頁。
+     *
+     * 條件裡的「已經有人交卷」很重要：還沒有人交的任務放行了也沒有
+     * 意義，列出來只會變成一件永遠做不完的待辦。
+     */
+    const gradeScope = await gradeScopeWhere(user);
+    const awaitingRelease = await prisma.assignment.count({
+      where: {
+        ...gradeScope,
+        releasePolicy: 'MANUAL',
+        releasedAt: null,
+        attempts: { some: { status: { in: ['SUBMITTED', 'GRADED'] } } },
+      },
+    });
 
     // 管理員專屬的兩項：沒有它們，後面每一步都做不下去。
     const [years, pendingConsent] = admin
@@ -97,6 +226,16 @@ export default async function HomePage() {
         why: '班級是派任務、看成績、算能力分析的單位。學生要先在某個班裡，才收得到任何東西。',
         href: '/classes',
         label: '開一個班',
+        act: true,
+      });
+    }
+    if (awaitingRelease > 0) {
+      todo.push({
+        n: awaitingRelease,
+        what: '份考試的成績還沒放行',
+        why: '這幾份設定為「老師手動放行」，學生交完卷了但看不到自己的分數，也看不到逐題檢討。放行之前他們的畫面上只有一句「老師還沒有開放」。',
+        href: '/grades',
+        label: '去放行',
         act: true,
       });
     }

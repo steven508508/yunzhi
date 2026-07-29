@@ -71,9 +71,17 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-}
       # Caddyfile 不支援條件式，所以整個 tls 指示詞在這裡展開。
       # internal → 本地 CA；custom → 自備憑證路徑；
-      # 其餘（public）→ 空字串，交給 Caddy 自動向 Let's Encrypt 申請。
+      # letsencrypt → ACME 信箱（或空字串，交給 Caddy 自動申請）。
+      # 這個值由 deploy/scripts/render-caddy.sh 依 TLS_MODE 寫進 .env，
+      # 不要手動改 —— 兩邊不一致時 Caddy 會安靜地發錯憑證。
+      #
+      # **`-` 而不是 `:-`。** `:-` 對「有設定但值是空字串」也會取
+      # 預設值，於是 TLS_MODE=letsencrypt 且沒填 ACME_EMAIL 時，
+      # 刻意留空的指示詞會被換回 internal ——公開網域上發出一張
+      # 本地 CA 憑證，每一台學生電腦都是「你的連線不是私人連線」，
+      # 而所有健康檢查都是綠的。
       TLS_DIRECTIVE: >-
-        ${TLS_DIRECTIVE:-internal}
+        ${TLS_DIRECTIVE-internal}
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./deploy/caddy/certs:/etc/caddy/certs:ro

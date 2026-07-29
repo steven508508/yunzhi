@@ -111,3 +111,10 @@ ok "共 ${TABLES} 張表"
 
 say "端到端流程"
 node tools/e2e-import.mjs
+
+# 考卷 → 派卷 → 作答 → 計分。沿用同一個資料庫與環境變數：這一段
+# 要驗的東西（RLS、CHECK、onDelete、jsonb 快照）全部長在遷移上，
+# 換一個乾淨的庫反而驗不到「遷移一路套下來之後的真實狀態」。
+# 它自己會先 TRUNCATE，所以不受上一段留下的資料影響。
+say "考卷與作答"
+node tools/e2e-exam.mjs

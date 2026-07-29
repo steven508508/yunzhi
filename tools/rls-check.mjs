@@ -142,6 +142,66 @@ function walk(dir, out = []) {
   return out;
 }
 
+/**
+ * 哪些 `@/lib/*` 模組會碰到資料庫。**自己算出來，不用手寫清單。**
+ *
+ * 這裡原本是一條寫死的正規表達式，列著當時已知的幾個模組。它會壞在
+ * 一個固定的地方：有人新增 `lib/attempt.ts`（會查資料庫）並且從路由
+ * 引用它，而正規表達式不認得這個名字——於是那支路由就從「必須建立
+ * 租戶脈絡」的檢查裡消失了。**檢查器安靜地少檢查一項，比它報錯糟得多。**
+ * 這件事真的發生過，四個模組一次全漏。
+ *
+ * 所以改成從 `@/lib/prisma` 出發做傳遞閉包：直接引用它的算，引用了
+ * 「引用它的模組」的也算。新增模組不必回來改這裡。
+ */
+function dbTouchingLibModules() {
+  const libDir = path.join(ROOT, 'apps/web/lib');
+  const sources = new Map(); // 模組名 → 原始碼
+  for (const f of walk(libDir)) {
+    if (!/\.(ts|tsx|mjs)$/.test(f) || f.endsWith('.d.ts')) continue;
+    const name = path.relative(libDir, f).replace(/\.(ts|tsx|mjs)$/, '');
+    sources.set(name, readFileSync(f, 'utf8'));
+  }
+
+  // prisma 本身是根。`.mjs` 的 client 包裝也是——測試替身走那一條。
+  const hits = new Set(['prisma', 'prismaClient']);
+  for (let pass = 0; pass < sources.size; pass++) {
+    let grew = false;
+    for (const [name, text] of sources) {
+      if (hits.has(name)) continue;
+      if (importsAny(text, hits)) {
+        hits.add(name);
+        grew = true;
+      }
+    }
+    if (!grew) break;
+  }
+  return hits;
+}
+
+/**
+ * 這份原始碼有沒有**在執行期**引用 `@/lib/<名字>`（可帶 `.mjs` 副檔名）。
+ *
+ * `import type { … }` 不算：那種引用在編譯後完全消失，不會執行到
+ * 任何一行程式，當然也不會查資料庫。作答頁 `take/[assignmentId]`
+ * 就是這樣——它是 client component，只借了 `lib/attempt.ts` 的型別，
+ * 資料全部走 API。把它算成「碰資料庫」的話，這個檢查會要求一個
+ * client component 去呼叫 `scopedPage()`，而那件事做不到。
+ *
+ * `import { type Foo, bar }` 這種混合形式仍然算——`bar` 是真的會被
+ * 執行的。
+ */
+function importsAny(text, moduleNames) {
+  const runtime = text
+    .replace(/^\s*import\s+type\s[\s\S]*?from\s*'[^']*';?$/gm, '')
+    .replace(/^\s*export\s+type\s[\s\S]*?from\s*'[^']*';?$/gm, '');
+  for (const name of moduleNames) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`from '@/lib/${esc}(\\.mjs)?'`).test(runtime)) return true;
+  }
+  return false;
+}
+
 function bypassCheck() {
   console.log(`\n${B('── 跨租戶逃生口')}`);
   const files = walk(ROOT).filter(
@@ -190,14 +250,13 @@ function bypassCheck() {
   // 脈絡的路由在 RLS 底下會查不到資料，但那要跑起來才看得到；
   // 這裡在提交前就擋住。
   const appDir = path.join(ROOT, 'apps/web/app');
+  const dbModules = dbTouchingLibModules();
   const naked = [];
   for (const f of files) {
     if (!f.startsWith(appDir)) continue;
     if (!/\/(route|page)\.tsx?$/.test(f)) continue;
     const text = readFileSync(f, 'utf8');
-    if (!/from '@\/lib\/prisma'|from '@\/lib\/(candidates|commit|customTypes|importStatus|password)'/.test(text)) {
-      continue;
-    }
+    if (!importsAny(text, dbModules)) continue;
     const scoped =
       /scopedRoute|scopedPage|withTenant|withoutTenantScope|publicRoute/.test(text);
     if (!scoped) naked.push(path.relative(ROOT, f));

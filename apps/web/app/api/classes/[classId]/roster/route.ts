@@ -16,8 +16,21 @@ import { applyRoster, planRoster } from '@/lib/roster';
 import { isHomeroomOf } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
-/** 名冊是文字檔，一個班最多幾百人。 */
-export const maxDuration = 60;
+/**
+ * **這個數字是被 bcrypt 決定的，不是被檔案大小決定的。**
+ *
+ * 名冊本身是幾十 KB 的文字檔，讀完不用一秒。真正花時間的是每一位
+ * 新生的初始密碼——bcrypt 12 輪在這個級別的機器上實測約 310 毫秒，
+ * 而它是 CPU 密集的純運算，200 人就是 62 秒。
+ *
+ * 原本設 60 秒，剛好卡在一份全校名冊的正上方：**分班匯入（約 30 人、
+ * 10 秒）永遠不會出事，一次匯入 200 人則會在 62 秒時被砍斷**——
+ * 而那是開學前一天才會做一次的動作。給 5 倍餘裕。
+ *
+ * Caddy 那一側的 `write 300s` 對得上（deploy/caddy/Caddyfile）。
+ * 兩邊有一邊比較短的話，症狀是瀏覽器收到 502 而伺服器其實做完了。
+ */
+export const maxDuration = 300;
 
 const MAX_BYTES = 2 * 1024 * 1024;
 

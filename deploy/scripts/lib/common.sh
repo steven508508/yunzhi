@@ -151,6 +151,59 @@ require_env() {
   fi
 }
 
+# 讀 .env 裡某個變數的**字面值**（不 source 整個檔）。
+#
+# 需要它的場合是「還不能 source .env」的時候：例如要先看
+# PROXY_MODE 才決定要不要檢查 80／443，而 source 會把整份設定
+# （含 TZ）灌進當前 shell，讓同一次執行的日誌時間戳在中途跳掉。
+env_get_value() {
+  local key="$1" file="${2:-${YZ_ROOT}/.env}"
+  [[ -f "${file}" ]] || return 0
+  local raw
+  raw="$(grep -E "^${key}=" "${file}" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  # 去掉包住整個值的引號（compose 的 env-file 解析也是這樣處理）
+  raw="${raw%$'\r'}"
+  if [[ "${raw}" == \"*\" ]]; then raw="${raw:1:${#raw}-2}"; fi
+  if [[ "${raw}" == \'*\' ]]; then raw="${raw:1:${#raw}-2}"; fi
+  printf '%s' "${raw}"
+}
+
+# 就地改寫 .env 的某一行（沒有那一行就補在檔尾）。
+#
+# **一定要寫回檔案，不能只 export。** docker compose 的變數展開
+# 雖然讓 shell 環境優先於 --env-file，但使用者之後手動下
+# `docker compose up -d` 時沒有那個 shell 環境 —— 只有 .env。
+# 只 export 的設定會在「安裝時是對的、下次重啟就變了」，
+# 而那種故障沒有人會聯想到安裝腳本。
+env_set_value() {
+  local key="$1" value="$2" file="${3:-${YZ_ROOT}/.env}"
+  [[ -f "${file}" ]] || die "找不到 ${file}"
+
+  # **含空白的值一定要加引號。**
+  #
+  # load_env 是用 `set -a; source .env` 讀設定的，也就是說 .env 會被
+  # bash 當成腳本執行。`TLS_DIRECTIVE=/a/fullchain.pem /a/privkey.pem`
+  # 這一行在 bash 眼裡是「把 TLS_DIRECTIVE 設成 /a/fullchain.pem，
+  # 然後執行 /a/privkey.pem 這個指令」—— command not found，而
+  # common.sh 開著 errexit，於是**每一支腳本**（doctor、backup、
+  # upgrade、restore）都在載入設定的那一行死掉。
+  # TLS_MODE=custom 的機器會是這樣：安裝當下沒事，之後所有維運工具
+  # 全部打不開，而錯誤訊息指向一個憑證檔的路徑。
+  if [[ "${value}" == *[[:space:]]* && "${value}" != \"*\" ]]; then
+    value="\"${value//\"/\\\"}\""
+  fi
+
+  if grep -qE "^${key}=" "${file}"; then
+    # 用 | 當分隔符並跳脫，避免值裡的 / 或 & 破壞 sed
+    local escaped="${value//\\/\\\\}"
+    escaped="${escaped//|/\\|}"
+    escaped="${escaped//&/\\&}"
+    sed -i "s|^${key}=.*|${key}=${escaped}|" "${file}"
+  else
+    printf '%s=%s\n' "${key}" "${value}" >>"${file}"
+  fi
+}
+
 # ── 工具檢查 ────────────────────────────────────────────────────
 need_cmd() {
   local missing=()

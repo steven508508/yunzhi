@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { Denied } from '@/components/Feedback';
+import { MathText } from '@/components/MathText';
 import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
@@ -92,7 +93,10 @@ export default async function BankPage({
                 {questions.map((q) => (
                   <tr key={q.id}>
                     <td style={{ maxWidth: 460, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {q.content}
+                      {/* 這一欄是掃視用的，一列只有一行。排出來的式子在這裡
+                          仍然比原始碼好認——`$\ce{H2SO4}$` 佔掉的寬度是
+                          「H₂SO₄」的五倍，題幹會被它擠到看不見。 */}
+                      <MathText>{q.content}</MathText>
                     </td>
                     <td style={{ color: 'var(--ink-2)' }}>{q.subject.name}</td>
                     <td style={{ color: 'var(--ink-2)' }}>{TYPE[q.type] ?? q.type}</td>

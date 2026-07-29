@@ -1,0 +1,66 @@
+# 雲端智學 — 開機時把整套堆疊帶起來（Docker 部署專用）
+#
+# **為什麼 `restart: unless-stopped` 不夠**
+#
+# compose 的重啟策略只管「Docker daemon 活著的時候容器要不要重來」。
+# 開機自動啟動實際上靠的是兩件事，而兩件都可能不成立：
+#
+#   一、docker.service 必須是 enabled。apt 裝的 docker-ce 預設是，
+#       但機器被別人動過（例如為了省開機時間 disable 過）就不是了。
+#   二、容器上一次不是被「手動停止」的。維護老師只要下過一次
+#       `docker compose stop`（例如為了清磁碟），unless-stopped 就
+#       **永遠**不會再把它帶回來 —— 下次重開機，補習班早上開門，
+#       網站是關的，而 docker ps 一個容器都沒有、日誌裡什麼都沒發生。
+#
+# 這個 unit 補的是第二件：開機時無條件 `up -d`。它是 oneshot ＋
+# RemainAfterExit，所以 systemctl status 看得到狀態，stop 也真的會停。
+#
+# 安裝（ubuntu-install.sh 會自動做）：
+#   sudo cp deploy/systemd/yunzhi-docker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable yunzhi-docker.service
+#
+# **WorkingDirectory 與 User 必須改成實際值。** ubuntu-install.sh 會
+# 用 sed 代入；手動安裝時請自己改這兩行。
+
+[Unit]
+Description=雲端智學 — Docker 堆疊
+Documentation=file://__YZ_ROOT__/docs/UBUNTU.md
+# docker.socket 而不是 docker.service：socket activation 之下
+# 只 After=docker.service 會在 daemon 還沒真的接受連線時就執行，
+# 於是每次開機第一個 compose 指令都以 "Cannot connect to the
+# Docker daemon" 失敗，然後 systemd 認定服務啟動失敗不再重試。
+After=docker.service docker.socket network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=__YZ_USER__
+Group=__YZ_GROUP__
+WorkingDirectory=__YZ_ROOT__
+
+# 走腳本而不是直接 `docker compose up -d`，因為 Caddy 與監控藏在
+# compose profile 後面：不帶 profile 的 up 不會啟動 Caddy，於是開機
+# 之後應用是活的但 443 沒有人接，而 docker compose ps 看起來正常。
+# 要帶哪些 profile 取決於 .env，而 .env 是使用者隨時會改的。
+ExecStart=__YZ_ROOT__/deploy/scripts/docker-boot.sh
+ExecStop=__YZ_ROOT__/deploy/scripts/docker-boot.sh --stop
+
+# 第一次開機時 Docker daemon 可能還在整理 overlay 檔案系統，
+# compose 會以連不上結束。給它三次機會。
+Restart=on-failure
+RestartSec=15
+
+# up -d 要等 postgres healthy、migrate 跑完，冷開機可能要兩三分鐘。
+# 預設的 90 秒會在遷移跑到一半時把它砍掉。
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yunzhi-docker
+
+[Install]
+WantedBy=multi-user.target

@@ -44,6 +44,11 @@ yunzhi-root-ca.crt
 data
 .rollback-state*
 
+# 離線安裝包解開後留在原地的映像檔（images.tar.gz 通常 3 至 5 GB）。
+# 少了這一行，離線機器上任何一次 `docker compose build` 都會先把
+# 那幾 GB 送進 Docker daemon —— 而且是在完全不需要它的情況下。
+offline
+
 # ── 版控與本機雜物 ──────────────────────────────────────────
 .git
 .gitignore

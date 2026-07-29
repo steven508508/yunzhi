@@ -125,10 +125,22 @@ for p in "${YZ_ROOT}/.env" "${BACKUP_DIR:-${YZ_ROOT}/data/backups}" "${YZ_ROOT}/
   esac
 done
 
+printf '\n%s系統層%s\n' "${C_BOLD}" "${C_RESET}"
+if [[ -f /etc/systemd/system/yunzhi-docker.service ]]; then
+  printf '  %s✗ /etc/systemd/system/yunzhi-docker.service%s ← 將被停用並移除\n' "${C_RED}" "${C_RESET}"
+else
+  dim "（沒有安裝開機自動啟動的 unit）"
+fi
+
 echo
 printf '%s不會被觸碰的東西%s\n' "${C_BOLD}" "${C_RESET}"
-dim "Docker Engine 本身、其他專案的容器與 volume、系統套件、防火牆規則"
+dim "Docker Engine 本身、其他專案的容器與 volume、系統套件"
 dim "以及 ${BACKUP_DIR:-${YZ_ROOT}/data/backups} 底下的所有備份檔"
+dim ""
+dim "防火牆規則也不會動 —— 機器上可能還有別的服務靠它們。"
+dim "要一併移除本系統加的那一段（DOCKER-USER）："
+dim "  刪掉 /etc/ufw/after.rules 裡 '### BEGIN 雲端智學 DOCKER-USER' 到 END 之間的內容"
+dim "  sudo ufw reload && sudo systemctl restart docker"
 
 if (( DRY_RUN )); then
   echo
@@ -211,6 +223,22 @@ if (( FULL )); then
 fi
 
 run rm -f "${YZ_LOCK_FILE}"
+
+# 開機自動啟動的 unit。留著的話，重開機時 systemd 會試著在一個
+# 已經沒有容器的目錄裡跑 docker compose up，於是每次開機都多一則
+# failed 的服務 —— 那是自架系統移除後最典型的殘留物。
+if [[ -f /etc/systemd/system/yunzhi-docker.service ]]; then
+  info "移除開機自動啟動的 systemd unit…"
+  if [[ "${EUID}" -eq 0 ]]; then
+    run systemctl disable --now yunzhi-docker.service
+    run rm -f /etc/systemd/system/yunzhi-docker.service
+    run systemctl daemon-reload
+  else
+    warn "需要 root 才能移除 systemd unit。請自行執行："
+    dim "  sudo systemctl disable --now yunzhi-docker.service"
+    dim "  sudo rm /etc/systemd/system/yunzhi-docker.service && sudo systemctl daemon-reload"
+  fi
+fi
 
 # ═══════════════════════════════════════════════════════════════
 section "驗證移除結果"

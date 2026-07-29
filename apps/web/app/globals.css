@@ -218,6 +218,55 @@ input, textarea, select { font: inherit; color: inherit; }
   text-align: center; margin: 0 .15em;
 }
 
+/* ═══ 數學式與化學式 ═════════════════════════════════════════
+   KaTeX 排出來的東西（components/Math.tsx）。它自己的樣式表在
+   app/(app)/layout.tsx 匯入，這裡只調它與這套版面接不上的地方。 */
+
+/* KaTeX 的 .katex 預設是周圍文字的 1.21 倍。那個倍率是配英文
+   襯線體訂的；接在宋體的題幹後面，同一行裡的 x 會比中文字大一圈，
+   看起來像貼上去的。1.05 讓兩者的視覺高度對齊。 */
+.yz-math .katex { font-size: 1.05em; }
+
+/* 獨立公式自己佔一行。KaTeX 預設上下各 1em，在行高 2.0 的中文
+   段落裡會鬆到像斷開了兩段。 */
+.yz-math .katex-display { margin: .55em 0; }
+
+/* 長式子在窄畫面上溢出時可以橫捲，而不是把版面撐寬。
+   撐寬的話整頁會出現水平捲軸，而學生要捲的其實只有那一條式子。 */
+.yz-math .katex-display > .katex { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+
+/* 排不出來的式子：硃砂紅加點線底線，與校對記號同一套語彙。
+   `.katex-error` 是 KaTeX 在 throwOnError:false 時自己畫的
+   （它會另外掛上 errorColor 的行內色），`.yz-math__bad` 是
+   KaTeX 連錯誤都排不出來時我們自己兜的。兩者長得一樣是刻意的——
+   對老師來說它們是同一件事：**這一條要回去改**。
+   滑鼠停留看得到原因（title），所以游標用 help。 */
+.yz-math .katex-error,
+.yz-math__bad {
+  color: var(--mark);
+  border-bottom: 1px dotted var(--mark);
+  cursor: help;
+  font-family: var(--font-ui);
+}
+
+/* 校對頁的即時預覽：可編輯欄位裡是原始碼，這一條是它排出來的樣子。
+
+   為什麼不直接把可編輯欄位換成排好的式子——contentEditable 讀的是
+   `textContent`，而 KaTeX 的輸出同時含 MathML 與 HTML 兩份，
+   `textContent` 會把式子讀成重複兩次的亂碼**寫回資料庫**。
+   老師只要點過那一欄再點走，那一題的原文就毀了。 */
+.yz-mathpreview {
+  margin-top: 3px;
+  padding-left: 9px;
+  border-left: 2px solid var(--rule-2);
+  font-family: var(--font-doc);
+  line-height: var(--lh-doc);
+}
+.yz-mathpreview__label {
+  font-family: var(--font-ui); font-size: 11px; color: var(--ink-3);
+  margin-right: 7px;
+}
+
 /* ═══ 中繼資料與側註 ═════════════════════════════════════════ */
 
 .yz-meta {
@@ -581,6 +630,76 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
 .yz-muted { color: var(--ink-3); font-size: 11.5px; margin-left: 4px; }
 .yz-warn  { color: #B76E00; }
 
+/* 表格列尾的一組操作鈕（重設密碼／移出班級、重新計分／作廢）。
+   一列上有兩顆以上按鈕時，不給它們一個容器就會在窄畫面上黏成一團，
+   而黏在一起的兩顆按鈕裡有一顆是破壞性的。 */
+.yz-rowacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* ── 收合區塊 ─────────────────────────────────────────────────
+   已移出的學生、已作廢的作答——**必須看得到，但不該每天佔著版面**。
+   看不到就復原不了（那正是這一輪在清的「有入口沒出口」），
+   攤開來則會讓一個帶了三年的班級名冊有一半是已經不在的人。
+
+   三角形用 CSS 自己畫，不用系統的 marker：各家瀏覽器的預設 marker
+   大小與顏色差很多，而這一頁其餘的線條都是髮絲粗細。 */
+
+.yz-fold { margin: 22px 0 0; border-top: 1px solid var(--rule); }
+.yz-fold__head {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 9px 0;
+  font-family: var(--font-doc); font-size: 13px; color: var(--ink-2);
+}
+.yz-fold__head::-webkit-details-marker { display: none; }
+.yz-fold__head::before {
+  content: "▸"; font-size: 10px; color: var(--ink-3);
+  /* 展開時轉 90 度。動畫刻意很短——這不是一個要被欣賞的效果。 */
+  transition: transform .12s ease;
+}
+.yz-fold[open] > .yz-fold__head::before { transform: rotate(90deg); }
+.yz-fold__head:hover { color: var(--ink); }
+.yz-fold__head:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.yz-fold__body { padding: 4px 0 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .yz-fold__head::before { transition: none; }
+}
+
+/* ── 危險區 ───────────────────────────────────────────────────
+   會影響一整批人的動作（整班重設密碼）。與日常操作之間隔一段距離，
+   而且用左側的硃砂色線標出來——不是紅色底或警示圖示，那會讓人
+   習慣性忽略它。距離本身就是提示。 */
+.yz-danger {
+  margin-top: 46px; padding: 14px 0 14px 14px;
+  border-top: 1px solid var(--rule);
+  border-left: 2px solid var(--mark);
+}
+
+/* ── 一次性密碼 ───────────────────────────────────────────────
+   老師要當場把它唸出來或抄下來，所以：等寬、放大、字距拉開。
+   `l` 與 `1`、`0` 與 `O` 已經在產生時就避開了（見 passwordRules.mjs），
+   這裡負責的是「抄的時候不會看錯位」。
+
+   `user-select: all` 讓一次點擊就選起整串——老師多半是複製貼進
+   聊天室給學生，而手動框選一串隨機字元最容易漏掉頭尾。 */
+.yz-secret {
+  display: inline-block;
+  font-family: var(--font-doc); font-size: 15px; font-weight: 600;
+  letter-spacing: .14em;
+  padding: 1px 6px;
+  background: var(--paper-sunk); border: 1px solid var(--rule);
+  -webkit-user-select: all; user-select: all;
+}
+
+/* 單一位學生的憑證：學號與新密碼兩列。 */
+.yz-cred { margin: 0 0 12px; }
+.yz-cred > div {
+  display: flex; gap: 12px; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-cred dt { flex: 0 0 68px; font-size: 11.5px; color: var(--ink-3); }
+.yz-cred dd { margin: 0; font-family: var(--font-doc); font-size: 14px; }
+
 /* ═══ 頂部導覽 ═══════════════════════════════════════════════
    一條線、幾個字，沒有底色也沒有圖示。導覽列每一頁都在，
    所以它多佔的每一分視覺重量都要乘以「所有頁面」。
@@ -655,4 +774,550 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
 @media (max-width: 620px) {
   .yz-todo__item { grid-template-columns: 52px 1fr; }
   .yz-todo__item > :last-child { grid-column: 2; }
+}
+
+/* ═══ 學生作答（B3）═════════════════════════════════════════════
+   兩個畫面：任務清單與作答本身。
+
+   作答畫面的版面刻意接近**答案卡**而不是問卷網頁：題號欄在上方一排
+   方格、當前題目佔滿版心、底部是固定的操作列。學生已經認得那個
+   排法，考試當下不該再學一套新的介面。
+
+   顏色只用在三個地方：當前題目、剩餘五分鐘的倒數、標記待複查。
+   其餘一律是線與留白——考試時畫面上每一塊顏色都在搶注意力，
+   而學生的注意力應該在題目上。 */
+
+/* ── 任務清單 ─────────────────────────────────────────────── */
+
+.yz-task__list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+.yz-task__note { font-size: 11.5px; color: var(--ink-3); margin-bottom: 6px; }
+
+.yz-task {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-task__main { flex: 1 1 auto; min-width: 0; }
+.yz-task__title { font-family: var(--font-doc); font-size: 14px; font-weight: 600; }
+.yz-task__meta  { font-size: 11.5px; line-height: 1.75; color: var(--ink-3); }
+/* 一列上可能同時有兩顆按鈕：可以作答三次的任務交了第一次之後，
+   「開始作答」與「看檢討」要並存。 */
+.yz-task__act   { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.yz-task__state { font-size: 12px; color: var(--ink-3); }
+/* 分數用宋體等寬，與成績頁的數字同一個樣子。 */
+.yz-task__score {
+  font-family: var(--font-num); font-size: 15px; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+/* 正在倒數的那一份用左邊一條硃砂線標出來。只有這一種狀態上色。 */
+.yz-task--now { border-left: 2px solid var(--mark); padding-left: 12px; margin-left: -14px; }
+
+@media (max-width: 620px) {
+  .yz-task { flex-wrap: wrap; }
+  .yz-task__act { width: 100%; }
+  /* 一顆時佔滿整列、兩顆時平分。寫死 width:100% 的話，第二顆會被
+     擠到看不見的地方。 */
+  .yz-task__act .yz-btn { flex: 1 1 auto; text-align: center; }
+}
+
+/* ── 作答畫面的骨架 ───────────────────────────────────────── */
+
+.yz-take {
+  display: flex; flex-direction: column;
+  min-height: 100%;
+}
+
+/* 頁首與操作列都黏住。作答時捲動的是題目，狀態與交卷鈕不該捲走——
+   在手機上尤其：一份 40 題的卷子捲到底要找交卷鈕是很差的體驗。 */
+.yz-take__bar {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 9px 18px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--ink);
+}
+.yz-take__title { font-family: var(--font-doc); font-size: 14px; font-weight: 600; }
+.yz-take__count { font-size: 12px; color: var(--ink-2); }
+.yz-take__count b { font-family: var(--font-num); font-size: 14px; color: var(--ink); }
+.yz-take__flagn { margin-left: 10px; color: var(--ink-3); }
+.yz-take__save  { margin-left: auto; font-size: 11.5px; color: var(--ink-3); min-width: 52px; text-align: right; }
+
+/* 倒數用等寬數字，否則每一秒的寬度不同，整條列會抖。 */
+.yz-take__clock {
+  font-family: var(--font-num); font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+}
+/* 最後五分鐘。不閃爍——閃爍會讓人慌，而慌不會讓人寫得比較快。 */
+.yz-take__clock--soon { color: var(--mark); font-weight: 600; }
+
+.yz-take__notice { padding: 10px 18px 0; }
+
+/* ── 題號欄 ───────────────────────────────────────────────── */
+
+.yz-take__nav {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-take__num {
+  width: 30px; height: 30px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  font-family: var(--font-num); font-size: 12.5px;
+  color: var(--ink-2); background: var(--paper-raised);
+}
+.yz-take__num:hover { border-color: var(--ink-2); }
+/* 已作答：填底色。用底色而不是打勾，因為 30px 的方格裡放不下
+   一個看得清楚的勾，而「有沒有填」一眼就要看得出來。 */
+.yz-take__num--done { background: var(--select); color: var(--ink); border-color: var(--ink-3); }
+/* 待複查：右上角一個小三角。與顏色並存，色盲的人也讀得到。 */
+.yz-take__num--flag { position: relative; }
+.yz-take__num--flag::after {
+  content: ""; position: absolute; top: 0; right: 0;
+  border: 5px solid transparent; border-top-color: var(--mark); border-right-color: var(--mark);
+}
+.yz-take__num--cur { border-color: var(--ink); border-width: 2px; color: var(--ink); font-weight: 600; }
+
+/* ── 題目 ─────────────────────────────────────────────────── */
+
+.yz-take__body { flex: 1 1 auto; padding: 18px; }
+.yz-take__q { max-width: 46em; margin: 0 auto; }
+
+.yz-take__stimulus {
+  font-family: var(--font-doc); font-size: 14px; line-height: var(--lh-doc);
+  padding: 12px 14px; margin-bottom: 16px;
+  background: var(--paper-sunk);
+  border-left: 2px solid var(--rule);
+}
+.yz-take__stimlabel { font-size: 11.5px; color: var(--ink-3); font-family: var(--font-ui); margin-bottom: 4px; }
+
+.yz-take__head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.yz-take__no {
+  font-family: var(--font-num); font-size: 22px; font-weight: 600;
+}
+.yz-take__score { font-size: 11.5px; color: var(--ink-3); }
+.yz-take__flag {
+  margin-left: auto;
+  font-size: 11.5px; color: var(--ink-3);
+  border-bottom: 1px dotted var(--rule);
+}
+.yz-take__flag--on { color: var(--mark); border-bottom-color: var(--mark); }
+
+/* 題幹用宋體。與校對介面同一個理由：這是考卷的內容，不是系統的話。 */
+.yz-take__stem {
+  font-family: var(--font-doc); font-size: 15px; line-height: var(--lh-doc);
+  white-space: pre-wrap;
+}
+
+.yz-take__opts { margin-top: 14px; }
+.yz-take__opt {
+  display: flex; gap: 9px; align-items: baseline;
+  padding: 9px 11px; margin-bottom: 6px;
+  border: 1px solid var(--rule-2); border-radius: var(--r);
+  font-family: var(--font-doc); font-size: 14.5px; line-height: 1.85;
+  cursor: pointer;
+  /* 手指按得到。44px 是觸控目標的下限（WCAG 2.5.5），
+     而這一頁有很高比例的使用者是在手機上。 */
+  min-height: 44px;
+}
+.yz-take__opt:hover { border-color: var(--ink-3); }
+.yz-take__opt:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+/* 選中的：底色加左邊一條實線。不用打勾圖示，因為多選題要能一眼
+   看出選了幾個，而一排勾比一排底色難掃。 */
+.yz-take__opt--picked {
+  background: var(--select);
+  border-color: var(--ink-2);
+  box-shadow: inset 2px 0 0 var(--ink);
+}
+.yz-take__optkey { font-weight: 600; flex: 0 0 auto; }
+.yz-take__hint { font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
+
+.yz-take__slots { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.yz-take__slot { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
+/* 答案卡上的格位就是一個一個的方格，這裡照做 */
+.yz-take__slot .yz-in { width: 56px; text-align: center; font-family: var(--font-num); font-size: 16px; }
+
+.yz-take__text { width: 100%; margin-top: 14px; font-family: var(--font-doc); font-size: 14.5px; line-height: var(--lh-doc); }
+
+.yz-take__brief { margin: 0 0 6px 1.1em; font-size: 12.5px; line-height: 1.9; color: var(--ink-2); }
+.yz-take__brief li { margin-bottom: 3px; }
+
+/* ── 底部操作列 ───────────────────────────────────────────── */
+
+.yz-take__foot {
+  position: sticky; bottom: 0; z-index: 2;
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 18px;
+  background: var(--paper);
+  border-top: 1px solid var(--ink);
+}
+.yz-take__spacer { margin-left: auto; }
+
+@media (max-width: 620px) {
+  .yz-take__bar { flex-wrap: wrap; gap: 6px 12px; padding: 8px 12px; }
+  .yz-take__save { min-width: 0; }
+  .yz-take__nav { padding: 8px 12px; gap: 4px; }
+  .yz-take__num { width: 34px; height: 34px; }  /* 手機上反而要大一點，手指按的 */
+  .yz-take__body { padding: 14px 12px; }
+  .yz-take__foot { padding: 8px 12px; }
+  .yz-take__foot .yz-btn { flex: 1 1 auto; text-align: center; }
+}
+
+/* 作答畫面不列印。要紙本考卷請用組卷那邊的輸出，
+   而不是把螢幕上的一題印出來。 */
+@media print { .yz-take { display: none; } }
+
+/* ═══ 成績（客觀題評分與班級統計）═══════════════════════════════
+   兩個數字組成這一頁：全班的分數分布，以及各題的答對率。
+   答對率是老師最常看的東西，所以它是唯一有圖形的地方——一條
+   髮絲粗的線，不是彩色長條。低於 40% 的用硃砂色，因為那是
+   「下一堂課要重講」的訊號，而畫面上其餘部分都不該搶它。 */
+
+/* 摘要。一排數字，靠線分隔而不是靠方框。 */
+.yz-summary {
+  display: flex; flex-wrap: wrap; gap: 0;
+  margin: 0 0 20px; padding: 12px 0;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+}
+.yz-summary > div {
+  flex: 1 1 96px; padding: 0 14px;
+  border-left: 1px solid var(--rule-2);
+}
+.yz-summary > div:first-child { border-left: none; padding-left: 0; }
+.yz-summary dt { font-size: 11.5px; color: var(--ink-2); }
+.yz-summary dd {
+  margin: 2px 0 0;
+  font-family: var(--font-num); font-size: 21px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 級分。多數情況下它說的是「為什麼這裡沒有級分」，所以它是
+   一段可以讀的話而不是一個空的數字欄位。 */
+.yz-grade-gsat {
+  display: grid; gap: 3px;
+  margin: 0 0 20px; padding: 10px 12px;
+  border-left: 2px solid var(--rule);
+  font-size: 12px; line-height: 1.8; color: var(--ink-2);
+}
+.yz-grade-gsat b { color: var(--ink); font-weight: 600; }
+
+.yz-grade-act { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; }
+
+.yz-grade-h {
+  font-family: var(--font-doc); font-size: 14px; font-weight: 600;
+  margin: 26px 0 8px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--ink);
+}
+.yz-grade-hint { font-size: 11.5px; line-height: 1.75; color: var(--ink-3); margin: 0 0 10px; }
+/* 表格列裡的第二行小字（卷名、錯誤訊息）。 */
+.yz-grade__sub { display: block; font-size: 11px; color: var(--ink-3); margin-top: 1px; }
+
+/* 答對率：數字在左、線在右。線是資訊的第二層——沒有它也讀得懂，
+   有了它才掃得出「這一段題目全班都不會」。 */
+.yz-rate {
+  display: grid; grid-template-columns: 42px 1fr;
+  gap: 8px; align-items: center; min-width: 110px;
+}
+.yz-rate__num {
+  font-family: var(--font-num); font-size: 12.5px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.yz-rate__bar { position: relative; height: 3px; background: var(--rule-2); }
+.yz-rate__fill { position: absolute; inset: 0 auto 0 0; background: var(--ink-3); }
+.yz-rate--low .yz-rate__num { color: var(--mark); }
+.yz-rate--low .yz-rate__fill { background: var(--mark); }
+
+@media (max-width: 620px) {
+  .yz-summary > div { flex-basis: 33%; }
+  .yz-rate { grid-template-columns: 42px; }
+  .yz-rate__bar { display: none; }
+}
+
+/* ═══ 組卷與派任務（B2）═══════════════════════════════════════
+   組卷畫面是兩欄：左邊題庫、右邊這份卷子。它與其他頁面不同，
+   因為它是**一個對照的動作**——老師在兩份清單之間搬東西，
+   兩邊要同時看得見，中間不要有任何裝飾把視線切斷。
+
+   所以中間只有一條髮絲線，沒有卡片、沒有底色。 */
+
+.yz-compose {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 26px;
+  align-items: start;
+}
+/* 中間那條線畫在右欄上，而不是用 border-right 畫在左欄——
+   左欄的清單很長，線跟著它會在右欄還有內容時就斷掉。 */
+.yz-compose__right { border-left: 1px solid var(--rule); padding-left: 26px; }
+
+@media (max-width: 860px) {
+  .yz-compose { grid-template-columns: 1fr; gap: 26px; }
+  .yz-compose__right { border-left: none; padding-left: 0; border-top: 1px solid var(--ink); padding-top: 16px; }
+}
+
+.yz-compose__head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 8px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--ink);
+}
+.yz-compose__head h2 { font-family: var(--font-doc); font-size: 14px; font-weight: 600; }
+.yz-compose__count { font-size: 11.5px; color: var(--ink-3); margin-left: auto; }
+
+/* 篩選列。表單元素排成一行，窄畫面換行。 */
+.yz-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-bottom: 14px; }
+.yz-filters .yz-field { margin: 0; }
+.yz-filters__grow { flex: 1 1 160px; }
+
+/* 一題一列。整列可點是刻意的：加題是這個畫面重複最多次的動作，
+   而只有右邊一顆小按鈕可點，在平板上很難按中。 */
+.yz-pick { list-style: none; }
+.yz-pick__row {
+  display: grid; grid-template-columns: 30px 1fr auto;
+  gap: 10px; align-items: baseline;
+  padding: 9px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-pick__no {
+  font-family: var(--font-num); font-size: 12px; color: var(--ink-3);
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.yz-pick__text {
+  font-family: var(--font-doc); font-size: 13px; line-height: 1.8;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.yz-pick__meta { font-size: 11px; color: var(--ink-3); margin-top: 3px; }
+.yz-pick__act { display: flex; gap: 6px; align-items: center; }
+/* 已經在卷子上的那幾題不移除、也不隱藏——隱藏會讓清單在加了一題
+   之後整個跳動，而老師正要加下一題。 */
+.yz-pick__row--in { background: var(--select); }
+.yz-pick__in { font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
+
+/* 配分輸入框。窄，而且靠右對齊數字。
+   垂直內距與 .yz-btn 一樣（5px），一來同一列的輸入框與按鈕才對得齊，
+   二來 2px 的時候整格只有 22px 高——主力裝置是 iPad，那個高度
+   要按兩三次才點得中，而每一題都要點一次。 */
+.yz-score {
+  width: 62px; padding: 5px 6px; text-align: right;
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--ink); font-size: 12.5px;
+}
+.yz-score:focus { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* 總分。卷面上的總分要一眼看到，因為它是「這份卷子對不對」的
+   第一個檢查點——100 分的卷子印出 98 分是最常見的組卷錯誤。 */
+.yz-total {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--ink);
+  font-size: 12.5px;
+}
+.yz-total__n { font-family: var(--font-num); font-size: 19px; font-variant-numeric: tabular-nums; }
+
+/* 已選對象的標籤。刪除鈕在標籤裡，因為它們是同一個東西。 */
+.yz-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.yz-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 6px 2px 8px;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  background: var(--paper-raised); font-size: 12px;
+}
+/* 「×」本身只有幾個 px 寬。在 iPad 上那是點不中的，而點不中的後果
+   是老師連按好幾次，最後派錯對象。方框放大到 26px 但視覺上不變——
+   撐開的是可點區域，不是圖形。 */
+.yz-chip button {
+  border: none; background: none; cursor: pointer;
+  color: var(--ink-3); font-size: 13px; line-height: 1;
+  min-width: 26px; min-height: 26px; padding: 0 2px; margin: -4px -2px -4px 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.yz-chip button:hover { color: var(--mark); }
+
+/* 派任務的欄位很多，但它們不是同等重要。分組並且讓每一組
+   自己成一段，比一長條表單好讀得多。 */
+.yz-group { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule-2); }
+.yz-group__title { font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+.yz-group__note { font-size: 11.5px; color: var(--ink-3); line-height: 1.7; margin-top: 6px; }
+
+/* ═══ 成績與檢討（學生端）═══════════════════════════════════════
+   這一頁在畫的是**批改過的考卷**，所以它長得像一份批改過的考卷：
+   題號在左、校對記號在題號旁、老師的批註縮在題目底下。
+
+   顏色只出現在三個地方：正解的勾、選錯的叉、以及答錯那一題左邊
+   的一條線。其餘一律是線與留白——一頁三十題如果每一題都上色，
+   學生反而看不出哪幾題該回去看。
+
+   紅綠不單獨承載資訊。每一種狀態都同時有記號（✓ △ × — ？）與
+   文字（答對／部分給分／答錯／沒有作答／等老師評分），
+   色覺不同的人與黑白列印都讀得到。 */
+
+/* ── 作答次數的切換 ───────────────────────────────────────── */
+
+.yz-review__picker {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px;
+  margin-bottom: 18px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-review__pickerlabel { font-size: 11.5px; color: var(--ink-3); }
+.yz-review__pick {
+  font-size: 12.5px; color: var(--ink-2); text-decoration: none;
+  padding-bottom: 2px; border-bottom: 1px solid transparent;
+}
+.yz-review__pick:hover { color: var(--ink); border-bottom-color: var(--rule); }
+.yz-review__pick--on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+
+/* ── 一題 ─────────────────────────────────────────────────── */
+
+.yz-review__list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+
+.yz-review { border-bottom: 1px solid var(--rule-2); padding: 4px 0; }
+/* 要回去看的那幾題，左邊一條線。答對的沒有——一頁上只有少數幾條線
+   的時候，那幾條才有意義。 */
+.yz-review--wrong,
+.yz-review--partial,
+.yz-review--blank { border-left: 2px solid var(--mark); padding-left: 12px; margin-left: -14px; }
+.yz-review--pending { border-left: 2px solid var(--ink-3); padding-left: 12px; margin-left: -14px; }
+
+/* summary 的預設三角形在 Safari 與 Chrome 上長得不一樣，而且會把
+   grid 版面推歪。自己畫一個，並保留鍵盤 focus 的外框。 */
+.yz-review summary { list-style: none; cursor: pointer; }
+.yz-review summary::-webkit-details-marker { display: none; }
+.yz-review summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.yz-review__sum {
+  display: grid;
+  grid-template-columns: 32px 16px 68px 78px 1fr;
+  gap: 10px; align-items: baseline;
+  padding: 8px 0;
+}
+.yz-review__no {
+  font-family: var(--font-num); font-size: 16px; font-weight: 600;
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.yz-review__mark { font-family: var(--font-doc); font-size: 14px; text-align: center; }
+.yz-review--correct .yz-review__mark { color: var(--confirm); }
+.yz-review--wrong   .yz-review__mark,
+.yz-review--partial .yz-review__mark { color: var(--mark); }
+.yz-review--blank   .yz-review__mark,
+.yz-review--pending .yz-review__mark { color: var(--ink-3); }
+.yz-review__verdict { font-size: 12px; color: var(--ink-2); }
+.yz-review__score {
+  font-family: var(--font-num); font-size: 12.5px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+/* 收起來的時候只看得到這一行，所以它要放題幹的開頭而不是題型代號。 */
+.yz-review__peek {
+  font-family: var(--font-doc); font-size: 13px; color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 展開之後題幹會完整出現在下面，上面那一行就不必再重複一次。 */
+.yz-review details[open] .yz-review__peek { visibility: hidden; }
+
+.yz-review__body { padding: 2px 0 16px 42px; }
+
+.yz-review__stem {
+  font-family: var(--font-doc); font-size: 14.5px; line-height: var(--lh-doc);
+  white-space: pre-wrap;
+}
+
+/* ── 選項 ─────────────────────────────────────────────────── */
+
+.yz-review__opts { margin-top: 10px; }
+.yz-review__opt {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 6px 10px; margin-bottom: 4px;
+  border: 1px solid transparent; border-radius: var(--r);
+  font-family: var(--font-doc); font-size: 14px; line-height: 1.85;
+}
+.yz-review__optmark {
+  flex: 0 0 auto; width: 13px; text-align: center;
+  font-family: var(--font-doc); font-size: 13px; color: var(--ink-3);
+}
+/* 正解：淡底加左邊一條實線，與作答畫面「選中」的樣子刻意一致——
+   學生剛剛才在那個畫面上看過它。 */
+.yz-review__opt--correct {
+  background: var(--select); border-color: var(--rule);
+  box-shadow: inset 2px 0 0 var(--confirm);
+}
+.yz-review__opt--correct .yz-review__optmark { color: var(--confirm); }
+/* 選錯的：只有一條硃砂線與一個叉，不整塊變紅。多選題錯兩個的話
+   整頁會有一半是紅的。 */
+.yz-review__opt--badpick { box-shadow: inset 2px 0 0 var(--mark); }
+.yz-review__opt--badpick .yz-review__optmark { color: var(--mark); }
+.yz-review__tag {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: var(--font-ui); font-size: 11px; color: var(--ink-3);
+}
+.yz-review__blank { font-size: 12px; color: var(--mark); margin-top: 4px; }
+
+/* ── 非選擇題的答案對照 ───────────────────────────────────── */
+
+.yz-review__ans {
+  margin-top: 12px; padding: 10px 12px;
+  background: var(--paper-sunk); border-left: 2px solid var(--rule);
+}
+.yz-review__ansrow { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
+.yz-review__ansrow:last-child { margin-bottom: 0; }
+.yz-review__anslabel { flex: 0 0 56px; font-size: 11.5px; color: var(--ink-3); }
+.yz-review__anstext { font-family: var(--font-doc); font-size: 14px; }
+
+/* 計分的說明（「答錯 1 個，得 3/5」）。這一句是申訴時第一個被問到的
+   東西，所以它與分數放在一起而不是藏在解析裡。 */
+.yz-review__note { font-size: 11.5px; color: var(--ink-2); margin-top: 8px; }
+.yz-review__pending { font-size: 12px; color: var(--ink-3); margin-top: 12px; line-height: 1.8; }
+
+/* ── 解析 ─────────────────────────────────────────────────── */
+
+.yz-explain { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--rule-2); }
+.yz-explain__head {
+  font-family: var(--font-doc); font-size: 12.5px; font-weight: 600;
+  color: var(--ink-2); margin-bottom: 8px;
+}
+.yz-explain__layer { margin-bottom: 10px; }
+.yz-explain__layer:last-child { margin-bottom: 0; }
+.yz-explain__label { font-size: 11px; color: var(--ink-3); margin-bottom: 3px; }
+.yz-explain__items { list-style: none; margin: 0; padding: 0; }
+.yz-explain__items li {
+  font-family: var(--font-doc); font-size: 13.5px; line-height: var(--lh-doc);
+  margin-bottom: 2px;
+}
+/* 步驟編號與選項代號懸掛在文字左邊，像排好的頁面。 */
+.yz-explain__lead {
+  display: inline-block; min-width: 2em;
+  color: var(--ink-2); font-weight: 600;
+}
+.yz-explain__rights { font-size: 11px; color: var(--ink-3); margin-top: 8px; }
+
+/* 授權只到「本補習班學生線上閱讀」的解析（TENANT_NO_EXPORT）。
+
+   `user-select: none` 擋不住截圖，也不打算擋——它要做到的是
+   **系統本身沒有提供散布的便利**。整頁沒有任何複製、下載、列印的
+   按鈕也是同一個理由。列印時這一塊換成一行說明，而不是整段消失：
+   少一段而沒有人知道少了什麼，比明說更糟。 */
+.yz-explain--noexport .yz-explain__layers { -webkit-user-select: none; user-select: none; }
+.yz-explain__noprint { display: none; }
+
+@media print {
+  .yz-explain--noexport .yz-explain__layers { display: none; }
+  .yz-explain--noexport .yz-explain__noprint {
+    display: block; font-size: 11px; color: var(--ink-3);
+  }
+  /* 列印時全部展開。收起來的 details 內容不會印出來，而學生印檢討
+     多半正是為了帶回家看錯的那幾題。瀏覽器藏它的方式不只一種
+     （早期是 display、現在是 content-visibility），兩個都要蓋掉。 */
+  .yz-review details > *:not(summary) {
+    display: block !important;
+    content-visibility: visible !important;
+  }
+}
+
+@media (max-width: 620px) {
+  .yz-review__sum { grid-template-columns: 26px 14px 1fr auto; gap: 6px 8px; }
+  .yz-review__peek { grid-column: 1 / -1; white-space: normal; }
+  /* 窄畫面上摘要自己佔一行，展開後留一個空行很明顯。桌機那邊用
+     visibility 是為了讓格線不跳動，這裡沒有那個問題。 */
+  .yz-review details[open] .yz-review__peek { display: none; }
+  .yz-review__body { padding-left: 0; }
+  .yz-review__ansrow { flex-wrap: wrap; }
 }

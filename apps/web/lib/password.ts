@@ -15,6 +15,7 @@ import bcrypt from 'bcryptjs';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { SESSION_COOKIE } from '@/lib/auth';
+import { checkPasswordStrength } from '@/lib/passwordRules.mjs';
 
 const BCRYPT_ROUNDS = 12;
 const MAX_FAILED = 5;
@@ -159,22 +160,15 @@ export async function changePassword(
 }
 
 /**
- * 密碼強度。刻意不強制大小寫與特殊符號的組合規則——
- * NIST SP 800-63B 已指出那類規則會讓使用者選出可預測的密碼
- * （Password1!）。改為要求長度並排除明顯不安全的選擇。
+ * 密碼強度的實作搬到 `lib/passwordRules.mjs` 了，這裡只是轉出去。
+ *
+ * 搬家的理由是**它原本測不到**：載入這個檔案就要跑一次 bcrypt
+ * （見上面 DUMMY_HASH），而且它 import 了 prisma——測試檔跑不起來。
+ * 一支「寫錯不會有任何錯誤訊息」的規則沒有測試，只是看起來安全。
+ *
+ * 名字與簽章原封不動轉出，是為了讓既有的呼叫端一行都不用改。
  */
-export function checkPasswordStrength(pw: string, username?: string): string | null {
-  if (pw.length < 10) return '密碼至少需要 10 個字元';
-  if (pw.length > 200) return '密碼過長';
-  if (username && pw.toLowerCase().includes(username.toLowerCase())) {
-    return '密碼不能包含帳號';
-  }
-  const common = ['password', '12345678', 'qwerty', 'abc123', '00000000', 'yunzhi'];
-  const lower = pw.toLowerCase();
-  if (common.some((c) => lower.includes(c))) return '密碼包含過於常見的字串';
-  if (/^(.)\1+$/.test(pw)) return '密碼不能是單一字元重複';
-  return null;
-}
+export { checkPasswordStrength };
 
 async function audit(
   tenantId: string,

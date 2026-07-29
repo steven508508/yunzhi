@@ -91,6 +91,10 @@ export async function loadProgress(jobId: string, tenantId: string) {
     title: job.title,
     subjectName: job.subject.name,
     status: job.status,
+    // ISO 字串而不是 Date：這一份資料有兩條路徑（伺服器端直接渲染、
+    // 以及輪詢時經過 JSON），而 JSON 那條回來的一定是字串。
+    // 兩邊型別不同的話，畫面會在第一次輪詢之後才壞掉。
+    createdAt: job.createdAt.toISOString(),
     error: job.error,
     permanent,
     lastCompletedStage: job.lastCompletedStage,

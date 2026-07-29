@@ -599,7 +599,8 @@ check('種子 SQL 會設定租戶脈絡', () => {
   }
 });
 
-check('shell 腳本語法正確', () => {
+/** deploy/ 與 tools/ 底下所有的 .sh（相對 ROOT）。 */
+function allShellScripts() {
   const scripts = [];
   const walk = (rel) => {
     const abs = join(ROOT, rel);
@@ -611,9 +612,316 @@ check('shell 腳本語法正確', () => {
   };
   walk('deploy');
   walk('tools');
-  for (const s of scripts) {
+  return scripts;
+}
+
+check('shell 腳本語法正確', () => {
+  for (const s of allShellScripts()) {
     execFileSync('bash', ['-n', s], { cwd: ROOT, stdio: 'pipe' });
   }
+});
+
+check('shell 腳本可以執行（+x、shebang、LF 換行）', () => {
+  // 三種都是「檔案內容完全正確但跑不起來」，而錯誤訊息都不指向真正的原因：
+  //   · 少了 +x        → bash: ./deploy/scripts/ubuntu-install.sh: Permission denied
+  //                      使用者的反應通常是加 sudo，然後得到一模一樣的訊息
+  //   · CRLF 換行      → bad interpreter: /usr/bin/env bash^M: no such file or directory
+  //                      經過 Windows 的隨身碟或 scp 一趟就會這樣，而
+  //                      **離線安裝正是靠隨身碟搬過去的**
+  //   · 少了 shebang   → 在 sh 底下被執行，陣列與 [[ ]] 全部語法錯誤
+  const bad = [];
+  for (const s of allShellScripts()) {
+    const buf = readFileSync(join(ROOT, s));
+    if (buf.includes('\r\n')) bad.push(`${s} 是 CRLF 換行（bad interpreter: …^M）`);
+    if (!buf.subarray(0, 2).equals(Buffer.from('#!'))) bad.push(`${s} 沒有 shebang`);
+    // 用 git 的紀錄而不是檔案系統的 mode：clone 出來的權限以 git 為準，
+    // 而本機 chmod 過但沒進版控的話，別人 clone 下來仍然是壞的。
+    const mode = execFileSync('git', ['ls-files', '-s', '--', s], { cwd: ROOT, encoding: 'utf8' }).trim();
+    if (mode) {
+      if (!mode.startsWith('100755')) {
+        bad.push(`${s} 在版控裡不是可執行的（${mode.split(' ')[0]}）：git update-index --chmod=+x ${s}`);
+      }
+    } else if (!(statSync(join(ROOT, s)).mode & 0o111)) {
+      // 還沒進版控的，看檔案系統 —— git 是照 commit 當下的權限記錄的，
+      // 現在沒有 +x 就會一路帶到別人的 clone。
+      bad.push(`${s} 沒有執行權限：chmod +x ${s}`);
+    }
+  }
+  assert(bad.length === 0, bad.join('\n       '));
+});
+
+check('文件與腳本裡提到的每一支腳本都真的存在', () => {
+  // 這一項抓的是**做不到的說明**。實際發生過的：docs/INSTALL.md 教
+  // 使用者跑 `build-offline-bundle.sh` 然後 `docker-install.sh --offline`，
+  // 而前者不存在、後者不認得那個參數。照著文件做的人得到的是
+  // 「No such file or directory」與「不認得的參數」——在一台封閉網段
+  // 的機器上，那等於整條離線安裝路徑是假的。
+  const sources = [
+    'docker-compose.yml', '.env.example', 'README.md',
+    ...readdirSync(join(ROOT, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`),
+    ...allShellScripts(),
+  ].filter((f) => existsSync(join(ROOT, f)));
+
+  const missing = new Set();
+  for (const f of sources) {
+    const text = read(f);
+    for (const m of text.matchAll(/(?:deploy\/scripts|tools)\/([a-z0-9-]+\.sh)/g)) {
+      const rel = m[0];
+      if (!existsSync(join(ROOT, rel))) missing.add(`${rel}（在 ${f} 被提到）`);
+    }
+  }
+  assert(missing.size === 0, [...missing].join('\n       '));
+});
+
+check('文件裡示範的每一個腳本參數，腳本真的認得', () => {
+  // 腳本統一用 `case "$1" in --xxx)` 解析參數，不認得的一律 die。
+  // 所以文件寫錯一個參數，使用者不是得到降級行為，而是安裝直接中止。
+  const docs = readdirSync(join(ROOT, 'docs'))
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => `docs/${f}`)
+    .concat('README.md')
+    .filter((f) => existsSync(join(ROOT, f)));
+
+  /**
+   * 腳本認得的參數。
+   *
+   * **只看 `case "$1" in … esac` 這一段**，不是全文搜尋 —— 檔頭的
+   * 用法註解裡本來就寫著每一個參數，全文搜尋會讓「註解裡有、
+   * 解析器裡沒有」這個最常見的情況剛好檢查不出來。
+   */
+  const knownFlags = (script) => {
+    const src = read(script);
+    const start = src.indexOf('case "$1" in');
+    if (start < 0) return null;
+    const block = src.slice(start, src.indexOf('esac', start));
+    const flags = new Set();
+    for (const m of block.matchAll(/^\s*([-a-z|]+)\)/gm)) {
+      for (const tok of m[1].split('|')) if (tok.startsWith('-')) flags.add(tok);
+    }
+    return flags;
+  };
+
+  const bad = [];
+  for (const f of docs) {
+    for (const m of read(f).matchAll(/(deploy\/scripts\/[a-z0-9-]+\.sh)((?:\s+--[a-z][a-z-]*)+)/g)) {
+      const script = m[1];
+      if (!existsSync(join(ROOT, script))) continue; // 上一項會抓
+      const flags = knownFlags(script);
+      if (!flags) continue; // 沒有參數解析區塊的腳本
+      for (const flag of m[2].trim().split(/\s+/)) {
+        if (!flags.has(flag)) {
+          bad.push(
+            `${f} 示範了 ${script} ${flag}，但它的 case 區塊裡沒有這個參數 —— ` +
+              `執行會以「不認得的參數」中止（認得的有：${[...flags].join(' ')}）`,
+          );
+        }
+      }
+    }
+  }
+  assert(bad.length === 0, bad.join('\n       '));
+});
+
+check('.env 裡含空白的值都有加引號', () => {
+  // **.env 會被當成 bash 腳本執行。** common.sh 的 load_env 是
+  // `set -a; source .env`，所以
+  //     TLS_DIRECTIVE=/a/fullchain.pem /a/privkey.pem
+  // 在 bash 眼裡是「設 TLS_DIRECTIVE=/a/fullchain.pem，然後執行
+  // /a/privkey.pem」——command not found，而 common.sh 開著 errexit，
+  // 於是 doctor、backup、upgrade、restore **每一支**都在載入設定的
+  // 那一行死掉，錯誤訊息指向一個憑證檔的路徑。
+  // （Docker Compose 自己的 env-file 解析不需要引號，所以只看得到
+  //   compose 正常運作的人不會發現這件事。）
+  const bad = [];
+  for (const line of read('.env.example').split('\n')) {
+    const m = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
+    if (!m) continue;
+    const value = m[2];
+    if (!/\s/.test(value)) continue;
+    if (/^".*"$/.test(value) || /^'.*'$/.test(value)) continue;
+    bad.push(`${m[1]} 的值含空白但沒有引號：${line}`);
+  }
+  // 寫回 .env 的那一支也要會加引號，否則安裝當下就會種下同一顆地雷。
+  assert(
+    /\[\[:space:\]\]/.test(read('deploy/scripts/lib/common.sh')),
+    'common.sh 的 env_set_value 沒有對含空白的值加引號。' +
+      'TLS_MODE=custom 寫進去的是兩個路徑，之後每一支腳本 source .env 都會死。',
+  );
+  assert(bad.length === 0, bad.join('\n       '));
+});
+
+check('可能是空字串的 compose 變數用 `-` 而不是 `:-`', () => {
+  // `${VAR:-預設}` 對「有設定但值是空字串」也會取預設值。
+  // TLS_DIRECTIVE 正是刻意會是空字串的那一個：TLS_MODE=letsencrypt
+  // 而沒填 ACME_EMAIL 時，正確的 tls 指示詞就是空的（Caddy 的裸 tls
+  // 是合法的 no-op，自動 HTTPS 照常）。若寫成 `:-internal`，那個空值
+  // 會被換回 internal —— 公開網域上發出一張本地 CA 憑證，每一台學生
+  // 電腦都是「你的連線不是私人連線」，而所有健康檢查都是綠的。
+  const yml = read('docker-compose.yml');
+  assert(
+    !/\$\{TLS_DIRECTIVE:-/.test(yml),
+    'docker-compose.yml 用 ${TLS_DIRECTIVE:-…}。空字串會被換成預設值，' +
+      'TLS_MODE=letsencrypt 的站台會拿到本地 CA 憑證。請改成 ${TLS_DIRECTIVE-…}。',
+  );
+});
+
+check('TLS_MODE 的每一個值，render-caddy.sh 都認得', () => {
+  // .env.example 是使用者唯一會看的清單。上面寫著某個值而
+  // render-caddy.sh 的 case 沒有它時，安裝在第一步就以
+  // 「不認得的 TLS_MODE」中止 —— 而使用者是照著註解填的。
+  const example = read('.env.example');
+  const block = example.slice(example.indexOf('TLS_MODE='), example.indexOf('ACME_EMAIL='));
+  const documented = new Set(
+    [...example.matchAll(/TLS_MODE=([a-z]+)/g)].map((m) => m[1]),
+  );
+  // 註解裡以「值    : 說明」形式列出的也算
+  for (const m of block.matchAll(/^#\s*([a-z]+)\s*:/gm)) documented.add(m[1]);
+
+  const render = read('deploy/scripts/render-caddy.sh');
+  const handled = new Set();
+  for (const m of render.matchAll(/^\s{2}([a-z|]+)\)$/gm)) {
+    for (const v of m[1].split('|')) handled.add(v);
+  }
+  const unknown = [...documented].filter((v) => !handled.has(v));
+  assert(
+    unknown.length === 0,
+    `.env.example 提到 TLS_MODE=${unknown.join('、')}，但 render-caddy.sh 不認得，安裝會中止。`,
+  );
+});
+
+check('systemd unit 的佔位符，安裝腳本都會替換掉', () => {
+  // unit 檔用 __YZ_ROOT__ 這類佔位符，由 ubuntu-install.sh 用 sed 代入。
+  // 新增一個佔位符卻忘了加對應的 sed 時，systemd 收到的是字面上的
+  // 「__YZ_USER__」——**服務在安裝當下不會被啟動，所以沒有人發現**，
+  // 直到機房停電復電那天早上，補習班開門而網站是關的。
+  const dir = join(ROOT, 'deploy/systemd');
+  if (!existsSync(dir)) return;
+  const installer = read('deploy/scripts/ubuntu-install.sh');
+  const bad = [];
+  for (const f of readdirSync(dir)) {
+    const text = readFileSync(join(dir, f), 'utf8');
+    for (const m of new Set([...text.matchAll(/__[A-Z0-9_]+__/g)].map((x) => x[0]))) {
+      if (!installer.includes(m)) bad.push(`deploy/systemd/${f} 的 ${m} 沒有任何腳本會替換`);
+    }
+  }
+  assert(bad.length === 0, bad.join('\n       '));
+});
+
+check('.env.example 標了 [自動] 的欄位，gen-secrets.sh 真的會產生', () => {
+  // 標了卻沒實作的話，使用者照著說明「不要手填」，而安裝腳本的
+  // require_env 會在第一步就擋下來說它是空的 —— 兩邊說法互相矛盾，
+  // 而正確做法（自己想一個密碼填進去）沒有寫在任何地方。
+  const lines = read('.env.example').split('\n');
+  const marked = [];
+  for (const [i, l] of lines.entries()) {
+    if (!/\[自動\]/.test(l)) continue;
+    for (const next of lines.slice(i + 1, i + 4)) {
+      const m = next.match(/^([A-Z][A-Z0-9_]*)=/);
+      if (m) { marked.push(m[1]); break; }
+    }
+  }
+  const gen = read('deploy/scripts/gen-secrets.sh');
+  const missing = marked.filter((v) => !new RegExp(`\\[${v}\\]=`).test(gen));
+  assert(
+    missing.length === 0,
+    `.env.example 說這幾項由 gen-secrets.sh 產生，但它的 FIELDS 裡沒有：${missing.join('、')}`,
+  );
+});
+
+check('compose bind mount 的宿主機目錄，安裝腳本會先建立', () => {
+  // Docker 對不存在的 bind 來源不報錯 —— 它以 **root:root** 幫你建一個。
+  // 這幾個目錄都在 .gitignore 裡（憑證、維護頁、模型快取不進版控），
+  // 所以全新 clone 上必然不存在、必然變成 root 的。後果：
+  //   · upgrade.sh 以一般使用者寫 deploy/caddy/maintenance/index.html
+  //     → Permission denied，而那一步正好在「備份做完、遷移還沒開始」
+  //   · TLS_MODE=custom 的人把憑證放進 deploy/caddy/certs 時寫不進去
+  //   · 備份目錄變成 root 的，宿主機上手動跑 backup.sh／restore.sh 全部失敗
+  //     —— 而那三支正是「出事那天」才第一次被執行的腳本
+  if (!compose) return;
+  const installers = ['deploy/scripts/docker-install.sh', 'deploy/scripts/ubuntu-install.sh']
+    .filter((f) => existsSync(join(ROOT, f)))
+    .map(read)
+    .join('\n');
+
+  const bad = [];
+  for (const svc of Object.values(compose.services)) {
+    for (const v of svc.volumes ?? []) {
+      if (v.type !== 'bind' || !v.source?.startsWith(ROOT)) continue;
+      const rel = v.source.slice(ROOT.length + 1);
+      if (existsSync(v.source)) continue; // 版控裡就有，不必建
+      const ignored = [rel, `${rel}/`].some((p) => {
+        try {
+          execFileSync('git', ['check-ignore', '-q', p], { cwd: ROOT, stdio: 'ignore' });
+          return true;
+        } catch { return false; }
+      });
+      if (!ignored) continue; // 由別的檢查負責
+      if (!installers.includes(rel)) {
+        bad.push(`${rel} 是 bind mount 來源、不在版控裡，而安裝腳本沒有先建立它（Docker 會建成 root 的）`);
+      }
+    }
+  }
+  // BACKUP_DIR 解析後是絕對路徑（預設 /var/backups/yunzhi），
+  // 落在 ROOT 之外，上面的迴圈看不到它，但它是最容易出事的一個。
+  assert(
+    /install -d[^\n]*BACKUP_DIR/.test(installers) || /mkdir -p "?\$\{?BACKUP_DIR/.test(installers),
+    '安裝腳本沒有建立 BACKUP_DIR。預設是 /var/backups/yunzhi，一般使用者建不出來，' +
+      'Docker 會建成 root 的，於是宿主機上的 backup.sh／restore.sh／verify-restore.sh 全部寫不進去。',
+  );
+  assert(bad.length === 0, bad.join('\n       '));
+});
+
+check('PostgreSQL 映像帶得動初始化 SQL 要建的擴充功能', () => {
+  // deploy/postgres/init/01-extensions.sql 建 vector，而 vector 不在
+  // 官方 postgres 映像裡。有人為了「單純一點」把映像換成 postgres:16
+  // 的話，初始化 SQL 在第一次啟動就失敗 —— 而 Postgres 的官方進入點
+  // **只在資料目錄是空的時候跑初始化**，所以修好之後還要先把 volume
+  // 刪掉才會重跑。第一次遷移會死在 vector 型別上。
+  const initFile = 'deploy/postgres/init/01-extensions.sql';
+  if (!existsSync(join(ROOT, initFile))) return;
+  const sql = read(initFile);
+  const needsVector = /CREATE EXTENSION[^;]*\bvector\b/i.test(sql);
+  if (!needsVector) return;
+  const image = compose
+    ? compose.services.postgres?.image ?? ''
+    : (read('docker-compose.yml').match(/image:\s*(\S*pgvector\S*|\S*postgres\S*)/) ?? ['', ''])[1];
+  assert(
+    /pgvector|timescale|vectordb/i.test(image),
+    `初始化 SQL 要建 vector 擴充，但 postgres 映像是 ${image || '（讀不到）'}，裡面沒有 pgvector。` +
+      '第一次啟動的初始化就會失敗，而且要刪掉 volume 才會重跑。',
+  );
+  // pg_stat_statements 必須先在 shared_preload_libraries 裡，
+  // 否則 CREATE EXTENSION 直接報錯，整個 init 腳本中止 ——
+  // 連帶讓後面的 vector 與 pg_trgm 也沒建起來。
+  if (/CREATE EXTENSION[^;]*pg_stat_statements/i.test(sql)) {
+    assert(
+      /shared_preload_libraries\s*=\s*'[^']*pg_stat_statements/.test(read('deploy/postgres/postgresql.conf')),
+      'init SQL 要建 pg_stat_statements，但 postgresql.conf 的 shared_preload_libraries 沒有載入它。' +
+        'CREATE EXTENSION 會直接失敗並中止整份 init 腳本，連 vector 都不會建起來。',
+    );
+  }
+});
+
+check('容器映像都釘了版本，沒有 latest', () => {
+  // `docker compose build --pull` 與 `docker pull` 在半年後跑一次，
+  // latest 可能已經是下一個大版本。Postgres 大版本換掉之後資料目錄
+  // 不相容，容器起不來，而**那一刻通常是升級或災難還原的當下**。
+  const bad = [];
+  if (compose) {
+    for (const [name, svc] of Object.entries(compose.services)) {
+      const img = svc.image ?? '';
+      if (!img || img.startsWith('yunzhi/')) continue; // 自家映像的標籤是 APP_VERSION
+      if (!img.includes(':') || img.endsWith(':latest')) bad.push(`${name} 用 ${img}`);
+    }
+  }
+  for (const f of ['apps/web/Dockerfile', 'apps/ai/Dockerfile', 'deploy/backup/Dockerfile']) {
+    if (!existsSync(join(ROOT, f))) continue;
+    for (const m of read(f).matchAll(/^FROM\s+(\S+)/gim)) {
+      const img = m[1];
+      if (img.includes('$')) continue;
+      if (!img.includes(':') || img.endsWith(':latest')) bad.push(`${f} 的 FROM ${img}`);
+    }
+  }
+  assert(bad.length === 0, `這些沒有釘版本：\n       ${bad.join('\n       ')}`);
 });
 
 console.log(`\n${passed}/${passed + failed} 通過\n`);

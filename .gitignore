@@ -14,6 +14,9 @@ yunzhi-root-ca.crt
 /tmp
 *.tsbuildinfo
 
+# 本機跑 e2e 時 redis-server 留下的快照
+dump.rdb
+
 # 真實的講義與題本樣本有著作權，不進版控。
 # 測試用 WORKSHEET_SAMPLE 指到本機路徑，找不到就自動跳過。
 samples/

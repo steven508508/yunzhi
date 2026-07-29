@@ -23,6 +23,24 @@
  * 「新增一張表」與「決定這張表屬於誰」必須是同一個動作，否則遲早
  * 會有一張表在沒有人注意的情況下對所有租戶敞開。
  *
+ * # 寫遷移的人一定要知道的一件事
+ *
+ * **`ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` 的驗證掃描受
+ * RLS 影響**，而 psql 預設沒有租戶脈絡。對「已經有資料」的租戶表
+ * 補外鍵時會出現兩種都很難看的結果（兩種都在 e2e 裡實際重現過）：
+ *
+ *   · 被參照表看不見、參照表看得見 → 遷移中止，錯誤說
+ *     `Key (questionId)=(...) is not present in table "questions"`，
+ *     **而那一列其實存在**。訊息指向一個不存在的問題。
+ *   · 兩張表都看不見（一般連線的預設狀態）→ **驗證「通過」但一列都
+ *     沒檢查**，等於加了一條從來沒被驗證過的外鍵。第二種比第一種
+ *     糟得多：它不會失敗，只會在幾個月後某次資料清理時才爆出來。
+ *
+ * 建表當下是空的所以不受影響（目前所有遷移都屬於這一類）。要對
+ * 有資料的表補外鍵時，在同一個交易裡先
+ * `SELECT set_config('app.cross_tenant', 'on', true);`，
+ * 或用 `ADD CONSTRAINT ... NOT VALID` 再帶著 GUC `VALIDATE CONSTRAINT`。
+ *
  * # 三種歸屬
  *
  *   root      租戶表自己。用 id 比對。
@@ -58,6 +76,12 @@ export const GLOBAL = {
  * → textbook_nodes → textbook_editions）不必特別處理。
  */
 export const INDIRECT = {
+  // 考卷、任務、作答（B2–B4）
+  exam_paper_items: ['exam_papers', 'paperId'],
+  assignment_targets: ['assignments', 'assignmentId'],
+  attempts: ['assignments', 'assignmentId'],
+  attempt_answers: ['attempts', 'attemptId'],
+
   sessions: ['users', 'userId'],
   guardian_links: ['users', 'studentId'],
   notification_preferences: ['users', 'userId'],

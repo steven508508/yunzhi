@@ -28,6 +28,16 @@ const STAFF = ['TEACHER', 'SUBJECT_LEAD', 'SCHOOL_ADMIN', 'SYS_ADMIN'] as const;
 /** 行政決定：開班、學年度結構這類會影響全校資料範圍的事。 */
 const ADMIN = ['SCHOOL_ADMIN', 'SYS_ADMIN'] as const;
 
+/**
+ * 作答的人。**只有學生**——家長看得到孩子的成績是另一件事，
+ * 走的是另一組路徑，不是同一個畫面加一個「唯讀」旗標。
+ *
+ * 老師不在裡面，但 `/take` 這一頁本身不擋老師：老師偶爾會被指定為
+ * 作答對象（自己先試考一份再派出去），那時他直接開網址就進得去。
+ * 導覽列不畫，是因為那是例外而不是他每天的工作。
+ */
+const LEARNER = ['STUDENT'] as const;
+
 export type NavItem = {
   href: string;
   label: string;
@@ -36,8 +46,18 @@ export type NavItem = {
 };
 
 export const NAV_ITEMS: readonly NavItem[] = [
+  // 學生只有一項，排最前面。他一天要點它好幾次，老師一週點一次
+  // 學年度——導覽列的順序應該照「誰用得最兇」排，不是照系統結構排。
+  { href: '/take', label: '我的任務', roles: LEARNER },
+
+  // 老師的動線就是這個順序：題目進來（匯入）→ 挑題組卷（考卷）→
+  // 派出去（派卷）→ 收回來看（成績）。導覽列照這個順序排，
+  // 是因為第一次用的人會照著左到右點，而那樣點是對的。
   { href: '/bank', label: '題庫', roles: STAFF },
   { href: '/import', label: '匯入', roles: STAFF },
+  { href: '/papers', label: '考卷', roles: STAFF },
+  { href: '/assignments', label: '派卷', roles: STAFF },
+  { href: '/grades', label: '成績', roles: STAFF },
   { href: '/classes', label: '班級', roles: STAFF },
   { href: '/knowledge', label: '知識點', roles: STAFF },
   // 學年度排在最後而且只有管理員看得到：它一年只碰一兩次，

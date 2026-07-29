@@ -28,6 +28,8 @@ export type ProgressData = {
   title: string;
   subjectName: string;
   status: string;
+  /** 建立時刻（ISO）。用來判斷「排隊排太久了」，見下面的 `stuckInQueue`。 */
+  createdAt: string;
   error: string | null;
   permanent: boolean;
   lastCompletedStage: string | null;
@@ -57,8 +59,28 @@ export default function Progress({ initial }: { initial: ProgressData }) {
   const router = useRouter();
   const [data, setData] = useState(initial);
   const [acting, setActing] = useState(false);
+  const [actError, setActError] = useState<string | null>(null);
 
   const finished = ['READY_FOR_REVIEW', 'COMMITTED', 'FAILED'].includes(data.status);
+
+  /**
+   * 排隊排太久了。
+   *
+   * QUEUED 的意思是「已經丟進佇列，等工作者來拿」。工作者沒起來、
+   * 或 Redis 連不上的時候，這個狀態會維持到永遠：**沒有錯誤、
+   * 沒有失敗、進度條上六個階段全部是灰的**，而畫面下方寫著
+   * 「解析在背景進行，離開這一頁也不會中斷」。老師會等一個下午。
+   *
+   * 卡住偵測（worker 的 detect-stuck-imports）救不了這一種，因為
+   * 它自己就跑在同一個工作者裡——工作者沒起來，偵測也沒跑。
+   * 所以出口必須在畫面上。
+   *
+   * 兩分鐘是刻意的：正常情況下工作者幾秒內就會把狀態推到
+   * NORMALIZING，兩分鐘還在排隊已經不正常了。而重新排隊這個動作
+   * 不花任何 AI 費用（一個階段都還沒跑），所以門檻不必訂得很高。
+   */
+  const stuckInQueue =
+    data.status === 'QUEUED' && Date.now() - new Date(data.createdAt).getTime() > 120_000;
 
   // 輪詢而非 SSE。
   //
@@ -84,13 +106,24 @@ export default function Progress({ initial }: { initial: ProgressData }) {
 
   async function act(resume: boolean) {
     setActing(true);
+    setActError(null);
     try {
       const res = await fetch(`/api/import/${data.jobId}/retry`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ resume }),
       });
-      if (res.ok) router.refresh();
+      if (res.ok) {
+        router.refresh();
+        return;
+      }
+      // **失敗一定要說出來。** 原本這裡只有 `if (res.ok) refresh()`，
+      // 於是「正在處理中，不給重跑」「佇列連不上」這幾種回應在畫面上
+      // 完全沒有痕跡——老師按了按鈕，什麼都沒發生，然後再按一次。
+      const body = await res.json().catch(() => null);
+      setActError(body?.error ?? `重跑失敗（${res.status}）`);
+    } catch (e) {
+      setActError(`連不上伺服器：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setActing(false);
     }
@@ -163,12 +196,54 @@ export default function Progress({ initial }: { initial: ProgressData }) {
             </button>
           </div>
 
+          {actError && (
+            <p className="yz-field__err" style={{ marginTop: 9 }}>
+              {actError}
+            </p>
+          )}
+
           {data.lastCompletedStage && (
             <p className="yz-hint" style={{ marginTop: 9 }}>
               「繼續」只會重跑失敗的那一階段，不會重複付前面幾階段的 AI 費用。
               除非你懷疑前面的階段也有問題，否則選它。
             </p>
           )}
+        </section>
+      )}
+
+      {/* 排隊排太久。這一塊只在 QUEUED 卡住時出現，而且用的是與失敗
+          那一塊不同的說法——它不是「失敗了」，是「還沒有人來拿」，
+          而那兩件事要做的處置不同（後者多半要去看工作者活著沒）。 */}
+      {stuckInQueue && !data.error && (
+        <section className="yz-fieldset yz-fieldset--warn">
+          <p style={{ fontSize: 13, lineHeight: 1.7 }}>
+            這份題本已經排隊超過兩分鐘還沒有開始處理。多半是背景工作者沒有在跑，
+            或它連不上佇列。檔案已經安全存好了，重新排隊不會重複收費——
+            一個階段都還沒跑過。
+          </p>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            {/* 送 resume=true。這份工作多半一個階段都還沒跑過，兩者
+                結果相同；但它也可能是「續跑之後又卡在排隊」，那時
+                resume=false 會清掉續跑點，把已經付過錢的階段再跑一次。
+                永遠選不會多花錢的那一邊。 */}
+            <button
+              type="button"
+              className="yz-btn yz-btn--primary"
+              disabled={acting}
+              onClick={() => act(true)}
+            >
+              重新排隊
+            </button>
+          </div>
+          {actError && (
+            <p className="yz-field__err" style={{ marginTop: 9 }}>
+              {actError}
+            </p>
+          )}
+          <p className="yz-hint" style={{ marginTop: 9 }}>
+            按了還是沒有動靜的話，請管理員確認背景工作者（worker）與 Redis 是否正常。
+            這不是這份題本的問題，其他匯入也會卡在同一個地方。
+          </p>
         </section>
       )}
 

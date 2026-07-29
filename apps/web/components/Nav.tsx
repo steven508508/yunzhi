@@ -86,6 +86,19 @@ export function Nav({
           {displayName}
           <span className="yz-nav__role">{ROLE_LABELS[systemRole] ?? systemRole}</span>
         </span>
+        {/* 更換密碼放在這裡而不是 NAV_ITEMS 裡，因為它**每個角色都有**
+            ——放進主導覽等於在學生唯一的一個項目旁邊多一個他一學期
+            用一次的東西。但它不能只存在於強制更換那條路（/password，
+            由 mustChangePassword 觸發）：學生後來想自己換一組時，
+            那條路走不到，唯一的方法是猜網址。密碼被同學看到是每一週
+            都會發生的事，而系統裡沒有出口。 */}
+        <Link
+          href="/settings/password"
+          className="yz-nav__link"
+          aria-current={pathname === '/settings/password' ? 'page' : undefined}
+        >
+          更換密碼
+        </Link>
         <Button
           variant="quiet"
           className="yz-nav__out"

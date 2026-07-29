@@ -46,6 +46,8 @@ model Tenant {
   auditLogs     AuditLog[]
   subjects      Subject[]
 
+  examPapers  ExamPaper[]
+  assignments Assignment[]
   @@map("tenants")
 }
 
@@ -146,6 +148,10 @@ model User {
   verifiedSources     OfficialSourceFetch[] @relation("OfficialSourceVerifier")
   confirmedTypes      CustomQuestionType[]  @relation("CustomTypeConfirmer")
 
+  createdPapers      ExamPaper[]        @relation("PaperCreator")
+  createdAssignments Assignment[]       @relation("AssignmentCreator")
+  assignedDirectly   AssignmentTarget[] @relation("AssignmentTargetUser")
+  attempts           Attempt[]          @relation("AttemptUser")
   @@unique([tenantId, username])
   @@unique([tenantId, email])
   @@index([tenantId, status])
@@ -188,6 +194,7 @@ model Class {
   memberships     ClassMembership[]
   subjectTeachers ClassSubjectTeacher[]
 
+  assignmentTargets AssignmentTarget[]
   @@unique([tenantId, academicYearId, name])
   @@index([tenantId, active])
   @@map("classes")
@@ -605,6 +612,7 @@ model Subject {
   editions        TextbookEdition[]
   classTeachers   ClassSubjectTeacher[]
 
+  examPapers      ExamPaper[]
   @@unique([tenantId, code])
   @@map("subjects")
 }
@@ -890,6 +898,8 @@ model Question {
   fromCandidates  ImportCandidate[]        @relation("CandidateQuestion")
   dupCandidates   ImportCandidate[]        @relation("CandidateDuplicate")
 
+  paperItems      ExamPaperItem[]
+  attemptAnswers  AttemptAnswer[]
   @@unique([familyId, version])
   @@index([tenantId, subjectId, status])
   @@index([groupId])
@@ -1305,4 +1315,217 @@ model OfficialSourceFetch {
 
   @@unique([sourceUrl, sha256])
   @@map("official_source_fetches")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 考卷、任務、作答、成績
+//
+// 這四組是「從題庫到成績」那條線的骨架，也是這個 schema 原本完全
+// 沒有的部分——42 張表全部停在題庫，於是老師建好題目之後就沒有下一步了。
+//
+// 設計上有三個地方是刻意的，因為它們各自對應一種會安靜出錯的狀況：
+//
+// 一、**作答的快照與題庫分離。** Attempt 產生時把題目的順序、選項順序、
+//    配分全部固定下來。老師在考試進行中改了題目（改錯字、補選項），
+//    已經開始作答的學生看到的必須是他開始時的那一份，否則他會在
+//    第 12 題重新整理之後看到不一樣的選項，而他的答案是照舊的編號存的。
+//
+// 二、**時間以伺服器為準。** expiresAt 在開始作答時就算好寫死，
+//    交卷時比對的是它而不是前端送來的時間。前端的計時器只是顯示。
+//    這一條不做的話，改系統時間就能無限延長考試。
+//
+// 三、**答案與計分分開存。** answerKeys 是學生選了什麼，earnedScore 是
+//    它值幾分。重新計分（老師改了標準答案、或送分）時只動後者，
+//    學生原本選了什麼永遠不變——那是申訴時唯一能拿出來的東西。
+// ═══════════════════════════════════════════════════════════════════
+
+enum PaperStatus {
+  DRAFT
+  READY // 可以派了
+  ARCHIVED
+}
+
+enum AssignmentMode {
+  EXAM // 正式測驗：計時、不可回頭改、成績計入
+  PRACTICE // 練習：不計時、可重做、即時看解析
+}
+
+/// 解析什麼時候給學生看。四段的差別在不同情境下差很多。
+enum ReleasePolicy {
+  IMMEDIATE // 每題作答後
+  ON_SUBMIT // 全部交卷後
+  ON_DUE // 截止日後（全班同時，避免先寫的洩題）
+  MANUAL // 老師手動放行
+  NEVER
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  GRADED
+  VOIDED // 作廢（誠信事件、系統故障）
+}
+
+model ExamPaper {
+  id        String      @id @default(cuid())
+  tenantId  String
+  subjectId String
+  title     String
+  status    PaperStatus @default(DRAFT)
+  /// 配分總和。由題目加總算出來後存下來，避免每次列表都要 join。
+  totalScore Float      @default(0)
+  /// 說明文字，會印在作答畫面最上方（「請以 2B 鉛筆…」這類）
+  instructions String?
+  createdBy String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subject     Subject          @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  creator     User?            @relation("PaperCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  items       ExamPaperItem[]
+  assignments Assignment[]
+
+  @@index([tenantId, subjectId, status])
+  @@map("exam_papers")
+}
+
+model ExamPaperItem {
+  id         String @id @default(cuid())
+  paperId    String
+  questionId String
+  order      Int
+  /// 這一份卷子上這一題值幾分。可以與題庫的預設配分不同——
+  /// 同一題在小考與模考的配分本來就會不一樣。
+  score      Float
+
+  paper    ExamPaper @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  question Question  @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([paperId, questionId])
+  @@unique([paperId, order])
+  @@index([questionId])
+  @@map("exam_paper_items")
+}
+
+model Assignment {
+  id       String         @id @default(cuid())
+  tenantId String
+  paperId  String
+  title    String
+  mode     AssignmentMode @default(EXAM)
+
+  openAt  DateTime?
+  dueAt   DateTime?
+  /// 作答時限（分鐘）。null 代表不限時。
+  timeLimitMin Int?
+  /// 截止後還可以交嗎。遲交會標記但不擋。
+  allowLate    Boolean @default(false)
+  /// 每人最多幾次。練習模式常設成多次。
+  maxAttempts  Int     @default(1)
+
+  /// 題序與選項順序隨機。防作弊的第一層，而且不需要學生裝任何東西。
+  shuffleQuestions Boolean @default(false)
+  shuffleOptions   Boolean @default(false)
+
+  releasePolicy ReleasePolicy @default(ON_DUE)
+  /// 手動放行的時間戳。releasePolicy=MANUAL 時看它。
+  releasedAt    DateTime?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  paper   ExamPaper          @relation(fields: [paperId], references: [id], onDelete: Restrict)
+  creator User?              @relation("AssignmentCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  targets AssignmentTarget[]
+  attempts Attempt[]
+
+  @@index([tenantId, openAt, dueAt])
+  @@map("assignments")
+}
+
+/// 派給誰。班級或個人，兩者可以並存（整班加上補考的兩位）。
+model AssignmentTarget {
+  id           String  @id @default(cuid())
+  assignmentId String
+  classId      String?
+  userId       String?
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  class      Class?     @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user       User?      @relation("AssignmentTargetUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([assignmentId, classId, userId])
+  @@index([classId])
+  @@index([userId])
+  @@map("assignment_targets")
+}
+
+model Attempt {
+  id           String        @id @default(cuid())
+  assignmentId String
+  userId       String
+  attemptNo    Int           @default(1)
+  status       AttemptStatus @default(IN_PROGRESS)
+
+  startedAt   DateTime  @default(now())
+  /// **伺服器算出來的到期時間，開始作答時就寫死。**
+  /// 交卷時比對的是它，不是前端送來的時間——否則改系統時間就能
+  /// 無限延長考試。前端的倒數只是顯示。
+  expiresAt   DateTime?
+  submittedAt DateTime?
+  /// 時間到自動交卷（不是學生自己按的）
+  autoSubmitted Boolean @default(false)
+  /// 逾期交卷。allowLate 為 true 時才可能出現。
+  late          Boolean @default(false)
+
+  /// **題目與選項的順序快照。** 隨機出題時每個人不同，而重新整理
+  /// 之後必須看到同一份；老師在考試中改了題目也不能影響已開始的人。
+  /// 形狀：[{ questionId, order, score, optionOrder: [1,3,2,...] }]
+  layout Json?
+
+  /// 客觀題自動計分的結果。非選題等人工或 AI 評分後再補。
+  autoScore  Float?
+  totalScore Float?
+  gradedAt   DateTime?
+
+  assignment Assignment      @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  user       User            @relation("AttemptUser", fields: [userId], references: [id], onDelete: Cascade)
+  answers    AttemptAnswer[]
+
+  @@unique([assignmentId, userId, attemptNo])
+  @@index([userId, status])
+  @@index([assignmentId, status])
+  @@map("attempts")
+}
+
+model AttemptAnswer {
+  id         String @id @default(cuid())
+  attemptId  String
+  questionId String
+
+  /// 學生選了什麼。**重新計分時不動這裡。**
+  answerKeys  Int[]   @default([])
+  answerText  String?
+  answerSlots Json?
+  /// 標記待複查。作答介面的「先跳過」。
+  flagged     Boolean @default(false)
+
+  /// 計分結果。老師改了標準答案或送分時只動這幾欄。
+  isCorrect   Boolean?
+  earnedScore Float?
+  /// 為什麼是這個分數。多選部分給分要說得出「答錯 1 個，得 3/5」。
+  scoreNote   String?
+
+  answeredAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  attempt  Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([attemptId, questionId])
+  @@index([questionId])
+  @@map("attempt_answers")
 }

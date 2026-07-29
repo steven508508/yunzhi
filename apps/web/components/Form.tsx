@@ -84,6 +84,62 @@ export function Form({ onSubmit, children, ...rest }: FormProps) {
 }
 
 /**
+ * 沒有欄位、只有一顆按鈕的動作：加一題、改狀態、重新計分、移除。
+ *
+ * # 為什麼不是各自寫三行 useState
+ *
+ * 因為那三行裡有一行**很容易寫成沒有作用的樣子**：
+ *
+ * ```ts
+ * const [busy, setBusy] = useState(false);
+ * async function go() {
+ *   if (busy) return;          // ← 這一行擋不住連點兩下
+ *   setBusy(true); ...
+ * }
+ * ```
+ *
+ * `setBusy` 是非同步的，兩次點擊之間若沒有經過一次 render，
+ * 兩次都會讀到 `busy === false`。看起來有防護，實際上沒有。
+ * `Form` 用 ref 解決同一件事（見上面的註解），這裡是同一個解法，
+ * 給沒有表單可以包的那些按鈕用。
+ *
+ * 症狀都不是當場的錯誤訊息，而是事後才看得出來的髒資料：兩份
+ * 一模一樣的卷子、同一批成績被重算兩次而稽核上有兩筆紀錄。
+ */
+export function useAction(): {
+  busy: boolean;
+  error: string | null;
+  clearError: () => void;
+  /** 成功回 true；失敗時錯誤已經放進 `error`，回 false。 */
+  run: (fn: () => Promise<void>) => Promise<boolean>;
+} {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+
+  const run = useCallback(async (fn: () => Promise<void>) => {
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      return true;
+    } catch (e) {
+      // 伺服器回的 `{error}` 已經是一句人話（見 submitJson），直接用。
+      setError(e instanceof Error ? e.message : typeof e === 'string' ? e : '沒有存起來');
+      return false;
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }, []);
+
+  const clearError = useCallback(() => setError(null), []);
+  return { busy, error, clearError, run };
+}
+
+/**
  * 把 fetch 的回應轉成「成功就回資料、失敗就丟出看得懂的錯誤」。
  *
  * 各個畫面自己處理回應時，最常見的兩種錯是：把 4xx 當成成功

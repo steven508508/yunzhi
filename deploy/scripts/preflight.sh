@@ -124,6 +124,23 @@ port_in_use() {
   fi
 }
 
+# 這個埠是不是本系統自己的容器佔著的？
+#
+# **沒有這一項，安裝腳本就不是可重複執行的。** 系統跑起來之後
+# Caddy 當然佔著 80／443，於是第二次執行 docker-install.sh
+# （改了 .env 之後套用設定，是文件教的正常做法）會在安裝前檢查
+# 就被自己擋下來，訊息是「連接埠 80 已被佔用」——而佔用它的正是
+# 這套系統。維護老師的合理反應是去把它停掉，於是補習班在營業時間
+# 斷線一次，只為了改一行設定。
+port_is_ours() {
+  local port="$1" name
+  command -v docker >/dev/null 2>&1 || return 1
+  for name in $(docker ps --filter 'name=yunzhi' --format '{{.Names}}' 2>/dev/null); do
+    docker port "${name}" 2>/dev/null | grep -qE ":${port}\$" && return 0
+  done
+  return 1
+}
+
 # .env 可能還沒建立，先取一次 PROXY_MODE
 _proxy_mode="caddy"
 if [[ -f "${YZ_ROOT}/.env" ]]; then
@@ -148,7 +165,9 @@ if [[ "${_proxy_mode}" == "external" ]]; then
 
   _bind_port="$(grep -E '^WEB_BIND_PORT=' "${YZ_ROOT}/.env" 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo 3000)"
   _bind_port="${_bind_port:-3000}"
-  if port_in_use "${_bind_port}"; then
+  if port_is_ours "${_bind_port}"; then
+    ok "連接埠 ${_bind_port} 由本系統的 web 容器佔用（重跑安裝，正常）"
+  elif port_in_use "${_bind_port}"; then
     check_fail "連接埠 ${_bind_port} 已被佔用，應用無法綁定。改 .env 的 WEB_BIND_PORT，或停掉佔用的行程。"
   else
     ok "連接埠 ${_bind_port} 可用（供 nginx 轉發）"
@@ -160,7 +179,9 @@ if [[ "${_proxy_mode}" == "external" ]]; then
   fi
 else
   for port in 80 443; do
-    if port_in_use "${port}"; then
+    if port_is_ours "${port}"; then
+      ok "連接埠 ${port} 由本系統的 Caddy 佔用（重跑安裝，正常）"
+    elif port_in_use "${port}"; then
       holder="$(ss -Hltnp "sport = :${port}" 2>/dev/null | grep -oP 'users:\(\("\K[^"]+' | head -1 || echo '未知')"
       check_fail "連接埠 ${port} 已被佔用（${holder}）。內建 Caddy 需要 80 與 443。機器上已有 nginx 時，請在 .env 設定 PROXY_MODE=external 改用它。"
     else
@@ -184,21 +205,51 @@ for c in curl tar gzip openssl flock; do
 done
 
 if [[ "${MODE}" == "docker" ]]; then
+  # snap 版的 Docker 跑在嚴格 confinement 底下，只看得到 $HOME 與 /media。
+  # 本系統 bind mount 了 deploy/postgres、deploy/caddy 與 /var/backups/yunzhi，
+  # 全部在 confinement 之外。症狀不是「掛載失敗」而是**掛載變成空目錄**：
+  # Postgres 起得來但吃的是預設設定，WAL 歸檔沒開，RPO 從 15 分鐘悄悄
+  # 變成 24 小時，而所有健康檢查都是綠的。
+  if command -v snap >/dev/null 2>&1 && snap list docker >/dev/null 2>&1; then
+    check_fail "偵測到 snap 版的 Docker。confinement 會讓本系統的 bind mount 靜默失效（掛載變成空目錄）。請 sudo snap remove docker，改用 apt 版：sudo ./deploy/scripts/ubuntu-install.sh"
+  fi
+
   if command -v docker >/dev/null 2>&1; then
     dv="$(docker --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)"
     ok "Docker ${dv}"
     if docker info >/dev/null 2>&1; then
       ok "Docker daemon 運作中"
+
+      # docker-compose.yml 給每個服務都設了記憶體上限。Docker 在
+      # 記憶體控制器不可用時**安靜地忽略**它們，只在 `docker info`
+      # 的最後印一行 WARNING。於是 AI 服務解析一份 200 頁題本可以
+      # 把整台機器吃光，OOM killer 挑最大的行程砍——那是 PostgreSQL，
+      # 正在考試的學生全部斷線，而 compose 檔裡明明寫著 4g。
+      _dinfo="$(docker info 2>&1 || true)"
+      if grep -qi 'No memory limit support' <<<"${_dinfo}"; then
+        check_fail "Docker 回報「No memory limit support」。compose 裡所有的記憶體上限都不會生效。核心開機參數需要 cgroup_enable=memory。"
+      else
+        ok "容器記憶體上限可用"
+      fi
+      grep -qi 'No swap limit support' <<<"${_dinfo}" \
+        && check_warn "Docker 回報「No swap limit support」。記憶體上限仍生效，但容器可以無限用 swap，尖峰時磁碟 I/O 會拖垮資料庫。"
     else
-      check_fail "Docker daemon 連不上。請確認：sudo systemctl start docker，以及目前使用者是否在 docker 群組。"
+      check_fail "Docker daemon 連不上。請確認：sudo systemctl start docker，以及目前使用者是否在 docker 群組（**加入群組之後要重新登入才生效**）。"
     fi
     if docker compose version >/dev/null 2>&1; then
       ok "Docker Compose $(docker compose version --short 2>/dev/null)"
     else
-      check_fail "缺少 Docker Compose plugin（sudo apt-get install -y docker-compose-plugin）"
+      check_fail "缺少 Docker Compose plugin。注意 docker-compose（有連字號）是舊版 v1，本系統要的是 v2 的 plugin：sudo apt-get install -y docker-compose-plugin"
+    fi
+    # 開機自動啟動。少了它，機房停電復電之後補習班早上開門是關的，
+    # 而且 docker ps 一個容器都沒有、日誌裡沒有任何錯誤。
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl is-enabled --quiet docker.service 2>/dev/null \
+        && ok "docker.service 開機自動啟動" \
+        || check_warn "docker.service 沒有設為開機啟動，重開機後整套系統不會回來：sudo systemctl enable docker"
     fi
   else
-    check_fail "未安裝 Docker。安裝方式見 docs/INSTALL.md，或執行 curl -fsSL https://get.docker.com | sh"
+    check_fail "未安裝 Docker。全新的 Ubuntu 請執行：sudo ./deploy/scripts/ubuntu-install.sh（它會用 Docker 官方 apt 儲存庫安裝，並處理群組、防火牆與開機啟動）"
   fi
 else
   command -v node >/dev/null 2>&1 && {
@@ -230,6 +281,53 @@ nofile="$(ulimit -n)"
 if [[ -f /proc/sys/vm/swappiness ]]; then
   sw="$(cat /proc/sys/vm/swappiness)"
   (( sw > 10 )) && check_warn "vm.swappiness=${sw}。資料庫機器建議設為 1–10，否則 Postgres 的快取會被換出，查詢延遲會突然飆高。"
+fi
+
+# cgroup 的記憶體控制器。上面 docker info 那一項是從 Docker 的角度問，
+# 這一項是從核心的角度問——Docker 沒裝起來時仍然要能診斷。
+if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
+  if grep -qw memory /sys/fs/cgroup/cgroup.controllers; then
+    ok "cgroup v2，記憶體控制器可用"
+  else
+    check_fail "cgroup v2 的記憶體控制器沒有啟用，容器的記憶體上限會被靜默忽略。核心開機參數需要 cgroup_enable=memory。"
+  fi
+elif [[ -d /sys/fs/cgroup/memory ]]; then
+  check_warn "還在 cgroup v1。可以跑，但 Ubuntu 22.04 以後預設是 v2，這台機器可能被改過 systemd.unified_cgroup_hierarchy。"
+else
+  check_fail "找不到 cgroup 的記憶體控制器（v1 與 v2 都沒有）。容器的記憶體上限完全無效。"
+fi
+
+# ═══════════════════════════════════════════════════════════════
+section "語系"
+# ═══════════════════════════════════════════════════════════════
+
+# Ubuntu Server 的最小安裝常常只有 POSIX/C locale（charmap 是
+# ANSI_X3.4-1968＝ASCII）。這時候備份 tar 裡的中文檔名
+# （老師上傳的「數學A_第三次模擬考.pdf」）會在**還原的時候**
+# 才變成一串問號——也就是最不能出事的那一刻。
+_charmap="$(locale charmap 2>/dev/null || echo '?')"
+if [[ "${_charmap}" == "UTF-8" ]]; then
+  ok "語系字元集 UTF-8"
+else
+  check_warn "語系字元集是 ${_charmap}（不是 UTF-8）。備份與還原時中文檔名會壞掉。修正：echo 'LANG=C.UTF-8' | sudo tee /etc/default/locale，然後重新登入。"
+fi
+
+# ═══════════════════════════════════════════════════════════════
+section "防火牆"
+# ═══════════════════════════════════════════════════════════════
+
+# **Docker 發布的連接埠不受 ufw 約束。**
+# Docker 在 nat/PREROUTING 與 FORWARD 動手腳，而 ufw 的規則掛在
+# INPUT。`sudo ufw default deny incoming` 之後 `ufw status` 顯示
+# 一切安全，但任何 `ports:` 都對全世界開著，而且看不出來。
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -qi 'Status: active'; then
+  if command -v iptables >/dev/null 2>&1 && iptables -S DOCKER-USER 2>/dev/null | grep -q 'yunzhi-docker-user-drop'; then
+    ok "ufw 已啟用，且 DOCKER-USER 有本系統的過濾規則"
+  else
+    check_warn "ufw 已啟用，但 Docker 發布的連接埠**不受它約束**（Docker 走 FORWARD，ufw 走 INPUT）。目前只有 Caddy 對外，風險有限；但只要有人在 compose 加一行 ports:，那個埠就是對全網開放的。補上過濾：sudo ./deploy/scripts/ubuntu-install.sh"
+  fi
+elif command -v ufw >/dev/null 2>&1; then
+  check_warn "ufw 已安裝但未啟用。設定方式：sudo ./deploy/scripts/ubuntu-install.sh（它會先放行 SSH 再啟用，不會把你鎖在門外）。"
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -266,6 +364,19 @@ if [[ -f "${YZ_ROOT}/.env" ]]; then
     [[ "${APP_DOMAIN:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && check_fail "TLS_MODE=letsencrypt 不能用 IP 位址。內網部署請改 TLS_MODE=internal。"
   fi
 
+  # TLS_MODE 與 TLS_DIRECTIVE 是同一件事的兩個變數，而 Caddy 只讀後者。
+  # 不一致的症狀是「憑證發錯但每一項健康檢查都是綠的」：改了 TLS_MODE
+  # 卻沒改 TLS_DIRECTIVE 的機器，會用本地 CA 簽一張憑證發給全校，
+  # 每一台學生電腦都看到「你的連線不是私人連線」。
+  if [[ "${PROXY_MODE:-caddy}" == "caddy" ]]; then
+    if "${YZ_SCRIPTS_DIR}/render-caddy.sh" --check >/dev/null 2>&1; then
+      ok "TLS 設定一致（TLS_MODE=${TLS_MODE:-internal}）"
+    else
+      "${YZ_SCRIPTS_DIR}/render-caddy.sh" --check || true
+      check_fail "TLS_MODE 與 TLS_DIRECTIVE 不一致。執行 ./deploy/scripts/render-caddy.sh 修正（安裝腳本會自動跑，手動改過 .env 才會出現這一項）。"
+    fi
+  fi
+
   if [[ "${AI_PROVIDER:-mock}" != "mock" ]] && [[ -z "${AI_API_KEY:-}" ]]; then
     check_fail "AI_PROVIDER=${AI_PROVIDER} 需要 AI_API_KEY。僅驗證安裝時可先設為 mock。"
   fi
@@ -285,11 +396,35 @@ fi
 section "網路"
 # ═══════════════════════════════════════════════════════════════
 
+# 已經建好映像的機器不需要對外網路，所以這一節一律是警告而不是失敗。
+# 但兩個目標要**分開**測：企業防火牆放行 Docker Hub 卻擋掉
+# binaries.prisma.sh 是很常見的設定，而那會讓建置在第 8 分鐘
+# 才以一個看不出原因的錯誤失敗。
+_net_ok=1
 if curl -fsS --max-time 8 -o /dev/null https://registry-1.docker.io/v2/ 2>/dev/null \
    || curl -fsS --max-time 8 -o /dev/null https://github.com 2>/dev/null; then
-  ok "對外網路可達"
+  ok "連得到 Docker Hub"
 else
-  check_warn "對外網路不通或被防火牆擋住。離線安裝請用 deploy/scripts/build-offline-bundle.sh 在有網路的機器上打包。"
+  check_warn "連不到 Docker Hub（registry-1.docker.io）。基底映像 pgvector／redis／minio／caddy 都在那裡。"
+  _net_ok=0
+fi
+
+# Prisma 的查詢引擎是**執行期**的硬相依，但它在建置時下載並烤進映像。
+# 抓不到的話 `docker compose build` 會失敗，而錯誤訊息是一個
+# 403 Forbidden 加一串網址，看起來像是 Prisma 官方掛了。
+if curl -fsS --max-time 8 -o /dev/null -w '' https://binaries.prisma.sh/ 2>/dev/null \
+   || curl -sS --max-time 8 -o /dev/null -w '%{http_code}' https://binaries.prisma.sh/ 2>/dev/null | grep -qE '^[234]'; then
+  ok "連得到 binaries.prisma.sh"
+else
+  check_warn "連不到 binaries.prisma.sh。Prisma 查詢引擎在建置時從那裡下載並烤進映像，抓不到就建置失敗。"
+  _net_ok=0
+fi
+
+if (( ! _net_ok )); then
+  dim "封閉網段的做法：在有網路的**同架構**機器上執行"
+  dim "  ./deploy/scripts/build-offline-bundle.sh"
+  dim "把產出的 yunzhi-offline-*.tar.gz 搬過來，解開之後"
+  dim "  sudo ./deploy/scripts/ubuntu-install.sh --offline"
 fi
 
 if [[ "${PROXY_MODE:-caddy}" == "caddy" && "${TLS_MODE:-internal}" == "letsencrypt" ]] && [[ -n "${APP_DOMAIN:-}" ]]; then
