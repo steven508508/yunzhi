@@ -2800,3 +2800,227 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   padding-top: 12px; border-top: 1px solid var(--rule);
 }
 .yz-glink__add .yz-field { flex: 1 1 240px; margin-bottom: 0; }
+
+/* ── 升學輔導 ──────────────────────────────────────────────────
+   這一區的密度比工作面板低一點。理由是它被讀的方式不同：題庫與成績
+   是「掃過去找一列」，升學規劃是「一句一句讀完」——管道排他規則是
+   本模組最常被誤解的一塊，而誤解的代價是一整年。所以行距放寬，
+   而且每一條規則都給它自己的一塊，不擠在表格裡。
+
+   顏色只用兩種訊號：硃砂（--mark）給「放棄也無法解除」與「現在就
+   不成立」，其餘一律是墨色的深淺。這裡刻意**沒有綠色**——「可以報名」
+   不是一件值得慶祝的事，它只是還沒被封鎖而已。 */
+
+/* 更新狀態的那一列。左邊一句說明、右邊一顆按鈕。 */
+.yz-adm__editbar {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  align-items: center; justify-content: space-between;
+  margin-bottom: 22px; padding-bottom: 16px;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-adm__editbar .yz-hint { flex: 1 1 300px; margin: 0; }
+
+/* ── 管道資格 ────────────────────────────────────────────────
+   五條，照時序排。每一條是一塊而不是一列，因為「為什麼不行」那句話
+   比「行不行」重要得多。 */
+.yz-adm__rules { list-style: none; margin: 0 0 12px; padding: 0; }
+.yz-adm__rule {
+  padding: 12px 0 13px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-adm__rulehead {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+}
+/* 「可／否」。一個字，宋體，不用圖示——圖示要學，一個字不用。 */
+.yz-adm__mark {
+  flex: 0 0 auto;
+  width: 20px; text-align: center;
+  font-family: var(--font-doc); font-size: 13px;
+  color: var(--ink-3);
+}
+.yz-adm__rule--no .yz-adm__mark { color: var(--mark); }
+.yz-adm__rulename { font-size: 14px; }
+.yz-adm__rule--no .yz-adm__rulename { color: var(--ink-2); }
+.yz-adm__when { font-size: 12px; color: var(--ink-3); }
+
+/* 為什麼不行。縮到與名稱對齊，讀起來是「這一條的說明」而不是新的一條。 */
+.yz-adm__why {
+  margin: 7px 0 0 30px;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-adm__step {
+  margin: 7px 0 0 30px;
+  font-size: 13px; line-height: var(--lh-ui);
+}
+
+/* 解除方式。**這個標籤才是輔導價值所在**，所以它在句子前面而不是後面。 */
+.yz-adm__remedy {
+  display: inline-block; margin-right: 7px;
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  font-size: 11.5px; color: var(--ink-2);
+  white-space: nowrap;
+}
+.yz-adm__remedy--none {
+  border-color: var(--mark); color: var(--mark); background: var(--mark-soft);
+}
+
+/* ── 規劃的後果 ──────────────────────────────────────────────
+   左側一條線而不是整塊底色：它們不是錯誤，是後果。整塊紅底會被讀成
+   「你填錯了」，而學生完全可以刻意這樣填。 */
+.yz-adm__conflicts { list-style: none; margin: 0 0 10px; padding: 0; }
+.yz-adm__conflict {
+  margin-bottom: 10px; padding: 10px 0 10px 13px;
+  border-left: 2px solid var(--rule);
+  font-size: 13px; line-height: var(--lh-ui);
+}
+.yz-adm__conflict--block { border-left-color: var(--mark); background: var(--mark-soft); }
+.yz-adm__sev {
+  display: block; margin-bottom: 3px;
+  font-family: var(--font-doc); font-size: 11.5px; color: var(--ink-3);
+}
+.yz-adm__conflict--block .yz-adm__sev { color: var(--mark); }
+
+/* ── 志願 ────────────────────────────────────────────────────
+   依管道分組。志願序是宋體數字靠右對齊，掃得出順序。 */
+.yz-adm__group { margin-bottom: 18px; }
+.yz-adm__grouphead {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
+  margin-bottom: 4px;
+  font-family: var(--font-doc); font-size: 13.5px;
+}
+.yz-adm__count { font-family: var(--font-ui); font-size: 12px; color: var(--ink-3); }
+.yz-adm__wishes { list-style: none; margin: 0; padding: 0; }
+.yz-adm__wish {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  align-items: baseline;
+  padding: 8px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-adm__wrank {
+  flex: 0 0 auto; width: 22px; text-align: right;
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  font-size: 13px; color: var(--ink-3);
+}
+.yz-adm__wname { flex: 1 1 200px; font-size: 13.5px; }
+.yz-adm__wname > b { font-family: var(--font-doc); font-weight: 400; }
+/* 興趣理由。這一欄的存在是為了讓學生記得自己原本想讀什麼，
+   所以它用手寫體——那是他自己寫給自己的。 */
+.yz-adm__wtag {
+  font-family: var(--font-hand); font-size: 13px; color: var(--ink-2);
+}
+
+/* ── 繁星校內位置 ────────────────────────────────────────────
+   一個位置一塊。序位是這一塊唯一放大的東西，因為它是學生唯一
+   真的需要帶走的數字（而且它是全部——沒有其他人的百分比、沒有人數）。 */
+.yz-adm__positions { list-style: none; margin: 0 0 14px; padding: 0; }
+.yz-adm__pos {
+  margin-bottom: 14px; padding: 14px 15px;
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+}
+.yz-adm__poshead {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline;
+  padding-bottom: 9px; border-bottom: 1px solid var(--rule-2);
+}
+.yz-adm__posname { font-family: var(--font-doc); font-size: 14px; }
+.yz-adm__order {
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  font-size: 13px; color: var(--ink-2);
+}
+.yz-adm__order > b { font-size: 21px; font-weight: 600; color: var(--ink); }
+/* 人數不足而不給名次時。**看起來要與有名次的明顯不同**，
+   否則學生會以為系統算不出來。 */
+.yz-adm__order--hidden { font-family: var(--font-ui); font-size: 13px; }
+.yz-adm__tag {
+  padding: 1px 7px;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-size: 11.5px; color: var(--ink-2);
+}
+.yz-adm__tag.yz-warn { border-color: var(--mark); }
+
+/* 敏感度。兩個方向連在一起讀，後面跟一句為什麼要這樣呈現。 */
+.yz-adm__sens {
+  margin: 9px 0 0 30px;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-adm__senshint { display: block; margin-top: 3px; color: var(--ink-3); font-size: 12px; }
+
+/* ── 讀書計畫 ────────────────────────────────────────────────
+   每一列是一個動作。科目在最前面，因為學生一次只會坐下來讀一科。 */
+.yz-adm__plan { margin: 0 0 12px; padding-left: 22px; }
+.yz-adm__planitem {
+  margin-bottom: 10px;
+  font-size: 13.5px; line-height: var(--lh-ui);
+}
+.yz-adm__subject {
+  display: inline-block; margin-right: 8px;
+  padding: 1px 6px;
+  background: var(--paper-sunk); border-radius: var(--r-sm);
+  font-size: 11.5px; color: var(--ink-2);
+}
+.yz-adm__action { }
+.yz-adm__go { display: inline-block; margin-left: 8px; font-size: 12.5px; }
+
+/* ── 明確不做的事 ────────────────────────────────────────────
+   定義列表。這一段是要被讀完的，所以它的行距最寬——它回答的是
+   「為什麼別的工具有這個數字而這裡沒有」，而那個回答必須站得住。 */
+.yz-adm__nope { margin: 0; }
+.yz-adm__nope > div {
+  padding: 12px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-adm__nope dt {
+  font-family: var(--font-doc); font-size: 13.5px; color: var(--ink);
+}
+.yz-adm__nope dd {
+  margin: 5px 0 0;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+
+/* ── 承辦人的全校檢視 ────────────────────────────────────────
+   這一側回到工作面板的密度：承辦人是在找問題，不是在讀說明。 */
+.yz-adm__crowd { list-style: none; margin: 0 0 12px; padding: 0; }
+.yz-adm__crowd > li {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
+  padding: 8px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-adm__num {
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  font-size: 12.5px; color: var(--ink-2);
+}
+/* 當事人的名單。整行獨立一列，因為它可能很長。 */
+.yz-adm__members {
+  flex: 1 1 100%;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+
+.yz-adm__draft { margin-bottom: 14px; }
+.yz-adm__draftpos {
+  margin-bottom: 16px; padding-bottom: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-adm__draftlist { list-style: none; margin: 0; padding: 0; }
+.yz-adm__draftlist > li {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
+  padding: 6px 0;
+}
+/* 獲得推薦與沒有，用一條左側線區分而不是底色——這是一份會被列印的
+   草案，底色印出來是一塊灰。 */
+.yz-adm__nominated { box-shadow: inset 2px 0 0 var(--ink); padding-left: 9px; }
+.yz-adm__out { padding-left: 11px; color: var(--ink-2); }
+
+.yz-adm__result { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.yz-adm__skipped { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-adm__skipped > li {
+  padding: 5px 0 5px 11px;
+  border-left: 2px solid var(--mark);
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+
+@media (max-width: 620px) {
+  /* 說明文字的縮排在小螢幕上要收掉，否則一句話會剩下十幾個字寬。 */
+  .yz-adm__why, .yz-adm__step, .yz-adm__sens { margin-left: 0; }
+  .yz-adm__order > b { font-size: 18px; }
+  .yz-adm__editbar { align-items: flex-start; }
+}
