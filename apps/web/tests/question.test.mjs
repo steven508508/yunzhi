@@ -19,6 +19,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { gradeAttempt } from '../lib/grading.mjs';
+import { figureAlt, readAssets } from '../lib/math.mjs';
+import { normalizeAssets } from '../lib/questionShape.mjs';
 import {
   bumpsVersion,
   checkOptionStructure,
@@ -440,4 +442,73 @@ test('多選題的部分給分規則在送分之後仍然留著', () => {
     [{ questionId: 'q1', answerKeys: [1] }],
   );
   assert.equal(after.results[0].earnedScore, 0, '取消之後 ALL_OR_NOTHING 還在');
+});
+
+
+// ─────────────────────────────────────────────────────────────────
+// 附圖入庫
+//
+// **這是整條附圖路徑上最容易靜靜地壞掉的一段。** 前面的每一步都在
+// `ImportCandidate.assets` 上，而校對介面讀的正是那一欄——所以這一支
+// 漏掉一個欄位時，老師在校對頁看到的一切都完全正常，只有入庫之後
+// 學生那一邊的圖不對。沒有錯誤訊息，也沒有人會回頭查校對頁。
+// ─────────────────────────────────────────────────────────────────
+
+test('附圖的 id 一定要帶進題庫', () => {
+  // 錯的話：圖還在，但題幹裡的 `![[a:fig1]]` 對不到它，於是題目中間
+  // 留著一句「這裡有一張附圖，但系統找不到它」，圖被擠到題幹後面——
+  // 一道寫著「如右圖」的幾何題就指向了錯的地方。
+  const out = normalizeAssets([
+    { id: 'fig1', key: 't/x/import/j/fig/0001-00.png', alt: '座標圖', width: 127, height: 115 },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, 'fig1');
+  assert.equal(out[0].key, 't/x/import/j/fig/0001-00.png');
+  assert.equal(out[0].alt, '座標圖');
+  assert.equal(out[0].width, 127);
+  assert.equal(out[0].height, 115);
+});
+
+test('沒有物件鍵的項目不入庫', () => {
+  // 沒有鍵就沒有圖可以顯示，留著只會在學生畫面上變成一個破圖。
+  assert.equal(normalizeAssets([{ id: 'f1' }, null, 42, { key: '' }]), undefined);
+  assert.equal(normalizeAssets(null), undefined, '這一欄是 null 的題目佔多數，不能丟例外');
+  assert.equal(normalizeAssets('not an array'), undefined);
+});
+
+test('沒有 alt 時退回圖內的文字，而不是留一個空字串', () => {
+  // 空字串在無障礙的約定裡是「這張圖純裝飾，跳過它」，而這裡的圖是
+  // 題目的**條件**——跳過它等於這一題對用螢幕閱讀器的學生少了一個
+  // 條件，而他不會知道少了什麼。
+  const [a] = normalizeAssets([{ key: 'k', labels: ['A', 'O', 'x'] }]);
+  assert.equal(a.alt, 'A O x');
+  // 真的什麼素材都沒有時由渲染端補「第 3 題附圖」（lib/math.mjs），
+  // 所以這裡是空字串沒關係——但 labels 有東西時不可以浪費掉。
+  const [b] = normalizeAssets([{ key: 'k' }]);
+  assert.equal(b.alt, '');
+});
+
+test('壞掉的寬高存成 null，不會變成 <img width="0">', () => {
+  // 0、負數、字串在資料庫裡都可能出現（管線改版、手動修資料），
+  // 而 `width="0"` 的圖在瀏覽器上等於不存在。
+  const [a] = normalizeAssets([{ key: 'k', width: 0, height: -3 }]);
+  assert.equal(a.width, null);
+  assert.equal(a.height, null);
+  const [b] = normalizeAssets([{ key: 'k', width: '127', height: NaN }]);
+  assert.equal(b.width, null);
+  assert.equal(b.height, null);
+});
+
+test('入庫的形狀與渲染端讀的形狀對得起來', () => {
+  // 兩邊各自演化的話，症狀是「入庫成功、畫面上沒有圖」——而兩邊
+  // 分開看都是對的。這一條把它們釘在一起。
+  const stored = normalizeAssets([
+    { id: 'fig1', key: 'k', alt: '', labels: ['O'], width: 127, height: 115, kind: 'FIGURE' },
+  ]);
+  const read = readAssets(stored);
+  assert.equal(read.length, 1);
+  assert.equal(read[0].id, 'fig1');
+  assert.equal(read[0].key, 'k');
+  assert.equal(read[0].width, 127);
+  assert.notEqual(figureAlt(read[0], { label: '第 3 題' }), '', '替代文字不可以是空字串');
 });

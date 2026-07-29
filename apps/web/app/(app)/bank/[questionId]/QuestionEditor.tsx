@@ -37,8 +37,13 @@ export type EditorQuestion = {
   type: string;
   content: string;
   score: number;
-  options: { order: number; label: string; content: string }[];
+  options: { order: number; label: string; content: string; assets?: unknown }[];
   answerKeys: number[];
+  /**
+   * 題幹的附圖。預覽要畫得出來——老師在上面的輸入框裡看到的是
+   * `![[a:fig1]]` 這串標記，他要能在下面確認那張圖真的在對的位置。
+   */
+  contentAssets?: unknown;
   answerText: string | null;
   answerSlots: string[] | null;
   knowledgePointIds: string[];
@@ -216,7 +221,10 @@ export default function QuestionEditor({
       />
       <div className="yz-qedit__preview">
         <span className="yz-qedit__previewlabel">預覽</span>
-        <MathText>{content}</MathText>
+        {/* 附圖跟著題幹的標記走。**這是老師唯一看得到「圖在哪一段」的
+            地方**——改題幹時把 `![[a:fig1]]` 挪錯位置，症狀是學生在
+            「如右圖」那一句之前就看到了圖，或者反過來。 */}
+        <MathText assets={question.contentAssets}>{content}</MathText>
       </div>
 
       <div className="yz-qedit__pair">

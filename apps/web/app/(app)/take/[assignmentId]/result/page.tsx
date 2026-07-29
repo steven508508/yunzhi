@@ -208,7 +208,11 @@ export default async function ResultPage({
                 ) : (
                   <ol className="yz-review__list">
                     {view.questions.map((q) => (
-                      <QuestionBlock key={`${q.questionId}-${q.order}`} q={q} />
+                      <QuestionBlock
+                        key={`${q.questionId}-${q.order}`}
+                        q={q}
+                        attemptId={view.attemptId}
+                      />
                     ))}
                   </ol>
                 )}
@@ -307,15 +311,21 @@ const VERDICT_MARK: Record<QuestionVerdict, string> = {
   PENDING: '？',
 };
 
-function QuestionBlock({ q }: { q: ResultQuestion }) {
+function QuestionBlock({ q, attemptId }: { q: ResultQuestion; attemptId: string }) {
   const wrong = q.verdict === 'WRONG' || q.verdict === 'PARTIAL' || q.verdict === 'BLANK';
+  // 附圖走 `/api/assets?attempt=…`：學生沒有科目授課權，那一支據此
+  // 判斷「這是你自己那一份，而且檢討已經放行」。這一頁能畫出來就
+  // 代表放行過了（見 lib/result.ts 的分界三行），兩邊問的是同一件事。
+  const figureBase = `/api/assets?attempt=${encodeURIComponent(attemptId)}&key=`;
 
   return (
     <li className={`yz-review yz-review--${q.verdict.toLowerCase()}`}>
       {q.stimulus && (
         <div className="yz-take__stimulus">
           {q.stimulusLabel && <div className="yz-take__stimlabel">{q.stimulusLabel}</div>}
-          <MathText>{q.stimulus}</MathText>
+          <MathText assets={q.stimulusAssets} assetBase={figureBase} label="題組素材">
+            {q.stimulus}
+          </MathText>
         </div>
       )}
 
@@ -333,14 +343,19 @@ function QuestionBlock({ q }: { q: ResultQuestion }) {
             {q.earnedScore === null ? '—' : fmtScore(q.earnedScore)} / {fmtScore(q.score)} 分
           </span>
           {/* 收合時的一行預覽也要排出來：學生是靠這一行認出「這就是我卡住
-              的那一題」的，而一整串反斜線在一行的寬度裡認不出任何東西。 */}
+              的那一題」的，而一整串反斜線在一行的寬度裡認不出任何東西。
+              **這一行刻意不傳 assets**：它在 `<summary>` 裡，而附圖是可以
+              點開放大的按鈕——巢狀的互動元素會讓鍵盤操作與讀螢幕都亂掉，
+              而且一行的高度也放不下一張圖。標記會排成「〔附圖〕」。 */}
           <span className="yz-review__peek"><MathText>{q.content}</MathText></span>
         </summary>
 
         <div className="yz-review__body">
           <div className="yz-review__stem">
             {q.subLabel && <b>{q.subLabel}</b>}
-            <MathText>{q.content}</MathText>
+            <MathText assets={q.contentAssets} assetBase={figureBase} label={`第 ${q.order} 題`}>
+              {q.content}
+            </MathText>
           </div>
 
           {q.options.length > 0 && (
@@ -360,7 +375,15 @@ function QuestionBlock({ q }: { q: ResultQuestion }) {
                     {o.correct ? '✓' : o.picked ? '×' : ''}
                   </span>
                   <span className="yz-take__optkey">({o.label})</span>
-                  <span><MathText>{o.content}</MathText></span>
+                  <span>
+                    <MathText
+                      assets={o.assets}
+                      assetBase={figureBase}
+                      label={`第 ${q.order} 題選項 ${o.label}`}
+                    >
+                      {o.content}
+                    </MathText>
+                  </span>
                   {/* 文字標記與底色並存。只靠底色的話，把畫面印出來
                       或色覺不同的人就分不出哪一個是自己選的。 */}
                   {o.picked && <span className="yz-review__tag">你選的</span>}

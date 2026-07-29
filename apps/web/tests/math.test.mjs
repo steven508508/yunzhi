@@ -26,7 +26,15 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { escapeHtml, hasMath, renderMathHtml, splitMath } from '../lib/math.mjs';
+import {
+  escapeHtml,
+  figureAlt,
+  hasMath,
+  readAssets,
+  referencedAssets,
+  renderMathHtml,
+  splitMath,
+} from '../lib/math.mjs';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -251,7 +259,146 @@ test('式子裡的中文不會讓伺服器 log 每次都多一行警告', () => 
 });
 
 // ─────────────────────────────────────────────────────────────────
-// 五、樣式與字型：本地檔案，只載入一次
+// 五、附圖標記
+//
+// 這一組守的是「一道幾何題在學生畫面上長什麼樣」。三種壞法：
+//
+//   · 標記沒被認出來 → 題幹中間印著一串 `![[a:fig1]]`，看起來像亂碼
+//   · 標記被吃太多 → 題幹從那個字開始少了一截，而沒有任何錯誤
+//   · 替代文字是空字串 → 用螢幕閱讀器的學生**這一題少了一個條件**，
+//     而畫面上什麼都沒有發生
+// ─────────────────────────────────────────────────────────────────
+
+test('附圖標記切得出來，前後的字留在原地', () => {
+  // 錯的話：畫面上是「如圖 ![[a:fig1]]，求 x」——那串東西在校對介面
+  // 看起來就像 AI 抽壞了字，老師會把它刪掉，然後圖就永遠對不回來了。
+  assert.deepEqual(kinds('如圖 ![[a:fig1]]，求 x'), ['text', 'asset', 'text']);
+  assert.deepEqual(values('如圖 ![[a:fig1]]，求 x'), ['如圖 ', 'fig1', '，求 x']);
+});
+
+test('附圖標記與數學式混在同一段時兩種都切得出來', () => {
+  // 這是實際的內容長相。分兩層處理（先數學再圖、或先圖再數學）
+  // 一定會有一層拿到被另一層剖開的字串，理由見 lib/math.mjs 檔頭。
+  const src = '已知 $x>0$，![[a:f1]] 中 $\angle A = 30^\circ$';
+  assert.deepEqual(kinds(src), ['text', 'inline', 'text', 'asset', 'text', 'inline']);
+  assert.deepEqual(
+    values(src),
+    ['已知 ', 'x>0', '，', 'f1', ' 中 ', '\angle A = 30^\circ'],
+  );
+});
+
+test('標記不會把數學式的分隔符吃掉', () => {
+  // `![[a:f1]]$x$` 中間沒有空白。標記多吃一個字元的話，後面那個
+  // `$` 就落單了，而落單的 `$` 會讓整段話變成一個錢字號加半題。
+  assert.deepEqual(kinds('![[a:f1]]$x$'), ['asset', 'inline']);
+  assert.deepEqual(values('![[a:f1]]$x$'), ['f1', 'x']);
+});
+
+test('一段裡有好幾張圖，每一張都切得出來而且順序不變', () => {
+  const src = '![[a:f1]] 與 ![[a:f2]]';
+  assert.deepEqual(values(src), ['f1', ' 與 ', 'f2']);
+  assert.deepEqual(referencedAssets(src), ['f1', 'f2']);
+  assert.deepEqual(referencedAssets('![[a:f1]] 又 ![[a:f1]]'), ['f1'], '同一張圖只算一次');
+});
+
+test('寫壞的標記不炸頁面，也不會吞掉後面的內容', () => {
+  // 四種壞法都真的出現過：id 空的、少一個括號、id 太長（模型把整句
+  // 圖說塞進去）、只有半個開頭。**共通的要求是後面那句話還在**——
+  // 被吞掉的半題沒有任何線索，學生也沒有別的地方看得到它。
+  for (const bad of [
+    '![[a:]] 求 x',
+    '![[a:f1] 求 x',
+    `![[a:${'z'.repeat(40)}]] 求 x`,
+    '![[ 求 x',
+    '![a:f1]] 求 x',
+  ]) {
+    const segs = splitMath(bad);
+    assert.deepEqual(
+      segs.map((s) => s.kind),
+      ['text'],
+      `「${bad}」被當成了附圖標記`,
+    );
+    assert.equal(segs[0].value, bad, `「${bad}」被吃掉了一部分`);
+    assert.match(renderMathHtml(bad), /求 x/, `「${bad}」後面的內容不見了`);
+  }
+});
+
+test('沒有資產清單時標記排成記號，不是原樣印出、也不是消失', () => {
+  // 題庫清單一列只有一行，放不下圖。但「這一題有圖」是掃視時要
+  // 知道的事，所以不能消失；原樣印出來則會佔掉整行的寬度。
+  const out = renderMathHtml('如圖 ![[a:fig1]]，求 x');
+  assert.doesNotMatch(out, /!\[\[a:/, '原始碼被原樣印出來了');
+  assert.match(out, /yz-fig__ref/);
+  assert.match(out, /如圖/);
+  assert.match(out, /求 x/);
+});
+
+test('hasMath 把附圖也算進去', () => {
+  // 校對介面靠它決定要不要畫「排出來」那一格。只有圖沒有式子的
+  // 題目不畫的話，老師就看不到那張圖對不對。
+  assert.equal(hasMath('如圖 ![[a:fig1]]'), true);
+});
+
+test('readAssets 濾掉壞掉的項目，不丟例外', () => {
+  // 這一欄是 Json，內容來自匯入管線與手改過的列。丟 TypeError 的話
+  // 整題變成一片白——在作答中。
+  assert.deepEqual(readAssets(null), []);
+  assert.deepEqual(readAssets('not an array'), []);
+  assert.deepEqual(readAssets([null, 42, {}, { key: '' }]), [], '沒有 key 的項目沒有圖可顯示');
+
+  const [a] = readAssets([
+    { id: 'f1', key: 't/x/import/j/fig/0001-00.png', alt: ' 座標圖 ', width: 640, height: 480 },
+  ]);
+  assert.equal(a.id, 'f1');
+  assert.equal(a.alt, '座標圖');
+  assert.equal(a.width, 640);
+  assert.equal(a.height, 480);
+});
+
+test('壞掉的寬高不會變成 <img> 上的 0', () => {
+  // `width="0"` 的圖在瀏覽器上是不存在的——而資料庫裡的 0、負數、
+  // 字串都可能出現（管線改版、手動修資料）。
+  const [a] = readAssets([{ key: 'k', width: 0, height: -3 }]);
+  assert.equal(a.width, null);
+  assert.equal(a.height, null);
+  const [b] = readAssets([{ key: 'k', width: '640', height: NaN }]);
+  assert.equal(b.width, null);
+  assert.equal(b.height, null);
+});
+
+test('替代文字永遠不是空字串', () => {
+  // `alt=""` 的約定是「這張圖純裝飾，跳過它」。而這裡的圖是題目的
+  // **條件**——跳過它等於這一題對用螢幕閱讀器的學生少了一個條件，
+  // 而他不會知道少了什麼。
+  const [bare] = readAssets([{ key: 'k' }]);
+  assert.equal(figureAlt(bare, { label: '第 3 題' }), '第 3 題附圖');
+  assert.equal(figureAlt(bare), '本題附圖', '沒有題號時也要說得出這是什麼');
+  assert.equal(figureAlt(null), '本題附圖', '資料壞掉時也不可以是空字串');
+});
+
+test('有圖說就用圖說，沒有才退回位置描述', () => {
+  const [withAlt] = readAssets([{ key: 'k', alt: '△ABC 中，D 為 BC 的中點' }]);
+  assert.equal(figureAlt(withAlt, { label: '第 3 題' }), '△ABC 中，D 為 BC 的中點');
+
+  const [withCaption] = readAssets([{ key: 'k', caption: '▲圖一' }]);
+  assert.equal(figureAlt(withCaption), '▲圖一');
+
+  // 圖內的文字（座標軸標籤、點名）比「本題附圖」有用一點點，
+  // 但比真的圖說差得多——所以排在最後一個素材。
+  const [withLabels] = readAssets([{ key: 'k', labels: ['O', 'x', 'y'] }]);
+  assert.match(figureAlt(withLabels), /O/);
+});
+
+test('一題有好幾張圖時替代文字要編號', () => {
+  // 讀螢幕的人連續聽到三次一模一樣的「第 3 題附圖」，分不出正在
+  // 講哪一張——而幾何題的兩張圖常常就是題目要比較的東西。
+  const [a] = readAssets([{ key: 'k' }]);
+  assert.equal(figureAlt(a, { label: '第 3 題', index: 0, count: 3 }), '第 3 題附圖（1）');
+  assert.equal(figureAlt(a, { label: '第 3 題', index: 2, count: 3 }), '第 3 題附圖（3）');
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 六、樣式與字型：本地檔案，只載入一次
 // ─────────────────────────────────────────────────────────────────
 
 test('KaTeX 的樣式表只被匯入一次，而且是在登入後的共用版面', () => {

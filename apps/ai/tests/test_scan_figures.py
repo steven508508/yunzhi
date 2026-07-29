@@ -139,9 +139,14 @@ def test_crop_pads_beyond_the_box():
     """
     png = page_png()
     box = BBox(page=1, x0=0.4, y0=0.4, x1=0.6, y1=0.6)
-    out = R._crop_png(png, box)
+    out, w, h = R._crop_png(png, box)
     img = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
     assert img.shape[1] > 0.2 * 800, f"寬度 {img.shape[1]} 沒有多留邊"
+    # 回報的是**顯示**尺寸（CSS 像素），不是 PNG 的像素數：頁面影像是
+    # 300 DPI 渲染的，照著像素數填 `<img width>` 會讓圖在紙上變成
+    # 原稿的三倍大（見 figures.display_size）。長寬比要保住。
+    assert w < img.shape[1], f"顯示尺寸沒有換算：回報 {w}，像素 {img.shape[1]}"
+    assert abs(w / h - img.shape[1] / img.shape[0]) < 0.05, f"長寬比跑掉了 {w}×{h}"
 
 
 def test_tiny_boxes_are_ignored():
@@ -184,9 +189,11 @@ def test_real_photo_crops_are_valid_images():
         result = normalize(p.read_bytes(), p.name)
         png = result.pages[0].png
         box = BBox(page=1, x0=0.52, y0=0.30, x1=0.96, y1=0.62)
-        data = R._crop_png(png, box)
+        data, w, h = R._crop_png(png, box)
         img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
         assert img is not None and img.size > 0, p.name
+        assert w > 0 and h > 0, p.name
+        assert abs(w / h - img.shape[1] / img.shape[0]) < 0.05, p.name
 
 
 def test_crop_at_the_page_edge_does_not_overflow():
@@ -196,10 +203,10 @@ def test_crop_at_the_page_edge_does_not_overflow():
         BBox(page=1, x0=0.0, y0=0.0, x1=0.3, y1=0.3),
         BBox(page=1, x0=0.7, y0=0.7, x1=1.0, y1=1.0),
     ):
-        img = cv2.imdecode(
-            np.frombuffer(R._crop_png(png, box), np.uint8), cv2.IMREAD_COLOR
-        )
+        data, w, h = R._crop_png(png, box)
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
         assert img is not None and img.size > 0, box
+        assert w > 0 and h > 0, box
 
 
 def test_context_page_blocks_are_not_kept_twice():

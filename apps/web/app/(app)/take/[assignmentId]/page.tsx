@@ -986,6 +986,11 @@ export default function TakeAssignmentPage() {
   // 所以第 2、3 小題要自己往回找，否則畫面上只剩「則最大利潤為多少？」。
   const stim = q ? stimulusFor(questions, cur) : null;
   const range = q ? groupRange(questions, cur) : null;
+  // 附圖的網址前綴。綁在**這一份作答**上而不是題目上：伺服器端據此
+  // 判斷「這是不是你自己那一份，而且現在該讓你看」（app/api/assets）。
+  // 少了 attempt 這一段，學生會走到老師那條路然後一律 403——症狀是
+  // 每一張圖都變成「你不是這一科的授課老師」，在考試中。
+  const figureBase = `/api/assets?attempt=${encodeURIComponent(view?.attemptId ?? '')}&key=`;
 
   return (
     <div className="yz-take">
@@ -1092,6 +1097,11 @@ export default function TakeAssignmentPage() {
                   {stim.label ?? '題組題幹'}
                   {range && `　·　第 ${range.from}–${range.to} 題共用`}
                 </div>
+                {/* 題組共用的附圖**這裡拿不到**：`lib/attempt.ts` 的白名單
+                    只帶 `group.stimulus`，沒有 `group.stimulusAssets`
+                    （那個 select 是「不可以洩題」那條規則的所在地，
+                    加欄位要由那一支自己決定）。實驗裝置圖掛在題組上的
+                    卷子會在這裡缺圖，缺口記在這裡而不是靜靜地漏掉。 */}
                 <MathText>{stim.stimulus}</MathText>
               </div>
             )}
@@ -1111,7 +1121,12 @@ export default function TakeAssignmentPage() {
 
             <div className="yz-take__stem">
               {q.subLabel && <b>{q.subLabel}</b>}
-              <MathText>{q.content}</MathText>
+              {/* 附圖走 `/api/assets?attempt=…`：那一支問的是「這是不是你
+                  自己那一份，而且現在該讓你看」。學生沒有科目授課權，
+                  走不到老師那條路。 */}
+              <MathText assets={q.contentAssets} assetBase={figureBase} label={`第 ${q.order} 題`}>
+                {q.content}
+              </MathText>
             </div>
 
             {q.options.length > 0 && (
@@ -1141,7 +1156,15 @@ export default function TakeAssignmentPage() {
                       {/* 選項一定要排出來。物理的四個選項常常只差在向量箭頭
                           （$\vec{v}_1 + \vec{v}_2$ 對 $v_1 + v_2$），
                           原始碼狀態下那個差別要一個字一個字比。 */}
-                      <span className="yz-take__optbody"><MathText>{o.content}</MathText></span>
+                      <span className="yz-take__optbody">
+                        <MathText
+                          assets={o.assets}
+                          assetBase={figureBase}
+                          label={`第 ${q.order} 題選項 ${o.label ?? i + 1}`}
+                        >
+                          {o.content}
+                        </MathText>
+                      </span>
                     </div>
                   );
                 })}

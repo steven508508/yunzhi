@@ -19,7 +19,7 @@
  *    帶著 questionId，重跑時跳過，不會產生重複題目。
  */
 import { prisma } from '@/lib/prisma';
-import { normalizeOptions } from '@/lib/questionShape.mjs';
+import { normalizeAssets, normalizeOptions } from '@/lib/questionShape.mjs';
 import type { Prisma } from '@prisma/client';
 
 /** 允許原文收錄解析的權利基礎。其餘一律走 AI 改寫。 */
@@ -212,7 +212,7 @@ export async function commitJob(
             content: c.content ?? '',
             // 附圖跟著題目走。幾何題沒有圖就是不能用的題目，
             // 所以它與題幹一樣要在入庫時搬過去。
-            contentAssets: normalizeAssets(c.assets),
+            contentAssets: normalizeAssets(c.assets) as Prisma.InputJsonValue | undefined,
             score: c.score ?? 0,
             // 已依重新編號後的選項序號對映過（見 normalizeOptions）
             answerKeys,
@@ -448,26 +448,6 @@ function newFamilyId(): string {
   // 與 Prisma 的 cuid 同形狀即可，不需要真的 cuid ——
   // 它只是一個跨版本穩定的識別。
   return `fam_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
-}
-
-/**
- * 題目附圖。只留下真的有物件鍵的那些——沒有鍵就沒有圖可顯示，
- * 留著只會讓前端出現破圖。
- */
-function normalizeAssets(raw: unknown): Prisma.InputJsonValue | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const out = raw
-    .filter((a): a is Record<string, unknown> => Boolean(a) && typeof a === 'object')
-    .filter((a) => typeof a.key === 'string' && a.key)
-    .map((a) => ({
-      key: a.key as string,
-      page: typeof a.page === 'number' ? a.page : null,
-      bbox: (a.bbox as Record<string, number>) ?? null,
-      // 標籤先當替代文字用。正式的替代文字要由 AI 依題幹生成
-      // （文件 01 的無障礙要求），那是另一個階段。
-      alt: Array.isArray(a.labels) ? (a.labels as string[]).join(' ') : '',
-    }));
-  return out.length ? (out as unknown as Prisma.InputJsonValue) : undefined;
 }
 
 function normalizeKp(raw: unknown): { id: string; weight: number }[] {

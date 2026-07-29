@@ -210,7 +210,8 @@ def _normalize_sync(req: NormalizeRequest, prep: Prepared, t0: float) -> Normali
                         f"fig/{pno + 1:04d}-{idx:02d}.png"
                     )
                     try:
-                        storage.put_bytes(key, figmod.crop(page, fig), "image/png")
+                        shot = figmod.crop(page, fig)
+                        storage.put_bytes(key, shot.png, "image/png")
                     except Exception as e:  # noqa: BLE001
                         log.warning("第 %d 頁第 %d 張圖裁切失敗：%s", pno + 1, idx, e)
                         continue
@@ -220,6 +221,11 @@ def _normalize_sync(req: NormalizeRequest, prep: Prepared, t0: float) -> Normali
                             "bbox": fig.norm(w, h),
                             "labels": fig.labels[:12],
                             "strokes": fig.strokes,
+                            # **顯示**尺寸跟著走（不是 PNG 的像素數，
+                            # 見 figures.display_size）。前端沒有它就得等圖
+                            # 載完才知道要留多高，而那一刻整段題幹會往下跳。
+                            "width": shot.display_width,
+                            "height": shot.display_height,
                         }
                     )
                 if items:
@@ -655,7 +661,7 @@ def _crop_vision_figures(
             counter[page_no] = idx + 1
             key = f"{page.storage_key.rsplit('.', 1)[0]}-fig-{idx:02d}.png"
             try:
-                data = _crop_png(storage.get_bytes(page.storage_key), b.bbox)
+                data, cw, ch = _crop_png(storage.get_bytes(page.storage_key), b.bbox)
                 storage.put_bytes(key, data, "image/png")
             except Exception as e:  # noqa: BLE001
                 log.warning("第 %d 頁第 %d 張圖裁切失敗：%s", page_no, idx, e)
@@ -671,6 +677,8 @@ def _crop_vision_figures(
                     "labels": [b.text.strip()] if b.text.strip() else [],
                     "strokes": 0,
                     "origin": "vision",
+                    "width": cw,
+                    "height": ch,
                 }
             )
     return out
@@ -681,7 +689,19 @@ def _crop_vision_figures(
 _FIG_PAD = 0.012
 
 
-def _crop_png(png: bytes, bbox: BBox) -> bytes:
+def _crop_png(png: bytes, bbox: BBox) -> tuple[bytes, int, int]:
+    """
+    從已經渲染好的頁面影像裁一塊，回傳 (PNG, 顯示寬, 顯示高)。
+
+    回傳的是**顯示**尺寸（CSS 像素）而不是 PNG 的像素數，與原生 PDF
+    那條路一致——理由見 figures.py 的 `display_size()`：頁面影像是
+    300 DPI 渲染的（normalize.TARGET_DPI），照著像素數填 `<img width>`
+    會讓每一張圖在紙上變成原稿的三倍大。
+
+    長邊超過 `figures.MAX_PX` 時等比例縮小，理由也與那條路一樣：
+    一張滿版的掃描圖在 300 DPI 之下有好幾 MB，而考場是整班共用一條線。
+    兩條路都會走到同一個作答畫面上，所以這兩個決定只能有一份。
+    """
     import cv2
     import numpy as np
 
@@ -695,10 +715,27 @@ def _crop_png(png: bytes, bbox: BBox) -> bytes:
     y1 = min(h, int((bbox.y1 + _FIG_PAD) * h))
     if x1 - x0 < 8 or y1 - y0 < 8:
         raise ValueError("裁切範圍太小")
-    ok, buf = cv2.imencode(".png", img[y0:y1, x0:x1])
+
+    piece = img[y0:y1, x0:x1]
+    # 顯示尺寸從**縮小之前**的像素算：一張圖該畫多大，與我們為了
+    # 省頻寬把它縮到多少像素無關。
+    shown = figmod.display_size(piece.shape[1], piece.shape[0])
+
+    longest = max(piece.shape[0], piece.shape[1])
+    if longest > figmod.MAX_PX:
+        scale = figmod.MAX_PX / longest
+        # INTER_AREA 是縮小專用的：線稿用 INTER_LINEAR 縮小會把細線
+        # 抹成灰階，而座標圖上最細的那一筆常常就是向量的箭頭。
+        piece = cv2.resize(
+            piece,
+            (max(1, round(piece.shape[1] * scale)), max(1, round(piece.shape[0] * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    ok, buf = cv2.imencode(".png", piece)
     if not ok:
         raise ValueError("裁切後的影像無法編碼")
-    return buf.tobytes()
+    return buf.tobytes(), shown[0], shown[1]
 
 
 def build_router(get_provider) -> APIRouter:
@@ -794,14 +831,17 @@ def build_router(get_provider) -> APIRouter:
                     if page_png is None:
                         page_png = storage.get_bytes(src.storage_key)
                     key = f"{src.storage_key.rsplit('.', 1)[0]}-fig-{idx:02d}.png"
-                    storage.put_bytes(key, _crop_png(page_png, box), "image/png")
+                    data, cw, ch = _crop_png(page_png, box)
+                    storage.put_bytes(key, data, "image/png")
                 except Exception as e:  # noqa: BLE001
                     log.warning("第 %d 頁第 %d 張圖裁切失敗：%s", page_no, idx, e)
                     continue
                 asset.storage_key = key
+                asset.width = cw
+                asset.height = ch
                 figures.setdefault(page_no, []).append(
                     {"key": key, "bbox": box.model_dump(), "alt": asset.alt,
-                     "kind": asset.kind.value}
+                     "kind": asset.kind.value, "width": cw, "height": ch}
                 )
 
         # ── 組裝成一份標準文件 ──────────────────────────────────

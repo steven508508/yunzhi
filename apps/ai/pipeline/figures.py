@@ -59,6 +59,50 @@ _TEXT_COVER = 0.22
 #: 判定「在版心之外」時，容許超出版心的比例。
 _BODY_SLACK = 0.06
 
+#: 裁圖的解析度。300 DPI 是為了座標軸上那些 6pt 的刻度標籤——
+#: 150 DPI 之下「x=2」與「x=3」在手機上分不出來，而那正是題目問的東西。
+_DPI = 300
+#: 裁出來的長邊上限（像素）。
+#:
+#: **這一項是為了學生的手機，不是為了省磁碟。** 一張佔滿整頁的圖
+#: （例如地理的地形圖）在 300 DPI 之下是 2480×3500，約 3–6 MB。
+#: 考場是整班共用 20–50 Mbps 的熱點（訪談第 17 題），一題 5 MB
+#: 乘上三十個人就是把那條線塞死——而學生看到的是一直轉的作答頁。
+#:
+#: 1400 是這樣算出來的：作答頁的版心 390pt 寬，手機的 DPR 最高到 3，
+#: 所以「滿版的圖」在最好的螢幕上也只用得到約 1170 個像素。
+#: 留一點餘裕給放大檢視（同一份位元組，不另外要一張大圖）。
+#:
+#: 這個上限只咬得到超過半頁寬的圖。實測講義的座標圖約 150–250pt，
+#: 300 DPI 之下是 625–1040 像素，完全不受影響。
+MAX_PX = 1400
+#: CSS 像素的解析度。瀏覽器的 1px 是 1/96 英寸，PDF 的 1pt 是 1/72 英寸。
+_CSS_DPI = 96
+
+
+def display_size(px_w: int, px_h: int, dpi: int = _DPI) -> tuple[int, int]:
+    """
+    把 dpi 解析度的像素尺寸換算成**顯示**尺寸（CSS 像素）。
+
+    # 為什麼不能直接把裁出來的像素數當成 `<img width height>`
+
+    因為那兩個屬性的意思是「這張圖要畫多大」，不是「這張圖有幾個像素」。
+    我們刻意用 300 DPI 裁圖（座標軸上的刻度標籤要看得清楚），所以一張
+    在原稿上 33 mm 寬的座標圖會有 396 個像素——照著填進 width 的話，
+    瀏覽器會把它畫成 396 CSS 像素，也就是 105 mm，**原稿的三倍**。
+
+    症狀在螢幕上不明顯（有 max-width 與 max-height 兜著），在紙上是
+    災難：實測一份 9 題的卷子印成 9 頁，一頁一題。老師拿到的是一疊
+    紙，而他要的是三張。
+
+    多出來的像素沒有浪費——它們變成 3 倍的顯示密度，也就是視網膜
+    螢幕與印表機上該有的銳利度。
+    """
+    return (
+        max(1, round(px_w * _CSS_DPI / dpi)),
+        max(1, round(px_h * _CSS_DPI / dpi)),
+    )
+
 
 @dataclass
 class Figure:
@@ -296,12 +340,68 @@ def _attach_labels(page: fitz.Page, figures: list[Figure]) -> None:
                         break
 
 
-def crop(page: fitz.Page, fig: Figure, dpi: int = 300) -> bytes:
-    """從頁面裁下一張圖，回傳 PNG。"""
-    zoom = dpi / 72.0
+@dataclass
+class Crop:
+    """裁出來的一張圖。**尺寸要跟著走**，理由見 `crop()`。"""
+
+    png: bytes
+    #: PNG 裡真的有幾個像素。
+    width: int
+    height: int
+    #: 這張圖**該畫多大**（CSS 像素）。存進資產、給 `<img width height>` 的
+    #: 是這一組，不是上面那一組——理由見 `display_size()`。
+    display_width: int
+    display_height: int
+
+
+def crop(page: fitz.Page, fig: Figure, dpi: int = _DPI) -> Crop:
+    """
+    從頁面裁下一張圖。
+
+    # 為什麼要回傳尺寸
+
+    因為 `<img>` 沒有 width／height 的話，瀏覽器要等圖載進來才知道
+    它有多高——而在那之前那一格是零高度。圖一到，整段題幹往下跳。
+    學生正在讀第三行，畫面忽然移動兩公分，他得重新找自己讀到哪裡；
+    考試中這件事每一題都會發生一次。
+
+    尺寸只有在這裡量得到（裁完就知道），跑到前端再量就太晚了。
+
+    # 邊界
+
+    · 貼齊頁緣的圖：`_PAD` 會把裁切框推到頁面外，與頁面取交集後
+      那一側就沒有留白。這是對的——頁面外沒有東西可以裁。
+    · bbox 整個在頁面外（座標算錯、或頁面被前處理切過）：交集是空的，
+      這時候 **丟出例外而不是回一張空白圖**。空白圖會被存進物件儲存、
+      掛到題目上，然後學生看到一塊白色的方塊，而沒有任何地方說得出
+      那是壞掉的——一張看得見的空白比一個缺圖更難查。
+    """
     rect = fig.rect() & page.rect  # 不要裁到頁面外
+    if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        raise ValueError(
+            f"裁切範圍與頁面沒有交集（圖 {fig.x0:.0f},{fig.y0:.0f}–{fig.x1:.0f},{fig.y1:.0f}，"
+            f"頁面 {page.rect.width:.0f}×{page.rect.height:.0f}）"
+        )
+
+    zoom = dpi / 72.0
+    # 顯示尺寸從**原稿的幾何**算，不是從裁出來的像素——後者會被下面的
+    # 上限縮過，而一張圖該畫多大與我們用多少解析度裁它無關。
+    shown = display_size(round(rect.width * zoom), round(rect.height * zoom), dpi)
+
+    # 長邊超過上限時整張等比例縮小。只縮不放：小圖用 300 DPI 渲染
+    # 本來就不大，放大它只是在製造模糊的像素。
+    longest = max(rect.width, rect.height) * zoom
+    if longest > MAX_PX:
+        zoom *= MAX_PX / longest
+
     pix = page.get_pixmap(clip=rect, matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    return pix.tobytes("png")
+    return Crop(
+        png=pix.tobytes("png"),
+        width=pix.width,
+        height=pix.height,
+        display_width=shown[0],
+        display_height=shown[1],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────

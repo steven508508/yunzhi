@@ -72,6 +72,31 @@ export function importPrefix(tenantId: string, jobId: string) {
   return `t/${tenantId}/import/${jobId}/`;
 }
 
+/**
+ * 把一個鍵拆回租戶與匯入工作。**認不出來就回 null，不要猜。**
+ *
+ * 題目附圖的授權判斷需要「這張圖是哪份題本來的」才問得出「你教不教
+ * 這一科」。而附圖只存在題目的 Json 欄位裡（`contentAssets`），
+ * 那一欄沒有外鍵、沒有索引——要從一個鍵反查是哪一題，等於在整個
+ * 題庫上做一次 Json 掃描。鍵本身已經帶著這個資訊，用它就好。
+ *
+ * 鍵的形狀是這個檔案自己定的（`importFileKey`／`importPageKey`），
+ * 所以這裡與那幾支必須一起改。對不上的鍵一律當成「不屬於任何工作」，
+ * 由呼叫端拒絕——寧可擋掉一張圖，也不要放行一個猜出來的租戶。
+ */
+export function parseImportKey(key: string): { tenantId: string; jobId: string } | null {
+  // `..` 在 S3 的鍵裡是合法字元，不會被正規化，但它出現在這裡就代表
+  // 有人在試著往上跳。真正擋住越權的是下面逐段比對租戶與工作，
+  // 這一行只是讓那種請求早一點死掉、也留在日誌裡看得見。
+  if (!key || key.includes('..')) return null;
+  const parts = key.split('/');
+  if (parts.length < 5) return null;
+  const [t, tenantId, kind, jobId] = parts;
+  if (t !== 't' || kind !== 'import') return null;
+  if (!tenantId || !jobId) return null;
+  return { tenantId, jobId };
+}
+
 function normalizeExt(ext: string) {
   const e = ext.replace(/^\.+/, '').toLowerCase();
   return /^[a-z0-9]{1,8}$/.test(e) ? `.${e}` : '';
@@ -112,6 +137,75 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const c of stream) chunks.push(Buffer.from(c));
   return Buffer.concat(chunks);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 小物件的行程內快取
+//
+// 一個班 30 個人同時打開同一份卷子的第 7 題，就是 30 次
+// GetObject。MinIO 撐得住，但那三十次要跟**同一批人的作答存檔**
+// 搶同一條連線——考試當下最不能等的就是存檔。
+//
+// 而這些位元組是不變的：附圖的鍵帶著匯入工作的 id，工作重跑會產生
+// 新的鍵，同一個鍵的內容不會被覆寫。所以快取不需要失效機制，
+// 只需要一個上限。
+//
+// 刻意不用 Redis：多一個往返、多一個會壞的東西，而附圖總共也才
+// 幾十 MB。每個 Node 行程各留一份是可以接受的重複。
+// ─────────────────────────────────────────────────────────────
+
+/** 快取總量上限。一張裁出來的圖約 20–80 KB，48 MB 大約放得下一千張。 */
+const CACHE_LIMIT = 48 * 1024 * 1024;
+/** 單一物件的上限。整頁的原稿影像（數 MB）不進快取，它們是校對時單人在看的。 */
+const CACHE_MAX_ITEM = 512 * 1024;
+
+type CachedObject = { buf: Buffer; etag: string };
+
+const globalForCache = globalThis as unknown as {
+  yzObjectCache?: Map<string, CachedObject>;
+  yzObjectCacheBytes?: number;
+};
+const cache = (globalForCache.yzObjectCache ??= new Map<string, CachedObject>());
+
+/**
+ * 取物件，並記住它。回傳的 `etag` 讓路由能回 304。
+ *
+ * 用 Map 的插入順序做最近最少使用：命中時先 delete 再 set，把它移到
+ * 尾端；滿了就從頭砍。**這不是精確的 LRU**，但快取的內容全是同一種
+ * 東西（幾十 KB 的圖），精確與否影響不到什麼。
+ */
+export async function getObjectCached(key: string): Promise<CachedObject> {
+  const hit = cache.get(key);
+  if (hit) {
+    cache.delete(key);
+    cache.set(key, hit);
+    return hit;
+  }
+
+  const buf = await getObject(key);
+  // ETag 用內容雜湊而不是 S3 給的：S3 的 ETag 在分段上傳時不是 MD5，
+  // 而且我們要的是「同一份位元組就是同一個 ETag」，不管它從哪裡來。
+  const entry: CachedObject = { buf, etag: `"${sha256(buf).slice(0, 32)}"` };
+
+  if (buf.length <= CACHE_MAX_ITEM) {
+    // 兩個請求同時 miss 同一個鍵時，兩邊都會走到這裡。**位元組數只能
+    // 算一次**——`Map.set` 對既有的鍵是覆寫不是新增，而計數器多加一次
+    // 就永遠回不來了：它只會單向上漲，最後每次寫入都觸發清空，
+    // 快取靜靜地失效而沒有任何症狀。
+    const replaced = cache.get(key);
+    cache.set(key, entry);
+    globalForCache.yzObjectCacheBytes =
+      (globalForCache.yzObjectCacheBytes ?? 0) + buf.length - (replaced?.buf.length ?? 0);
+    while ((globalForCache.yzObjectCacheBytes ?? 0) > CACHE_LIMIT) {
+      const oldest = cache.keys().next();
+      if (oldest.done) break;
+      const victim = cache.get(oldest.value);
+      cache.delete(oldest.value);
+      globalForCache.yzObjectCacheBytes =
+        (globalForCache.yzObjectCacheBytes ?? 0) - (victim?.buf.length ?? 0);
+    }
+  }
+  return entry;
 }
 
 /**

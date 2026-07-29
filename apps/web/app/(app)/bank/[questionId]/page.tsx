@@ -87,6 +87,22 @@ export default async function QuestionPage({
     if (!q) notFound();
 
     const canEdit = await mayEditQuestion(user, q.subjectId);
+
+    // 附圖另外查一次。
+    //
+    // `loadQuestionDetail` 的回傳型別是 `lib/question.ts` 定的白名單，
+    // 而那一支同時服務改答案、下架、送分三條路——為了在這一頁畫一張圖
+    // 而動它的形狀，代價是那三條路都要跟著改。這裡只多一次很小的查詢，
+    // 換掉一次跨檔案的連鎖修改。
+    const media = await prisma.question.findFirst({
+      where: { id: questionId },
+      select: {
+        contentAssets: true,
+        group: { select: { stimulusAssets: true } },
+        options: { select: { order: true, assets: true } },
+      },
+    });
+    const optionAssets = new Map((media?.options ?? []).map((o) => [o.order, o.assets]));
     const knowledgePoints = await prisma.knowledgePoint.findMany({
       where: { subjectId: q.subjectId },
       select: { id: true, name: true },
@@ -175,7 +191,9 @@ export default async function QuestionPage({
           <div className="yz-card">
             <h2 className="yz-card__title">題組{q.group.label ? `　${q.group.label}` : ''}</h2>
             <div className="yz-qedit__stimulus">
-              <MathText>{q.group.stimulus}</MathText>
+              <MathText assets={media?.group?.stimulusAssets} label="題組素材">
+                {q.group.stimulus}
+              </MathText>
             </div>
           </div>
         )}
@@ -186,7 +204,13 @@ export default async function QuestionPage({
             type: q.type,
             content: q.content,
             score: q.score,
-            options: q.options.map((o) => ({ order: o.order, label: o.label, content: o.content })),
+            options: q.options.map((o) => ({
+              order: o.order,
+              label: o.label,
+              content: o.content,
+              assets: optionAssets.get(o.order) ?? null,
+            })),
+            contentAssets: media?.contentAssets ?? null,
             answerKeys: q.answerKeys,
             answerText: q.answerText,
             answerSlots: q.answerSlots,

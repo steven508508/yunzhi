@@ -24,8 +24,6 @@
  */
 import { MathText } from '@/components/MathText';
 
-export type SheetFigure = { key: string; alt: string };
-
 export type SheetQuestion = {
   /** 卷面題號。與 `ExamPaperItem.order` 不一定相同（原卷刪過題會有洞）。 */
   no: number;
@@ -35,8 +33,14 @@ export type SheetQuestion = {
   type: string;
   subLabel: string | null;
   content: string;
-  figures: SheetFigure[];
-  options: { order: number; label: string; content: string }[];
+  /**
+   * 附圖。原樣帶 `Question.contentAssets` 那一欄過來，交給 `<MathText>`
+   * 排——圖要出現在題幹裡 `![[a:…]]` 指的位置，不是全部堆在題幹後面。
+   * 「如右圖的三角形 ABC 中…」堆在後面的話，指的是哪一張看不出來。
+   */
+  assets: unknown;
+  /** 選項自己的附圖。物理的四個選項常常是四張力圖，文字都一樣。 */
+  options: { order: number; label: string; content: string; assets: unknown }[];
   /** 選填題要留幾個格位。0 代表這一題不是選填。 */
   slotCount: number;
   /**
@@ -47,7 +51,7 @@ export type SheetQuestion = {
 };
 
 export type SheetRow =
-  | { kind: 'group'; id: string; label: string | null; stimulus: string; figures: SheetFigure[] }
+  | { kind: 'group'; id: string; label: string | null; stimulus: string; assets: unknown }
   | { kind: 'q'; q: SheetQuestion };
 
 export type SheetData = {
@@ -58,7 +62,11 @@ export type SheetData = {
   count: number;
   /** 教師版。決定要不要畫答案欄與卷末的答案總表。 */
   withAnswers: boolean;
-  /** 附圖的網址前綴，後面直接接上物件鍵。離線渲染時給空字串。 */
+  /**
+   * 附圖的網址前綴，後面直接接上編碼過的物件鍵。
+   * 走 `/api/papers/[paperId]/image`：它問的是「這張圖在不在這份卷子
+   * 的某一題上」，而這一頁正是那份卷子。離線渲染時給空字串。
+   */
   imageBase: string;
   rows: SheetRow[];
 };
@@ -111,9 +119,10 @@ export function Sheet(data: SheetData) {
             <section key={`g-${row.id}`} className="yz-paper__stim">
               {row.label && <p className="yz-paper__stimlabel">{row.label}</p>}
               <div className="yz-paper__stimtext">
-                <MathText>{row.stimulus}</MathText>
+                <MathText assets={row.assets} assetBase={data.imageBase} assetLoading="eager">
+                  {row.stimulus}
+                </MathText>
               </div>
-              <Figures figures={row.figures} base={data.imageBase} />
             </section>
           ) : (
             <Question key={`q-${row.q.no}`} q={row.q} base={data.imageBase} />
@@ -174,10 +183,18 @@ function Question({ q, base }: { q: SheetQuestion; base: string }) {
           {q.typeLabel}　{q.score} 分
         </p>
         <div className="yz-paper__stem">
-          <MathText>{q.content}</MathText>
+          {/* eager：這一頁注定要進印表機，而 lazy 的圖有機會在列印預覽
+              跑完之後才載進來——印出來是一格空白，而老師是在把考卷
+              發下去之後才看到的。 */}
+          <MathText
+            assets={q.assets}
+            assetBase={base}
+            assetLoading="eager"
+            label={`第 ${q.no} 題`}
+          >
+            {q.content}
+          </MathText>
         </div>
-
-        <Figures figures={q.figures} base={base} />
 
         {q.options.length > 0 && (
           <ol className="yz-paper__opts">
@@ -185,7 +202,14 @@ function Question({ q, base }: { q: SheetQuestion; base: string }) {
               <li key={o.order} className="yz-paper__opt">
                 <span className="yz-paper__optkey">{o.label}</span>
                 <span>
-                  <MathText>{o.content}</MathText>
+                  <MathText
+                    assets={o.assets}
+                    assetBase={base}
+                    assetLoading="eager"
+                    label={`第 ${q.no} 題選項 ${o.label}`}
+                  >
+                    {o.content}
+                  </MathText>
                 </span>
               </li>
             ))}
@@ -221,14 +245,3 @@ function Question({ q, base }: { q: SheetQuestion; base: string }) {
   );
 }
 
-function Figures({ figures, base }: { figures: SheetFigure[]; base: string }) {
-  if (figures.length === 0) return null;
-  return (
-    <div className="yz-paper__figs">
-      {figures.map((f) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img key={f.key} src={`${base}${encodeURIComponent(f.key)}`} alt={f.alt || '本題附圖'} />
-      ))}
-    </div>
-  );
-}

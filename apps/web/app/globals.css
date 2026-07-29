@@ -2221,3 +2221,126 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-roll { grid-template-columns: 1fr; max-height: 260px; }
   .yz-pager__gap { width: 0; }
 }
+
+/* ── 題目附圖 ──────────────────────────────────────────────────
+   幾何題的座標圖、物理的受力圖、生物的構造圖。這些**不是插圖，
+   是題目的條件**——沒有它們那一題答不了。所以這一段的每一條規則
+   都是在回答同一個問題：學生在他手上那台裝置上看不看得清楚。
+
+   三件事定了這裡的做法：
+     · 作答畫面在手機上是 390px 起跳，圖不可以超出去（橫向捲軸會把
+       題號欄一起帶走，學生找不到回去的路）
+     · 圖要能點開放大——座標圖上的刻度在 390px 寬的畫面裡看不出
+       「4」跟「6」的差別，而那正是題目問的
+     · 印出來的考卷上，一張被分頁切成兩半的圖等於沒有圖 */
+
+.yz-figs {
+  display: flex; flex-wrap: wrap; align-items: flex-start;
+  gap: 10px; margin: 8px 0;
+}
+
+/* 行內的圖跟著文字走（`![[a:fig1]]` 指到哪就畫在哪）；獨立的圖
+   自己一塊。兩者共用同一組外觀，差別只有排列方式。 */
+.yz-fig { display: block; margin: 10px 0; }
+.yz-fig--inline { display: inline-block; vertical-align: middle; margin: 4px 6px; }
+
+/* 開啟放大的按鈕。它不該長得像按鈕——題目上多一顆有邊框的控制項
+   會被當成作答用的東西，考試中每一個看起來可以按的東西都要付
+   一次「這是不是要點」的注意力。所以它只是圖本身。 */
+.yz-fig__open {
+  display: block;
+  padding: 0; border: none; background: none;
+  cursor: zoom-in;
+  /* 手機上的點擊範圍就是圖本身，不要再加 padding —— 那會讓兩張
+     並排的圖之間出現一塊點了會放大錯的圖的區域。 */
+  max-width: 100%;
+}
+.yz-fig__open:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
+
+.yz-fig__open img {
+  display: block;
+  /* **這兩行是「手機上不可以超出寬度」。**
+     尺寸由 `<img width height>` 決定，而那兩個屬性填的是原稿上的
+     大小（見 apps/ai/pipeline/figures.py 的 display_size）；
+     這裡只負責「不可以比容器寬」。 */
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--rule-2);
+  background: var(--paper-raised);
+}
+
+/* **這裡不可以出現 `width: auto`。**
+   CSS 的 width 會蓋掉 `<img width>` 這個 presentational hint，於是
+   圖退回它自己的點陣寬度——而我們刻意用 300 DPI 裁圖，那是原稿的
+   三倍。症狀在螢幕上被 max-width 蓋住看不出來，在紙上是一頁一題：
+   實測一份 9 題的卷子印成 9 頁。這一段踩過一次，寫在這裡。 */
+
+/* 放大檢視。原生 <dialog>（走 components/Dialog），沒有多裝套件。
+   :has() 撐開對話框的寬度；不支援的瀏覽器只是得到一個窄一點的
+   視窗，圖仍然完整、仍然比行內大——降級而不是壞掉。 */
+.yz-dialog:has(.yz-fig__zoom) { max-width: min(96vw, 1200px); }
+.yz-fig__zoom {
+  display: block; margin: 0 auto;
+  max-width: 100%; max-height: 78vh;
+  width: auto; height: auto;
+}
+
+/* 「這裡有一張圖」的小記號。用在只有一行的地方（題庫清單、檢討頁
+   收合時的預覽）——那些地方放不下圖，但「這一題有圖」本身是要
+   知道的事。 */
+.yz-fig__ref {
+  font-size: 11.5px; color: var(--ink-3);
+  white-space: nowrap;
+}
+/* 標記指到一張不存在的圖。這一種要看得見：題幹寫著「如右圖」而
+   圖不見了，學生會以為題目就長這樣。 */
+.yz-fig__ref--missing { color: var(--mark); }
+
+/* 載入失敗。
+   **這一塊存在的唯一理由是讓學生知道要舉手。** 一片空白與「這一題
+   本來就沒有圖」在畫面上長得一模一樣，而兩者的下一步完全不同。 */
+.yz-fig--failed {
+  display: flex; gap: 8px; align-items: baseline;
+  margin: 10px 0; padding: 8px 10px;
+  border: 1px solid var(--mark); background: var(--mark-soft);
+  font-size: 12.5px; line-height: var(--lh-ui);
+}
+.yz-fig--failed.yz-fig--inline { display: flex; }
+.yz-fig__failmark { color: var(--mark); font-weight: 600; }
+.yz-fig__failtext { color: var(--ink); }
+
+@media screen and (max-width: 620px) {
+  /* 手機上一張一行。並排時每一張都只剩半個版心寬，座標圖的刻度
+     就再也看不出來了——而那正是要看的東西。 */
+  .yz-figs { flex-direction: column; }
+  .yz-fig--inline { display: block; margin: 8px 0; }
+
+  /* 手機上圖撐滿版心。
+     `<img width height>` 填的是**原稿上的大小**（見 figures.py 的
+     display_size），一張在講義上 33 mm 寬的座標圖照原尺寸畫在 390px
+     的螢幕上只有三分之一版心——刻度上的 4 與 6 分不出來，而題目
+     問的就是那個。裁圖是 300 DPI，撐大到版心寬仍然是銳利的。
+     長寬比由那兩個屬性保住（height 是 auto），所以撐大不會位移。 */
+  .yz-fig__open, .yz-fig__open img { width: 100%; }
+}
+
+@media print {
+  /* 一張被分頁切成兩半的圖等於沒有圖，而老師是在把考卷發下去之後
+     才會看到的。break-inside 同時擋掉「圖與它所屬的題目分家」。 */
+  .yz-fig, .yz-figs, .yz-fig__open { break-inside: avoid; page-break-inside: avoid; }
+
+  /* 按鈕在 globals.css 前面被 `.yz-btn { display: none }` 藏起來，
+     而放大鈕**不是** .yz-btn ——這一條寫出來是因為那件事值得被看見：
+     哪一天有人把它改成 <Button>，整份考卷上的圖會一起消失。 */
+  .yz-fig__open { display: block; cursor: default; }
+  .yz-fig__open img {
+    /* 紙上只要不超過版心就好。**不要寫 width**，理由見上面那一段。 */
+    max-width: 100%;
+    border: 1px solid #999;
+  }
+  /* 放大用的對話框永遠不印。它在未開啟時本來就是 display:none，
+     這一條擋的是「列印時剛好開著」。 */
+  .yz-dialog { display: none !important; }
+}

@@ -35,8 +35,15 @@ export type CandidateView = {
    * 一整頁裡找第幾題，那是每題 2–8 秒的翻頁稅。
    */
   sourceBbox: { page?: number; x0: number; y0: number; x1: number; y1: number } | null;
-  /** 這一題的附圖。幾何題沒有圖就是不能校的題目。 */
-  assets: { key: string; page: number | null; labels?: string[]; kind?: string }[];
+  /**
+   * 這一題的附圖。幾何題沒有圖就是不能校的題目。
+   *
+   * 原樣帶過去，不重新整形：校對介面把它直接餵給 `<MathText assets>`，
+   * 而那一支自己會濾掉壞掉的項目（見 lib/math.mjs 的 readAssets）。
+   * 在這裡多做一次「只留 key」的整形，結果是題幹裡的 `![[a:fig1]]`
+   * 對不到任何一張圖——**而那正是校對介面要老師確認的那件事**。
+   */
+  assets: unknown[];
   /** 入庫時被退回的原因。寫得很好，而在這之前沒有任何畫面讀得到。 */
   reviewNote: string | null;
   /**

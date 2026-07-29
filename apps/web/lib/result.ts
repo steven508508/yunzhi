@@ -72,8 +72,19 @@ export type ResultQuestion = {
   subLabel: string | null;
   stimulus: string | null;
   stimulusLabel: string | null;
+  /** 題組共用的附圖。實驗裝置圖常常掛在題組上而不是任何一小題上。 */
+  stimulusAssets: Prisma.JsonValue | null;
   groupId: string | null;
   content: string;
+  /**
+   * 題幹的附圖。
+   *
+   * **與正確答案不同，這一欄在作答時就已經給過學生了**（見 lib/attempt.ts
+   * 的 TakeQuestion.contentAssets）——它是題目的條件，不是答案。
+   * 檢討頁少了它，一道幾何題會變成「下列敘述何者正確」加四個選項，
+   * 學生連自己當初為什麼選錯都看不出來。
+   */
+  contentAssets: Prisma.JsonValue | null;
   /** 這一題在這份卷子上值幾分（快照）。 */
   score: number;
   options: ResultOption[];
@@ -348,7 +359,8 @@ async function loadResult(
         // 可以掛 scoreNote。學生自己加總會少 5 分。
         scoringRule: true,
         qualityFlags: true,
-        group: { select: { stimulus: true, label: true } },
+        contentAssets: true,
+        group: { select: { stimulus: true, label: true, stimulusAssets: true } },
         options: {
           // selectCount 不取：那是「多少人選過這個選項」，屬於老師的
           // 統計，不是學生的檢討。學生知道「38 個人跟我選一樣的」
@@ -428,8 +440,10 @@ async function loadResult(
         subLabel: null,
         stimulus: null,
         stimulusLabel: null,
+        stimulusAssets: null,
         groupId: null,
         content: '（這一題現在讀不出來，請告訴老師）',
+        contentAssets: null,
         score: item.score,
         options: [],
         myKeys,
@@ -473,8 +487,10 @@ async function loadResult(
       // 一篇 500 字的閱讀素材會在頁面裡出現三次。
       stimulus: firstOfGroup ? (q.group?.stimulus ?? null) : null,
       stimulusLabel: firstOfGroup ? (q.group?.label ?? null) : null,
+      stimulusAssets: firstOfGroup ? (q.group?.stimulusAssets ?? null) : null,
       groupId: q.groupId,
       content: q.content,
+      contentAssets: q.contentAssets,
       score: item.score,
       options,
       myKeys,

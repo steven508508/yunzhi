@@ -1,5 +1,13 @@
 /**
- * 把題目內容裡的數學式與化學式排出來。
+ * 把題目內容裡的數學式、化學式與附圖排出來。
+ *
+ * # 為什麼附圖的標記也在這一支
+ *
+ * 因為它們**混在同一段文字裡**：`已知 $x>0$，![[a:fig1]] 中的角 A 為…`。
+ * 分兩層處理的話，先跑數學再切圖的那一層會拿到已經是 HTML 的字串，
+ * 而在 HTML 裡找標記要嘛誤中 KaTeX 排出來的內容、要嘛得再解析一次；
+ * 反過來先切圖的那一層又會把 `$…$` 從中間剖開。切分只能做一次，
+ * 而這裡就是那一次。
  *
  * # 這一支處理的是「抽出來了卻印不出來」
  *
@@ -151,13 +159,27 @@ function looksLikeMath(body, display) {
 }
 
 /**
- * 把一段混排的內容切成文字與數學式。
+ * 附圖標記。`![[a:fig1]]` 指向資產清單裡 id 為 `fig1` 的那一張。
+ *
+ * 這條規則**必須與 `apps/ai/pipeline/canonical.py` 的 `ASSET_REF` 一模一樣**
+ * （含 id 只收 `[A-Za-z0-9_-]{1,32}`）。兩邊寬窄不同的症狀是：管線那邊
+ * 驗過說「這一題的圖都對得起來」，畫面上卻印出一串 `![[a:...]]`，
+ * 而那串東西在校對介面看起來就像 AI 抽壞了字。
+ *
+ * 用 `y` 旗標從指定位置起配對，不掃全文——`splitMath` 是逐字走的，
+ * 每個位置都跑一次全域搜尋會變成 O(n²)，而閱讀測驗的素材有好幾千字。
+ */
+const ASSET_REF = /!\[\[a:([A-Za-z0-9_-]{1,32})\]\]/y;
+
+/**
+ * 把一段混排的內容切成文字、數學式與附圖。
  *
  * 回傳的每一段都帶 `kind`：`text` 是純文字（**還沒轉義**），
- * `inline` 與 `display` 的 `value` 是分隔符裡面的 TeX（不含分隔符）。
+ * `inline` 與 `display` 的 `value` 是分隔符裡面的 TeX（不含分隔符），
+ * `asset` 的 `value` 是附圖的 id（不含 `![[a:` 與 `]]`）。
  *
  * 切分與渲染刻意分開：切分是純字串處理，沒有相依，所以測得動；
- * 而會出錯的邊界情況（跳脫、落單分隔符、錢）全部在這一層。
+ * 而會出錯的邊界情況（跳脫、落單分隔符、錢、寫壞的標記）全部在這一層。
  */
 export function splitMath(source) {
   const src = source == null ? '' : String(source);
@@ -215,6 +237,24 @@ export function splitMath(source) {
       continue;
     }
 
+    if (ch === '!' && src[i + 1] === '[') {
+      ASSET_REF.lastIndex = i;
+      const m = ASSET_REF.exec(src);
+      if (m) {
+        flush();
+        out.push({ kind: 'asset', value: m[1] });
+        i += m[0].length;
+        continue;
+      }
+      // 寫壞的標記（`![[a:]]`、少一個括號、id 太長）**只吃掉那個驚嘆號**，
+      // 剩下的原樣留在文字裡。整段吞掉的話，畫面上是題幹從某個字開始
+      // 少了一截，而老師在校對介面看不出少了什麼；留著至少看得見
+      // 那串壞掉的標記，才有人會去修。
+      text += ch;
+      i += 1;
+      continue;
+    }
+
     text += ch;
     i += 1;
   }
@@ -223,9 +263,18 @@ export function splitMath(source) {
   return out;
 }
 
-/** 這一段裡面有沒有數學式。用切分結果判斷，與實際渲染的行為一致。 */
+/** 這一段裡面有沒有數學式或附圖。用切分結果判斷，與實際渲染的行為一致。 */
 export function hasMath(source) {
   return splitMath(source).some((seg) => seg.kind !== 'text');
+}
+
+/** 這一段引用了哪幾張附圖，依出現順序、去重。 */
+export function referencedAssets(source) {
+  const seen = [];
+  for (const seg of splitMath(source)) {
+    if (seg.kind === 'asset' && !seen.includes(seg.value)) seen.push(seg.value);
+  }
+  return seen;
 }
 
 /**
@@ -256,11 +305,92 @@ function renderOne(tex, display) {
  * **這個回傳值會被塞進 `dangerouslySetInnerHTML`**，所以純文字片段
  * 一律先過 `escapeHtml`。KaTeX 的輸出本身是可信的（它轉義自己的輸入，
  * 而且 `trust: false` 關掉了會產生連結與內嵌樣式的命令）。
+ *
+ * 附圖排成一個**看得出是圖的小記號**而不是真的 `<img>`：這一支只收
+ * 一個字串，沒有資產清單也就沒有物件鍵可以指。真的要把圖畫出來的
+ * 呼叫端走 `<MathText assets={…}>`，它會自己處理 asset 那幾段。
+ * 留一個記號而不是原樣印出 `![[a:fig1]]`，是因為後者在題庫清單上
+ * 看起來就像 AI 抽壞了字，而且會佔掉整行的寬度。
  */
 export function renderMathHtml(source) {
   let html = '';
   for (const seg of splitMath(source)) {
-    html += seg.kind === 'text' ? escapeHtml(seg.value) : renderOne(seg.value, seg.kind === 'display');
+    if (seg.kind === 'text') html += escapeHtml(seg.value);
+    else if (seg.kind === 'asset') html += '<span class="yz-fig__ref">〔附圖〕</span>';
+    else html += renderOne(seg.value, seg.kind === 'display');
   }
   return html;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 附圖清單
+//
+// `Question.contentAssets`、`QuestionOption.assets`、
+// `ImportCandidate.assets` 三個欄位都是 Json，形狀由匯入管線寫入
+// （見 lib/commit.ts 的 normalizeAssets）。**這裡不假設它一定是
+// 那個形狀**：舊資料、手改過的列、或管線改版都可能塞進別的東西，
+// 而一個 `.map` 丟出的 TypeError 會讓整題變成一片白——在作答中。
+// ─────────────────────────────────────────────────────────────────
+
+/** 這個值是不是一個正數。寬高只有正數才有意義（0 會讓瀏覽器算出 0 高）。 */
+function positive(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : null;
+}
+
+/**
+ * 把 Json 欄位讀成附圖清單。壞掉的項目直接略過，不丟例外。
+ *
+ * `width`／`height` 是**裁圖時量到的像素尺寸**，給 `<img>` 的 width/height
+ * 屬性用。沒有它們的圖在載入完成的那一刻會把整段文字往下推——學生
+ * 正在讀第三行，畫面忽然跳掉兩公分，而他不知道自己讀到哪裡了。
+ * 舊資料沒有這兩欄（裁圖那時候還沒量），所以它們是可有可無的。
+ */
+export function readAssets(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const a of raw) {
+    if (!a || typeof a !== 'object') continue;
+    const key = a.key;
+    if (typeof key !== 'string' || key === '') continue;
+    out.push({
+      // id 是題幹裡 `![[a:id]]` 指的那個名字。沒有 id 的圖對不到任何
+      // 標記，會被排在題幹後面——講義那條路（切分階段用垂直重疊分派）
+      // 產出的圖本來就沒有 id，那是正常的，不是資料壞了。
+      id: typeof a.id === 'string' && a.id ? a.id : null,
+      key,
+      alt: typeof a.alt === 'string' ? a.alt.trim() : '',
+      caption: typeof a.caption === 'string' ? a.caption.trim() : '',
+      labels: Array.isArray(a.labels) ? a.labels.filter((t) => typeof t === 'string' && t.trim()) : [],
+      width: positive(a.width),
+      height: positive(a.height),
+      kind: typeof a.kind === 'string' ? a.kind : 'FIGURE',
+    });
+  }
+  return out;
+}
+
+/**
+ * 替代文字。
+ *
+ * # 為什麼不可以是空字串
+ *
+ * `alt=""` 在無障礙的約定裡是「這張圖純裝飾，跳過它」。而這裡的圖
+ * 是**題目的條件**——幾何題的角度、函數的圖形、實驗的裝置。跳過它
+ * 等於這一題對用螢幕閱讀器的學生少了一個條件，而他不會知道少了什麼：
+ * 畫面上什麼都沒有發生。
+ *
+ * 所以沒有圖說時退回一個**可辨識的位置描述**（「第 3 題附圖」），
+ * 至少讓他知道「這裡有一張圖，我需要有人念給我聽」。這比空字串
+ * 差得遠，但比空字串誠實。
+ *
+ * 素材的優先序：AI 抽的 alt → 原稿的圖說（「▲圖一」）→ 圖內的文字
+ * （座標軸標籤、點名）→ 位置描述。
+ */
+export function figureAlt(asset, { label = '', index = 0, count = 1 } = {}) {
+  const written = asset?.alt || asset?.caption || (asset?.labels ?? []).join('　').trim();
+  if (written) return written;
+  const where = label ? `${label}附圖` : '本題附圖';
+  // 一題有好幾張圖時要編號，否則讀螢幕的人聽到三次一模一樣的
+  // 「第 3 題附圖」，分不出正在講哪一張。
+  return count > 1 ? `${where}（${index + 1}）` : where;
 }

@@ -847,22 +847,17 @@ function Editor({
             onLive={(v) => onLive({ content: v })}
             onCommit={(v) => onPatch({ content: v })}
           />
-          <Preview source={c.content} />
+          {/* 圖排在題幹裡的**它該在的位置**（`![[a:…]]` 指到哪就畫在哪），
+              而不是全部堆在題幹後面。這一頁存在的理由就是讓老師確認
+              AI 有沒有把圖對到正確的題目、有沒有把兩題的圖對調、
+              有沒有裁歪——堆在後面的話，「如右圖」到底指哪一張看不出來。 */}
+          <Preview
+            source={c.content}
+            assets={c.assets}
+            label={`第 ${c.questionNo ?? c.order} 題`}
+            jobId={jobId}
+          />
 
-          {c.assets.length > 0 && (
-            // 幾何題沒有圖就是不能校的題目：老師無從判斷 AI 有沒有把圖
-            // 漏掉、有沒有把兩題的圖對調、有沒有裁歪。
-            <div className="yz-figs">
-              {c.assets.map((a) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={a.key}
-                  src={`/api/import/${jobId}/image?key=${encodeURIComponent(a.key)}`}
-                  alt={a.labels?.[0] ?? '本題附圖'}
-                />
-              ))}
-            </div>
-          )}
           {/(!\[\[a:)/.test(c.content ?? '') && c.assets.length === 0 && (
             <p className="yz-hint">
               題幹裡的 <code>![[a:…]]</code> 是附圖的位置標記，不是亂碼，<strong>請不要刪掉</strong>——
@@ -1262,16 +1257,43 @@ function Editable({
 /**
  * 可編輯欄位底下那一條「排出來的樣子」。
  *
- * **沒有數學式就不畫。** 一頁五十題，每一題的題幹、前導敘述、參考答案
- * 底下都多一條一模一樣的重複內容，老師要多捲一倍的距離才看得完一題——
- * 而 24 秒的預算裡沒有那個空間。有式子的那幾題才是需要對照的那幾題。
+ * **沒有數學式也沒有圖就不畫。** 一頁五十題，每一題的題幹、前導敘述、
+ * 參考答案底下都多一條一模一樣的重複內容，老師要多捲一倍的距離才看得完
+ * 一題——而 24 秒的預算裡沒有那個空間。有式子或有圖的那幾題才是需要
+ * 對照的那幾題。
+ *
+ * 附圖算「排出來」的一部分：老師在上面那一格看到的是原始碼（含
+ * `![[a:fig1]]` 的標記），這一格要給他**題目最後長什麼樣**。少了圖的話，
+ * 一道幾何題在這一頁上永遠是一段沒有圖的敘述，而他要判斷的正是
+ * 那張圖對不對、有沒有跟隔壁題對調。
+ *
+ * 網址走 `/api/import/[jobId]/image`：那一支問的是「你教不教這份
+ * 題本的科目」，正是校對這件事的權限。候選題還沒入庫，`/api/assets`
+ * 那條路（綁題目與作答）在這裡問不到東西。
  */
-function Preview({ source }: { source: string | null }) {
-  if (!hasMath(source)) return null;
+function Preview({
+  source,
+  assets,
+  label,
+  jobId,
+}: {
+  source: string | null;
+  assets?: unknown[];
+  label?: string;
+  jobId?: string;
+}) {
+  const hasFigure = Array.isArray(assets) && assets.length > 0;
+  if (!hasMath(source) && !hasFigure) return null;
   return (
     <div className="yz-mathpreview">
       <span className="yz-mathpreview__label">排出來</span>
-      <MathText>{source}</MathText>
+      <MathText
+        assets={assets}
+        label={label}
+        assetBase={jobId ? `/api/import/${jobId}/image?key=` : undefined}
+      >
+        {source}
+      </MathText>
     </div>
   );
 }

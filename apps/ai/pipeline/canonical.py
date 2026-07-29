@@ -59,7 +59,11 @@ from .schemas import BBox
 #:        `Provenance.related_raw`（「相關題型：單元練習 3.、7.」）、
 #:        `Provenance.badges`（「素養題」）。
 #:        只加欄位，1.0 產出的文件照樣有效。
-SCHEMA_VERSION = "1.1"
+#:
+#: 1.2 —— `Asset.width` / `Asset.height`：裁出來的圖有多少像素。
+#:        只有裁圖的那一刻量得到，而少了它，作答畫面上每一張圖
+#:        載進來的瞬間都會把題幹往下推。只加欄位，1.1 照樣有效。
+SCHEMA_VERSION = "1.2"
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -505,6 +509,11 @@ class Asset(BaseModel):
     url: str | None = None
     #: 裁出來的影像在物件儲存的位置。
     storage_key: str | None = None
+    #: 裁出來的影像有多少像素。**沒有它，前端就得等圖載完才知道要留
+    #: 多高**，而圖一到整段題幹會往下跳——學生正在讀第三行的時候。
+    #: 只有真的裁過的圖才有值。
+    width: int | None = None
+    height: int | None = None
 
     @model_validator(mode="after")
     def _table_has_content(self) -> "Asset":

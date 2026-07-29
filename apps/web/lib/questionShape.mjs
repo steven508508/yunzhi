@@ -85,3 +85,69 @@ export function normalizeOptions(raw, answerKeys = []) {
   mapped.sort((a, b) => a - b);
   return { options, answerKeys: mapped, dropped, duplicates };
 }
+
+/**
+ * 題目附圖，入庫時的形狀。
+ *
+ * # 為什麼在這裡而不是在 commit.ts 裡
+ *
+ * 與 `normalizeOptions` 同一個理由：它有兩個呼叫端（`lib/commit.ts`
+ * 與端到端測試用的 `tools/commit-shim.mjs`），而兩份實作分歧的方向
+ * 若是「測試那份少一個欄位」，測試會綠燈而正式環境會壞。
+ *
+ * # 漏一個欄位的症狀
+ *
+ * **整條路都對，只有入庫之後圖不見了**，而校對介面上看起來完全正常
+ * ——那一頁讀的是 `ImportCandidate.assets`，不是這裡寫出去的東西。
+ * 所以每個欄位都要說得出它是給誰用的：
+ *
+ *   · `id`   —— 題幹裡 `![[a:fig1]]` 指的名字。**漏掉它，圖還在，但
+ *                沒有任何標記對得到它**，於是題幹中間留著一句
+ *                「這裡有一張附圖，但系統找不到它」，圖被擠到題幹
+ *                後面——幾何題的「如右圖」就指向了錯的地方。
+ *   · `alt`  —— 替代文字。用螢幕閱讀器的學生聽到的就是它。
+ *   · `width`/`height` —— 這張圖該畫多大（CSS 像素，由裁圖那一刻的
+ *                原稿幾何換算，見 apps/ai/pipeline/figures.py 的
+ *                `display_size`）。沒有它們的圖在載入完成的那一刻會把
+ *                整段題幹往下推，而學生正在讀。
+ *   · `page`/`bbox` —— 回頭對照原稿用。
+ *
+ * 沒有物件鍵的項目一律丟掉：沒有鍵就沒有圖可顯示，留著只會在畫面上
+ * 變成一個破圖。回傳空陣列時給 `undefined`，讓「有沒有圖」的查詢
+ * 單純一點（那一欄存 null 而不是 `[]`）。
+ */
+export function normalizeAssets(raw) {
+  if (!Array.isArray(raw)) return undefined;
+
+  /** 0、負數、字串都不是尺寸。`width="0"` 的圖在瀏覽器上不存在。 */
+  const size = (v) =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : null;
+
+  const out = [];
+  for (const a of raw) {
+    if (!a || typeof a !== 'object') continue;
+    if (typeof a.key !== 'string' || !a.key) continue;
+    out.push({
+      id: typeof a.id === 'string' && a.id ? a.id : null,
+      key: a.key,
+      page: typeof a.page === 'number' ? a.page : null,
+      bbox: a.bbox ?? null,
+      // 模型抽到的替代文字優先；沒有就用圖內的文字（座標軸標籤、點名）
+      // 頂著。正式的替代文字要由 AI 依題幹生成（文件 01 的無障礙要求），
+      // 那是另一個階段——但**在那之前也不可以是空字串**：空字串在無障礙
+      // 的約定裡是「這張圖純裝飾，跳過它」，而這裡的圖是題目的條件。
+      // 真的沒有素材時由渲染端補上「第 3 題附圖」（lib/math.mjs 的 figureAlt）。
+      alt:
+        typeof a.alt === 'string' && a.alt.trim()
+          ? a.alt.trim()
+          : Array.isArray(a.labels)
+            ? a.labels.filter((t) => typeof t === 'string').join(' ')
+            : '',
+      caption: typeof a.caption === 'string' ? a.caption : '',
+      width: size(a.width),
+      height: size(a.height),
+      kind: typeof a.kind === 'string' ? a.kind : 'FIGURE',
+    });
+  }
+  return out.length ? out : undefined;
+}

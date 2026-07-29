@@ -32,7 +32,7 @@ import { mayComposeArea } from '@/lib/paper';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import PrintBar from './PrintBar';
-import { Sheet, type SheetFigure, type SheetRow } from './Sheet';
+import { Sheet, type SheetRow } from './Sheet';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,23 +46,6 @@ const TYPE: Record<string, string> = {
   TRANSLATION: '翻譯',
   TRUE_FALSE: '是非',
 };
-
-/**
- * 附圖的鍵與替代文字。形狀由 `lib/commit.ts` 的 `normalizeAssets` 決定，
- * 但**不假設它一定是那個形狀**：舊資料或手改過的列有可能是別的東西，
- * 而一個 `.map` 丟出的 TypeError 會讓整份預覽變成 500——那正是老師
- * 要拿它去印考卷的那一刻。
- */
-function figures(raw: unknown): SheetFigure[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((a) => {
-    if (!a || typeof a !== 'object') return [];
-    const key = (a as { key?: unknown }).key;
-    if (typeof key !== 'string' || !key) return [];
-    const alt = (a as { alt?: unknown }).alt;
-    return [{ key, alt: typeof alt === 'string' ? alt : '' }];
-  });
-}
 
 export default async function PreviewPage({
   params,
@@ -117,7 +100,7 @@ export default async function PreviewPage({
             },
             options: {
               orderBy: { order: 'asc' },
-              select: { order: true, label: true, content: true },
+              select: { order: true, label: true, content: true, assets: true },
             },
           },
         },
@@ -139,7 +122,7 @@ export default async function PreviewPage({
           id: q.group.id,
           label: q.group.label,
           stimulus: q.group.stimulus,
-          figures: figures(q.group.stimulusAssets),
+          assets: q.group.stimulusAssets,
         });
       }
       seenGroup = q.group?.id ?? null;
@@ -155,7 +138,7 @@ export default async function PreviewPage({
           type: q.type,
           subLabel: q.subLabel,
           content: q.content,
-          figures: figures(q.contentAssets),
+          assets: q.contentAssets,
           options: q.options,
           // 選填題的格數本身**不是答案**——答案卡上印幾格是題目的一部分，
           // 學生要知道答案有幾位。格子裡填什麼才是答案。

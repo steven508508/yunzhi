@@ -9,11 +9,15 @@
  * 邏輯與 commit.ts 逐行對應，改的只有 prisma 的來源。
  * 日後改 commit.ts 一定要同步改這裡，否則測試會綠燈而正式環境會壞。
  *
- * 最危險的一段——選項重新編號與答案鍵對映——已經抽到
- * `apps/web/lib/questionShape.mjs` 由兩邊共用。那一段算錯的話，
- * 每一個答對的學生都會被判錯而且沒有任何跡象，不能容忍兩份實作。
+ * 最危險的兩段已經抽到 `apps/web/lib/questionShape.mjs` 由兩邊共用：
+ *
+ *   · `normalizeOptions` —— 選項重新編號與答案鍵對映。算錯的話每一個
+ *     答對的學生都會被判錯，而且沒有任何跡象。
+ *   · `normalizeAssets` —— 附圖搬進題庫。少一個欄位的話，圖在校對介面
+ *     上看起來好好的，入庫之後卻對不回題幹裡的 `![[a:fig1]]`——
+ *     而這裡是整條路上唯一驗得到那件事的地方。
  */
-import { normalizeOptions } from '../apps/web/lib/questionShape.mjs';
+import { normalizeAssets, normalizeOptions } from '../apps/web/lib/questionShape.mjs';
 
 const VERBATIM_OK = new Set(['OWNED', 'LICENSED', 'OFFICIAL_PUBLIC']);
 
@@ -117,6 +121,9 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
           version: 1, groupId, subLabel: c.subLabel,
           type: c.type ?? 'SINGLE_CHOICE',
           content: c.content ?? '',
+          // 附圖跟著題目走。幾何題沒有圖就是不能用的題目，所以它與
+          // 題幹一樣要在入庫時搬過去（與 lib/commit.ts 同一支函式）。
+          contentAssets: normalizeAssets(c.assets) ?? null,
           score: c.score ?? 0,
           answerKeys,
           answerSlots: c.answerSlots ?? null,

@@ -145,6 +145,7 @@ export default async function PaperPage({
               id: true,
               familyId: true,
               content: true,
+              contentAssets: true,
               type: true,
               score: true,
               subjectId: true,
@@ -153,7 +154,7 @@ export default async function PaperPage({
               answerSlots: true,
               options: {
                 orderBy: { order: 'asc' },
-                select: { order: true, label: true, content: true },
+                select: { order: true, label: true, content: true, assets: true },
               },
             },
           },
@@ -179,9 +180,12 @@ export default async function PaperPage({
           answerKeys: true,
           answerText: true,
           answerSlots: true,
+          // 附圖也要。挑題時看不到圖的話，一道幾何題在這一頁上是
+          // 「如右圖，求 x」——老師選它的唯一依據會是題號。
+          contentAssets: true,
           options: {
             orderBy: { order: 'asc' },
-            select: { order: true, label: true, content: true },
+            select: { order: true, label: true, content: true, assets: true },
           },
         },
       }),
@@ -462,11 +466,12 @@ function Detail({
 }: {
   q: {
     content: string;
+    contentAssets: unknown;
     type: string;
     answerKeys: number[];
     answerText: string | null;
     answerSlots: unknown;
-    options: { order: number; label: string; content: string }[];
+    options: { order: number; label: string; content: string; assets: unknown }[];
   };
 }) {
   const keys = new Set(q.answerKeys);
@@ -474,13 +479,15 @@ function Detail({
 
   return (
     <>
-      <MathText>{q.content}</MathText>
+      {/* 走預設的 `/api/assets?key=`：這是老師的畫面，那一支據此問
+          「你教不教這一科」。 */}
+      <MathText assets={q.contentAssets}>{q.content}</MathText>
       {q.options.length > 0 && (
         <ol>
           {q.options.map((o) => (
             <li key={o.order}>
               <span className="yz-pick__key">{o.label}</span>
-              <MathText>{o.content}</MathText>
+              <MathText assets={o.assets}>{o.content}</MathText>
               {keys.has(o.order) && <span className="yz-pick__key">←　答案</span>}
             </li>
           ))}

@@ -584,10 +584,21 @@ function fromReading(jobId, seg, existing) {
         .map((id) => assets.get(id))
         .filter((a) => a && a.storage_key)
         .map((a) => ({
+          // **id 一定要帶。** 題幹裡的 `![[a:fig1]]` 指的就是它，
+          // 少了它那個標記在畫面上會變成「這裡有一張附圖，但系統
+          // 找不到它」，圖被擠到題幹後面——而幾何題的「如右圖」
+          // 就指到了錯的地方。
+          id: a.id ?? null,
           key: a.storage_key,
           page: a.placement?.page ?? null,
           bbox: a.placement?.bbox ?? null,
+          alt: a.alt ?? '',
+          caption: a.caption ?? '',
           labels: a.alt ? [a.alt] : [],
+          // 裁圖時量到的像素。前端靠它先把位置留出來，圖到了才不會
+          // 把整段題幹往下推。
+          width: a.width ?? null,
+          height: a.height ?? null,
           kind: a.kind,
         })),
       score: q.scoring?.score ?? null,
