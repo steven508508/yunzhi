@@ -4,9 +4,10 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 import { Button } from '@/components/Button';
+import { ConfirmDialog } from '@/components/Dialog';
 import { CheckField, TextField } from '@/components/Field';
 import { Empty, Note } from '@/components/Feedback';
-import { Form, submitJson } from '@/components/Form';
+import { Form, submitJson, useAction } from '@/components/Form';
 import { Table } from '@/components/Table';
 
 export type Year = {
@@ -17,6 +18,9 @@ export type Year = {
   endDate: string;
   isCurrent: boolean;
   classes: number;
+  /** 這一年還有幾個啟用中的班、幾位在籍學生。結算的確認視窗要說得出來。 */
+  activeClasses: number;
+  activeMembers: number;
 };
 
 export default function YearEditor({
@@ -34,6 +38,9 @@ export default function YearEditor({
   // 表格裡的動作不走 <Form>，所以錯誤要自己接住並顯示在列表上方。
   const [rowError, setRowError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [closing, setClosing] = useState<Year | null>(null);
+  const [typed, setTyped] = useState('');
+  const close = useAction();
 
   async function makeCurrent(year: Year) {
     if (busyId) return;
@@ -141,6 +148,25 @@ export default function YearEditor({
                     設為當前
                   </Button>
                 )}
+                {/* 結算只出現在**不是當前**而且底下還有班的年度上。
+                    當前學年度結算掉之後，開班的表單不知道要預選哪一年，
+                    而新開的班會掛在一個已經收掉的年度底下——所以順序
+                    必須是「先建新的、設為當前，再結算舊的」。
+                    伺服器端也擋，這裡不畫是為了不給一顆按下去必定被
+                    退回的按鈕。 */}
+                {!y.isCurrent && y.classes > 0 && (
+                  <Button
+                    variant="quiet"
+                    onClick={() => {
+                      setTyped('');
+                      setClosing(y);
+                    }}
+                    disabled={Boolean(busyId) || close.busy}
+                    title="把這一年所有班級的在籍名冊收掉，班級封存"
+                  >
+                    結算
+                  </Button>
+                )}
               </span>
             ),
           },
@@ -153,6 +179,73 @@ export default function YearEditor({
             title="還沒有學年度"
             hint="學年度是班級的容器。建好之後才能到「班級」開第一個班、匯入名冊。"
           />
+        }
+      />
+
+      {/* 結算。這一頁上唯一一個會同時動到兩百列名冊的動作，
+          所以與整班重設密碼同一道防線：要打出名稱才確認得了。
+          「確定嗎」擋得掉誤觸，擋不掉**按到隔壁那一年**。 */}
+      <ConfirmDialog
+        open={closing !== null}
+        onClose={() => {
+          if (close.busy) return;
+          close.clearError();
+          setTyped('');
+          setClosing(null);
+        }}
+        busy={close.busy}
+        title={closing ? `結算「${closing.name}」` : ''}
+        confirmLabel={
+          closing && typed.trim() === closing.name ? '結算這個學年度' : '請先打出學年度名稱'
+        }
+        confirmDisabled={!closing || typed.trim() !== closing.name}
+        consequence={
+          <>
+            <p style={{ marginBottom: 12 }}>
+              這一年的 <strong>{closing?.activeClasses ?? 0} 個班會被封存</strong>，
+              目前還在籍的 <strong>{closing?.activeMembers ?? 0} 位學生會被記上離班日期</strong>
+              （用這個學年度的結束日，不是今天——他們不是今天才離開的）。
+            </p>
+            <p style={{ marginBottom: 12 }}>
+              做這件事的理由：不收的話，第二年開學時每一位學生的任務清單會
+              <strong>同時回新舊兩年</strong>的作業，班級列表上是十四個班而看的人
+              分不出哪七個已經沒有人了，成績與派卷的清單也被兩年份一起佔滿。
+            </p>
+            <p style={{ marginBottom: 12 }}>
+              <strong>成績、作答與名冊本身全部保留。</strong>離班寫的是日期，
+              不是刪掉那一列——過去的成績仍然對得回這個班。班級之後也可以重新啟用。
+            </p>
+            <p style={{ marginBottom: 12 }}>
+              有人正在作答的話這個動作會被擋下來，並說出是誰。
+            </p>
+            <p className="yz-hint" style={{ marginBottom: 12 }}>
+              誰在什麼時候結算了哪一年會寫進稽核記錄，行為人是你。
+            </p>
+            <TextField
+              label="請打出學年度名稱以確認"
+              value={typed}
+              onChange={(e) => setTyped(e.currentTarget.value)}
+              hint={`要完全相同：${closing?.name ?? ''}`}
+              autoComplete="off"
+              disabled={close.busy}
+            />
+            {close.error && <p className="yz-field__err">{close.error}</p>}
+          </>
+        }
+        onConfirm={() =>
+          void (async () => {
+            if (!closing) return;
+            const ok = await close.run(async () => {
+              await submitJson(`/api/academic-years/${closing.id}/close`, {
+                json: { confirmName: typed.trim() },
+              });
+            });
+            if (ok) {
+              setClosing(null);
+              setTyped('');
+              router.refresh();
+            }
+          })()
         }
       />
     </>

@@ -147,6 +147,115 @@ export async function setCurrentAcademicYear(yearId: string, actorId: string) {
   return updated;
 }
 
+/**
+ * 結算一個學年度。**把它的班級收乾淨。**
+ *
+ * # 為什麼沒有這一支，第二年開學會是一場手工作業
+ *
+ * `deactivateClass`（`lib/roster.ts`）寫好了、有稽核，但**沒有任何
+ * 呼叫端**，而班級沒有 PATCH 路由。所以第二年開學時：
+ *
+ *   · 舊的 7 個班還在 `/classes` 列表上，永遠
+ *   · 200 位學生的 `leftAt` 還是 null
+ *   · `listStudentTasks` 對每一位同時回**新舊兩年**的任務，
+ *     舊班那幾十份排在他的「已完成」與「已逾期」裡
+ *   · `/grades` 與 `/assignments` 的筆數上限被兩年份的資料一起佔
+ *
+ * 而唯一的收法是 200 次「移出班級」，每一次一個確認對話框，
+ * 還要打開七個班的名冊逐列按。這件事一年只發生一次，
+ * 所以到第一個學年結束前沒有人會發現——發現的那一天是開學前一週。
+ *
+ * # 離班日期用學年度的結束日，不是「今天」
+ *
+ * 因為 `leftAt` 記的是「他什麼時候不在那個班了」。八月中才想到要
+ * 結算的話，用今天等於宣稱他在暑假期間還在上學期的班上——而那個
+ * 日期會被拿去對照他那段時間的作答。用 `endDate` 是唯一說得通的答案。
+ *
+ * 例外：結束日還沒到就結算（學年度提早收），那時用今天——
+ * 未來的離班日期會讓 `leftAt: null` 的判斷全部失效。
+ *
+ * # 為什麼是 updateMany 而不是逐位 leaveClass
+ *
+ * 因為 `leaveClass` 一位一次、還要各查一次 attempt，200 位就是 600 次
+ * 往返落在同一個交易裡——那正是名冊匯入撞到的那面牆。這裡每一位的
+ * 條件相同，所以一句 `updateMany` 就做得完。
+ *
+ * 代價是**不擋「有人正在作答」**，所以下面先查一次；有人在考試就整批
+ * 停下來並說出是誰。結算是行政作業不是急件，等那一場考完再做。
+ */
+export async function closeAcademicYear(yearId: string, actorId: string) {
+  const tenantId = requireTenant();
+  const year = await prisma.academicYear.findFirst({
+    where: { id: yearId },
+    select: { id: true, name: true, endDate: true, isCurrent: true },
+  });
+  if (!year) throw new Error('找不到這個學年度');
+  if (year.isCurrent) {
+    // 把當前學年度收掉之後，開班的表單不知道要預選哪一年，
+    // 而新開的班會掛在一個已經結算的年度底下。順序必須是
+    // 「先建新的、設為當前，再結算舊的」。
+    throw new Error(
+      `「${year.name}」是目前的當前學年度，結算之後開班的表單會不知道預選哪一年。` +
+        '請先建立新學年度並把它設為當前，再回來結算這一個。',
+    );
+  }
+
+  const classes = await prisma.class.findMany({
+    where: { academicYearId: yearId },
+    select: { id: true, name: true, active: true },
+  });
+  if (classes.length === 0) {
+    throw new Error(`「${year.name}」底下沒有任何班級，不需要結算。`);
+  }
+  const classIds = classes.map((c) => c.id);
+
+  const busy = await prisma.attempt.findMany({
+    where: {
+      status: 'IN_PROGRESS',
+      user: { memberships: { some: { classId: { in: classIds }, leftAt: null } } },
+    },
+    select: { user: { select: { displayName: true } } },
+    take: 5,
+  });
+  if (busy.length > 0) {
+    const names = [...new Set(busy.map((b) => b.user.displayName))].join('、');
+    throw new Error(
+      `${names} 現在有作答進行中，結算會讓那份考卷從他的清單上消失，所以整批都沒有執行。` +
+        '等這場考完再結算。',
+    );
+  }
+
+  const now = new Date();
+  const leftAt = year.endDate < now ? year.endDate : now;
+
+  const [members, deactivated] = await prisma.$transaction([
+    prisma.classMembership.updateMany({
+      where: { classId: { in: classIds }, leftAt: null },
+      data: { leftAt },
+    }),
+    prisma.class.updateMany({
+      where: { id: { in: classIds }, active: true },
+      data: { active: false },
+    }),
+  ]);
+
+  await audit(tenantId, actorId, 'year.close', yearId, {
+    name: year.name,
+    classes: classes.length,
+    classesDeactivated: deactivated.count,
+    membershipsClosed: members.count,
+    leftAt: leftAt.toISOString(),
+  });
+
+  return {
+    name: year.name,
+    classes: classes.length,
+    classesDeactivated: deactivated.count,
+    membershipsClosed: members.count,
+    leftAt,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────
 
 function cleanName(raw: string): string {

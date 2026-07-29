@@ -992,7 +992,10 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
 }
 
 /* 作答畫面不列印。要紙本考卷請用組卷那邊的輸出，
-   而不是把螢幕上的一題印出來。 */
+   而不是把螢幕上的一題印出來。
+   （這句話寫了很久，而那個輸出一直不存在——現在它是
+   `/papers/[paperId]/preview`，樣式在檔尾的「組卷與列印」。
+   只補了出處，行為一個字都沒有動。） */
 @media print { .yz-take { display: none; } }
 
 /* ═══ 成績（客觀題評分與班級統計）═══════════════════════════════
@@ -1790,4 +1793,431 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   /* 手機上輸入框各佔一整行。並排時分數欄會被壓到看不出是輸入框。 */
   .yz-clock__row .yz-field { max-width: none; flex: 1 1 100%; }
   .yz-score__note { flex: 1 1 100%; }
+}
+
+/* ═══ 組卷與列印 ═══════════════════════════════════════════════
+   兩件事：挑題那兩欄要看得到一整題，以及一份能直接印給學生寫的紙本。
+
+   紙本這一段不引入 PDF 產生器。瀏覽器自己就是排版引擎，而列印對話框
+   讓老師選得到印表機、紙張、單雙面與份數——那些正是印一疊考卷時真的
+   要調的東西。多一個產生器等於多一套與螢幕上不一樣的排版規則，
+   而「預覽看到的」與「印出來的」一旦分岐，老師就不再相信預覽。 */
+
+/* ── 挑題：展開看一整題 ─────────────────────────────────────
+   在此之前題幹被夾成兩行、選項與答案一個字都看不到，而出卷的核心
+   動作就是「讀這一題，決定要不要」。收起來維持兩行（一次掃 60 列
+   要靠固定行高），展開才是完整的一題。 */
+.yz-pick__q { min-width: 0; }
+.yz-pick__sum {
+  list-style: none; cursor: pointer;
+  display: block; min-width: 0;
+}
+.yz-pick__sum::-webkit-details-marker { display: none; }
+.yz-pick__sum:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* 展開時解除夾行。夾行寫在 .yz-pick__text 上（見上面的挑題區塊），
+   這裡用 [open] 的層級蓋掉，而不是去改那一條——那一條在收起來的
+   狀態下是對的。 */
+.yz-pick__q[open] > .yz-pick__sum .yz-pick__text {
+  display: block; -webkit-line-clamp: unset; overflow: visible;
+}
+/* 展開的把手。文字放在 CSS 裡，因為它要隨著 [open] 換一句話，而畫這
+   一列的是伺服器元件——那裡沒有 client 端狀態可以切換文字。
+   `<summary>` 本身是可聚焦的控制項，鍵盤與讀螢幕都到得了。 */
+.yz-pick__toggle {
+  display: block; margin-top: 2px;
+  font-size: 11px; color: var(--ink-3);
+}
+.yz-pick__toggle::before { content: "▸ 展開看完整題目、選項與答案"; }
+.yz-pick__q[open] .yz-pick__toggle::before { content: "▾ 收起"; }
+.yz-pick__sum:hover .yz-pick__toggle { color: var(--ink); }
+
+/* 「已在第 3 題」這種側註不換行（見上面的挑題區塊），但加上
+   「（另一版本）」就會把整欄撐開，把題幹擠掉一半。給它一個上限。 */
+.yz-pick__act .yz-pick__in { max-width: 11em; white-space: normal; text-align: right; }
+
+.yz-pick__full {
+  margin: 8px 0 4px; padding: 8px 10px;
+  background: var(--paper-sunk); border-left: 2px solid var(--rule);
+  font-family: var(--font-doc); font-size: 12.5px; line-height: 1.9;
+}
+.yz-pick__full ol { list-style: none; margin: 0; padding: 0; }
+.yz-pick__full li { display: flex; gap: 6px; align-items: baseline; }
+.yz-pick__key { color: var(--ink-2); flex: 0 0 auto; }
+/* 標準答案。這是老師的畫面，不是學生的——但仍然用側註的灰，
+   不用色塊：一整欄的彩色會把「答案」變成挑題時最重的東西，
+   而挑題時最重的是題幹。 */
+.yz-pick__ans { margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+.yz-pick__ans strong { color: var(--ink); font-weight: 600; }
+/* 「用過 2 次（113上第二次段考…）」。段考卷裡放一題剛考過的，
+   是老師最怕的事之一，而在此之前這件事只能開第二個分頁人工比對。 */
+.yz-pick__used { color: var(--mark); }
+
+/* 翻頁。在此之前題庫只給得出最新的 60 題，而第 61 題以後**沒有路**——
+   畫面上唯一的提示是「顯示前 60 題」，它不會說被藏起來的有幾題。 */
+.yz-pager {
+  display: flex; gap: 14px; align-items: baseline;
+  margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid var(--rule-2);
+  font-size: 12px;
+}
+.yz-pager__at { margin-left: auto; margin-right: auto; color: var(--ink-2); }
+
+/* 一列一個錯誤訊息，貼在那一列旁邊而不是整份清單的頂端——
+   你正在改第 22 題，清單頂端的紅字在螢幕外。 */
+.yz-pick__err {
+  display: block; margin-top: 4px;
+  font-size: 11.5px; color: var(--mark);
+}
+.yz-score--bad { border-color: var(--mark); background: var(--mark-soft); }
+.yz-score--saving { opacity: .6; }
+
+/* ── 批次配分 ───────────────────────────────────────────────
+   25 題一題一題打，是 100 次點擊與 25 次整頁重繪，佔掉出一份卷子
+   全部操作成本的四成。這一排把它變成 3 次點擊。 */
+.yz-bulk {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end;
+  margin: 0 0 12px; padding: 10px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-bulk__lab { font-size: 11.5px; color: var(--ink-2); }
+.yz-bulk__in {
+  width: 72px; padding: 5px 6px; text-align: right;
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--ink); font-size: 12.5px;
+}
+.yz-bulk__in:focus { outline: 2px solid var(--ink); outline-offset: 1px; }
+.yz-bulk__note { flex: 1 1 100%; font-size: 11.5px; color: var(--ink-2); }
+
+/* 「移到第幾題」。上下移動一格在 25 題的卷子上是 12 次往返，
+   而每一次都是一整頁重繪。打一個數字按 Enter 是一次。 */
+.yz-moveto {
+  width: 44px; padding: 4px 5px; text-align: right;
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  border: 1px solid var(--rule-2); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--ink); font-size: 12px;
+}
+.yz-moveto:focus { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* ── 卷面：一份考卷 ─────────────────────────────────────────
+   螢幕上與紙上是同一棵 DOM。寬度用 em 而不是 mm：螢幕上要好讀，
+   而紙張尺寸由 @page 決定。 */
+.yz-paper__page { max-width: 900px; }
+.yz-paper__bar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-bottom: 16px;
+}
+.yz-paper {
+  max-width: 42em; margin: 0 auto;
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  padding: 30px 34px 26px;
+  font-family: var(--font-doc);
+}
+.yz-paper__head {
+  text-align: center; margin-bottom: 22px;
+  padding-bottom: 14px; border-bottom: 1px solid var(--ink);
+}
+/* 教師版的騎縫章。教師版最容易出的錯是「印一疊發下去」，
+   所以它要在最上面，而且**要印得出來**。 */
+.yz-paper__stamp {
+  font-family: var(--font-ui); font-size: 11px; letter-spacing: .08em;
+  color: var(--mark); border: 1px solid var(--mark);
+  display: inline-block; padding: 2px 10px; margin-bottom: 10px;
+}
+.yz-paper__title { font-size: 19px; font-weight: 600; line-height: 1.5; }
+.yz-paper__meta {
+  font-family: var(--font-ui); font-size: 11.5px; color: var(--ink-2);
+  margin-top: 4px;
+}
+/* 班級／座號／姓名／分數。紙本考卷上這四格是老師收卷後第一個看的
+   東西，而沒有它的話老師要自己在每一張上面畫。 */
+.yz-paper__fields {
+  display: flex; gap: 18px; justify-content: center; flex-wrap: wrap;
+  margin-top: 14px; font-size: 12.5px; color: var(--ink-2);
+}
+.yz-paper__fields span::after {
+  content: ""; display: inline-block;
+  width: 5.5em; margin-left: .4em;
+  border-bottom: 1px solid var(--ink-3);
+}
+.yz-paper__inst {
+  margin-top: 14px; padding: 8px 12px; text-align: left;
+  background: var(--paper-sunk); border-left: 2px solid var(--rule);
+  font-size: 12.5px; line-height: 1.9;
+}
+
+/* 題組素材。排在該組第一題之前，而且盡量不與第一題分頁—— 
+   素材在上一頁、題目在下一頁，等於學生要一直翻頁作答。 */
+.yz-paper__stim {
+  margin: 0 0 16px; padding: 10px 14px;
+  background: var(--paper-sunk); border-left: 2px solid var(--rule);
+  /* 素材自己不切開，而且盡量不與第一題分頁。長到超過一整頁的閱讀
+     素材仍然會斷——那時斷開是對的，硬留在一起只會留下一整頁空白。 */
+  break-inside: avoid; page-break-inside: avoid;
+  break-after: avoid; page-break-after: avoid;
+}
+.yz-paper__stimlabel {
+  font-family: var(--font-ui); font-size: 11px; color: var(--ink-3);
+  margin-bottom: 4px;
+}
+.yz-paper__stimtext { font-size: 13.5px; line-height: var(--lh-doc); }
+
+/* 一題。題號懸掛在版心外，與校對介面同一個做法。 */
+.yz-paper__q {
+  display: grid; grid-template-columns: 2.4em 1fr;
+  gap: 0 8px; margin-bottom: 20px;
+  /* 這一行是整份列印樣式裡最重要的一條：題目被分頁切成兩半，
+     學生翻到下一頁才看得到選項 (4)。 */
+  break-inside: avoid; page-break-inside: avoid;
+}
+.yz-paper__qno {
+  font-size: 14.5px; font-weight: 600; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.yz-paper__sub { font-size: 12px; font-weight: 400; }
+.yz-paper__qbody { min-width: 0; }
+.yz-paper__qmeta {
+  font-family: var(--font-ui); font-size: 10.5px; color: var(--ink-3);
+  margin-bottom: 2px;
+}
+.yz-paper__stem { font-size: 14px; line-height: var(--lh-doc); white-space: pre-wrap; }
+
+.yz-paper__opts { list-style: none; margin: 6px 0 0; padding: 0; }
+.yz-paper__opt {
+  display: flex; gap: 7px; align-items: baseline;
+  font-size: 13.5px; line-height: 1.9;
+}
+.yz-paper__optkey { flex: 0 0 auto; color: var(--ink-2); }
+
+.yz-paper__figs { margin: 8px 0; }
+.yz-paper__figs img { max-width: 100%; height: auto; display: block; margin: 0 0 6px; }
+
+/* 選填題的格位：答案卡上就是一格一個字元，印出來留同樣的格數。 */
+.yz-paper__slots { margin-top: 8px; display: flex; gap: 6px; }
+.yz-paper__slot {
+  display: inline-block; width: 1.9em; height: 1.9em;
+  border: 1px solid var(--ink-3);
+}
+/* 非選題的書寫行。印在紙上學生要有地方寫，而螢幕上它同時說明了
+   「這一題要手寫」。 */
+.yz-paper__work { margin-top: 8px; }
+.yz-paper__line {
+  display: block; height: 1.9em;
+  border-bottom: 1px solid var(--rule);
+}
+/* 逐題的答案。教師版才會有——學生版不是藏起來，是根本沒有這個節點。 */
+.yz-paper__ans {
+  margin-top: 6px; font-size: 13px; color: var(--mark);
+}
+.yz-paper__anslabel {
+  font-family: var(--font-ui); font-size: 10.5px;
+  border: 1px solid var(--mark); padding: 0 4px; margin-right: 6px;
+}
+
+/* 卷末的答案總表。一疊 30 份逐份對答案時，翻回卷末看一張表
+   比在題目之間找那一行小字快得多。 */
+.yz-paper__keys { margin-top: 26px; padding-top: 12px; border-top: 1px solid var(--ink); }
+.yz-paper__keyshead { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.yz-paper__keylist {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(9em, 1fr)); gap: 2px 12px;
+}
+.yz-paper__keylist li {
+  display: flex; gap: 6px; align-items: baseline;
+  font-size: 13px; border-bottom: 1px dotted var(--rule-2); padding: 2px 0;
+  break-inside: avoid; page-break-inside: avoid;
+}
+.yz-paper__keyno {
+  min-width: 1.8em; text-align: right; color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.yz-paper__keyval { font-weight: 600; }
+
+/* 頁尾。螢幕上是一行側註，紙上是每一頁都要有的頁眉頁尾——
+   一疊考卷散在桌上時，沒有卷名的那幾張沒有人知道是哪一份。 */
+.yz-paper__foot {
+  margin-top: 20px; padding-top: 8px; border-top: 1px solid var(--rule);
+  font-family: var(--font-ui); font-size: 10.5px; color: var(--ink-3);
+  text-align: center;
+}
+/* 每一頁重畫的那一條頁尾。螢幕上不存在——它是列印專用的，而在螢幕上
+   多一行與卷末一模一樣的字只會讓人以為畫重複了。 */
+.yz-paper__run { display: none; }
+
+/* ── 列印 ───────────────────────────────────────────────────
+   A4。頁邊留給裝訂與頁尾。 */
+@media print {
+  @page { size: A4; margin: 15mm 14mm 18mm; }
+
+  /* .yz-shell 是 100vh、.yz-shell__main 是 overflow-y: auto——
+     **這兩條會讓整份卷子只印得出第一頁**，而且不會有任何徵兆：
+     螢幕上捲得到的內容，在紙上被裁掉。 */
+  .yz-shell { display: block; height: auto; overflow: visible; }
+  .yz-shell__main { overflow: visible; height: auto; }
+  html, body { background: #fff; height: auto; }
+
+  /* 這一頁的導覽、提示與按鈕不上紙。`.yz-btn` 在上面那一段已經隱藏了，
+     這裡處理的是它外面那一排（它有邊框與間距，會留下一條白帶），
+     以及「這份卷子還是草稿」那幾塊提示——它們是給老師看的，不是考卷。
+
+     **選擇器一律掛在 `.yz-paper__page` 底下**：`.yz-note` 是全站共用的，
+     在這裡無條件隱藏會連帶改掉名冊密碼單那幾頁的列印結果。 */
+  .yz-paper__page .yz-paper__bar,
+  .yz-paper__page .yz-note,
+  .yz-paper__page .yz-state { display: none !important; }
+
+  /* 面板的外框不上紙。它在螢幕上是「這是一個區塊」的界線，印出來
+     卻是一個跨越每一頁、把整份考卷框住的方框——沒有一份考卷長那樣。
+     `.yz-paper__page` 與 `.yz-panel` 是同一個元素上的兩個 class，
+     特異度相同而這一條在後面，所以蓋得掉；只寫這一個就不會動到別頁。 */
+  .yz-paper__page {
+    max-width: none; padding: 0; margin: 0; border: none; background: none;
+  }
+  .yz-paper {
+    max-width: none; margin: 0; padding: 0;
+    border: none; background: #fff;
+    font-size: 11.5pt;
+  }
+  .yz-paper__title { font-size: 15pt; }
+  .yz-paper__stem { font-size: 11pt; }
+  .yz-paper__opt  { font-size: 10.5pt; }
+  .yz-paper__stimtext { font-size: 10.5pt; }
+  /* 底色印出來是一塊灰。紙上用線分隔就夠了，而且省碳粉。 */
+  .yz-paper__stim, .yz-paper__inst { background: none; }
+
+  /* 每一頁的頁尾。沒有它，第二頁以後的紙上沒有任何一個字說得出這是
+     哪一份卷子——一疊考卷散在辦公桌上時，那幾張就沒有人認得。
+
+     # `bottom: 100%` 不是筆誤
+
+     Chromium 在分頁列印下，`position: fixed` 的元素每一頁都會畫一次，
+     但偏移量的解讀與螢幕上不同。實測（A4、chromium 1194）四種寫法：
+
+       bottom: 0        → 每一頁都畫，但落在版心內，會蓋住最後一題
+       bottom: -12mm    → 只有第二頁以後畫得出來，而且跑到頁首位置
+       top: 100%        → 同上，第一頁沒有
+       bottom: 100%     → **每一頁都畫，而且落在下方頁邊裡**
+
+     所以是 `bottom: 100%`，而上面的 `@page` 下緣留 18mm（比左右多）
+     就是留給它的。改動這兩個數字之前請重新排一次 PDF 看過。
+
+     # 只有一條，不是頁首加頁尾
+
+     上面那四種以外的位置都試過，**下方頁邊是唯一每一頁都畫得出來的
+     位置**。所以卷名與滿分擠在同一行，而不是分成頁首與頁尾兩條。
+
+     # 頁碼做不到
+
+     CSS 的 `counter(page)` 只在 `@page` 的邊界區塊裡有效，而 Chromium
+     不支援那個區塊。要頁碼請用瀏覽器列印對話框的「頁首及頁尾」選項。 */
+  .yz-paper__run {
+    display: block;
+    position: fixed; left: 0; right: 0; bottom: 100%;
+    margin: 0; padding: 2mm 0 0;
+    border-top: 1px solid var(--rule);
+    font-family: var(--font-ui); font-size: 8pt; color: var(--ink-3);
+    text-align: center;
+  }
+  /* 流內的那一條只負責最後一頁（見 Sheet.tsx 的註解），所以不要邊框：
+     它接在最後一題後面，多一條線看起來像是還有內容被切掉了。 */
+  .yz-paper__foot { border: none; font-size: 8pt; margin-top: 10mm; }
+
+  /* 卷末的答案總表另起一頁。一疊教師版對答案時，答案表要能單獨
+     抽出來放在旁邊。 */
+  .yz-paper__keys { break-before: page; page-break-before: always; }
+}
+
+/* ── 名冊與清單 ────────────────────────────────────────────────
+   這一段服務的全部是「第一天不痛、第三個月才痛」的那幾件事：
+   兩百位學生的家長同意要一次勾完、七個班在兩個學年度之間切換、
+   三個月之後的成績與派卷清單要翻得到第一個月的考試。
+
+   共同點是它們都出現在**櫃檯正在做別的事**的時候，所以版面上一律
+   是密而不擠、目標區夠大、而且被打斷之後回得去。 */
+
+/* 篩選列裡的一格：標籤在上、控制項在下。
+   標籤放旁邊的話，五、六格排成一列會在筆電上換行成很難讀的形狀，
+   而換行之後標籤與控制項會分家。 */
+.yz-filters__item { display: flex; flex-direction: column; gap: 3px; }
+.yz-filters__item > span { font-size: 11px; color: var(--ink-2); }
+.yz-filters__item .yz-in { padding: 4px 8px; font-size: 12px; }
+/* 純標籤（例如「學年度」）與旁邊的籤片對齊在同一條基線上。 */
+.yz-filters__label { font-size: 11.5px; color: var(--ink-2); align-self: center; }
+
+/* 籤片。學年度與「連已封存的一起看」這種一次只選一個的切換用它。
+   做成連結而不是下拉，是因為選項只有兩三個而且要**看得出現在在哪一個**
+   ——下拉收起來之後，「我現在看的是哪一年」要點開才知道。 */
+.yz-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--rule-2);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.yz-chip:hover { border-color: var(--ink-3); color: var(--ink); }
+.yz-chip:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.yz-chip--on { border-color: var(--ink); color: var(--ink); background: var(--select); font-weight: 600; }
+
+/* 分頁。上一頁與下一頁固定在兩端，中間是「第 41–80 筆」。
+   兩顆按鈕的位置**不隨有沒有下一頁而移動**（沒有的那一端留一個佔位），
+   因為使用者的手指會記住它的位置，而翻到最後一頁時按鈕跳位是最容易
+   誤點的一刻。佔位元素見 components/Pager.tsx。 */
+.yz-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--rule-2);
+}
+.yz-pager__at { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.yz-pager__gap { flex: 0 0 auto; width: 72px; }
+
+/* 名冊的勾選清單（目前用在整批登錄家長同意）。
+   多欄網格而不是一列一位：兩百位排成兩百列要捲十幾頁，而櫃檯要做的
+   事是「掃過去看有沒有漏勾的」——那需要一次看得到愈多愈好。
+   最小寬度 200px 是「姓名 ＋ 學號」在正常字級下不會被截斷的寬度。 */
+.yz-roll {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 2px 14px;
+  margin: 0 0 12px;
+  /* 一個班超過 60 人時給它自己的捲軸，否則整頁下方的「登錄」按鈕
+     會被推到螢幕外——而那正是要按的那一顆。 */
+  max-height: 340px;
+  overflow-y: auto;
+}
+.yz-roll__item {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 6px; border-radius: var(--r-sm);
+  cursor: pointer;
+}
+/* 整列可點（label 包住 checkbox）。只有那個小方框可點的話，
+   在平板上要按兩三次才中，而這裡要按的次數是全班人數。 */
+.yz-roll__item:hover { background: var(--select); }
+.yz-roll__item input { margin: 0; flex: 0 0 auto; }
+.yz-roll__name { font-size: 13px; }
+.yz-roll__id {
+  font-size: 11px; color: var(--ink-3); margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.yz-roll__bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.yz-roll__count { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+/* 對話框裡的分段（改資料／退補／刪除個資）。
+   三段的危險程度不同，所以用一條線分開而不是全部擠在一起——
+   每天在按第一段的人不該一直看到第三段。 */
+.yz-editor__part { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule-2); }
+.yz-editor__head { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+
+@media (max-width: 620px) {
+  /* 手機上篩選的每一格佔一整行。並排時下拉會被壓到看不出是下拉。 */
+  .yz-filters__item { flex: 1 1 100%; }
+  .yz-filters__item .yz-in { width: 100%; }
+  /* 勾選清單回到單欄：兩欄在手機上每一欄都放不下姓名加學號。 */
+  .yz-roll { grid-template-columns: 1fr; max-height: 260px; }
+  .yz-pager__gap { width: 0; }
 }

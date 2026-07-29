@@ -8,8 +8,17 @@
 import Link from 'next/link';
 
 import { Denied, Empty, Note } from '@/components/Feedback';
+import { Pager } from '@/components/Pager';
 import { Table } from '@/components/Table';
 import { attemptStranded } from '@/lib/attemptClock.mjs';
+import {
+  PAGE_SIZE,
+  keepQuery,
+  pageQuery,
+  pageSlice,
+  parseDayRange,
+  parseSearch,
+} from '@/lib/listing.mjs';
 import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
@@ -18,8 +27,20 @@ import { gradeScopeWhere } from '@/lib/scoring';
 
 export const dynamic = 'force-dynamic';
 
-/** 一頁最多列幾份。超過時要說出來，見下面的 `truncated`。 */
-const PAGE = 60;
+/**
+ * 一頁最多列幾份。
+ *
+ * # 為什麼這個數字以前是一條死路
+ *
+ * 舊版取 60 筆、沒有分頁，超過時顯示「要找更早的成績，請從『派卷』
+ * 進到那一份任務」——而派卷那一頁取 100 筆、也沒有分頁，超過時顯示
+ * 「要看更早的成績請到『成績』」。**兩頁互相指向對方，而兩頁都看不到。**
+ *
+ * 7 個班 × 3 科 × 每週各一份 = 21 份／週，第三週就越過 60。
+ * 所以開學第一個月的每一場考試，從第三個月起在兩個入口同時消失——
+ * 資料完好，入口消失，而對使用者來說兩者沒有差別。
+ */
+const PAGE = PAGE_SIZE;
 
 /**
  * 截止日。**一定要指定台北時區**：資料庫存的是 UTC，而伺服器多半
@@ -35,7 +56,19 @@ function dueDay(d: Date): string {
   }).format(d);
 }
 
-export default async function GradesPage() {
+export default async function GradesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    page?: string;
+    q?: string;
+    subject?: string;
+    class?: string;
+    from?: string;
+    to?: string;
+  }>;
+}) {
+  const sp = await searchParams;
   return scopedPage(async (user) => {
     if (!mayUse(user.systemRole, '/grades')) {
       return (
@@ -52,15 +85,63 @@ export default async function GradesPage() {
     // 管理員看得到全部。少了這一段，數學老師會看到國文班每一位
     // 學生的分數。規則的正本在 lib/scoring.ts——內頁用的是同一份
     // （`mayViewGrades`），兩邊分開寫就是分開錯。
-    const where = await gradeScopeWhere(user);
-    const scoped = Object.keys(where).length > 0;
+    const scope = await gradeScopeWhere(user);
+    const scoped = Object.keys(scope).length > 0;
 
-    const assignments = await prisma.assignment.findMany({
+    // 篩選的選項要**先於**篩選本身算出來：科目下拉列的是他看得到的
+    // 科目，班級下拉列的是他看得到的班。列全部的話，選了一個空的
+    // 組合會得到一張空表，而那看起來像資料不見了。
+    const [subjects, classes] = await Promise.all([
+      prisma.subject.findMany({
+        where: { active: true },
+        orderBy: { order: 'asc' },
+        select: { id: true, name: true },
+      }),
+      prisma.class.findMany({
+        where: { active: true },
+        orderBy: [{ academicYear: { startDate: 'desc' } }, { name: 'asc' }],
+        take: 100,
+        select: { id: true, name: true },
+      }),
+    ]);
+
+    const q = parseSearch(sp.q);
+    const range = parseDayRange(sp.from, sp.to);
+    const subjectId = subjects.some((s) => s.id === sp.subject) ? sp.subject : undefined;
+    const classId = classes.some((c) => c.id === sp.class) ? sp.class : undefined;
+    const filtered = Boolean(q || subjectId || classId || range.gte || range.lt);
+
+    // 篩選條件與 `gradeScopeWhere` 用 AND 併，不是展開合併。
+    // 展開的話，`gradeScopeWhere` 回的那個 `OR`（我教的科目 **或**
+    // 我派的任務）會被同名的鍵蓋掉——症狀是一位老師看得到別科的成績，
+    // 而且只在他用了篩選的時候發生。
+    const where = {
+      AND: [
+        scope,
+        ...(q ? [{ title: { contains: q, mode: 'insensitive' as const } }] : []),
+        ...(subjectId ? [{ paper: { subjectId } }] : []),
+        ...(classId ? [{ targets: { some: { classId } } }] : []),
+        ...(range.gte || range.lt
+          ? [
+              {
+                createdAt: {
+                  ...(range.gte ? { gte: range.gte } : {}),
+                  ...(range.lt ? { lt: range.lt } : {}),
+                },
+              },
+            ]
+          : []),
+      ],
+    };
+
+    const window = pageQuery(sp.page, PAGE);
+    const found = await prisma.assignment.findMany({
       where,
       orderBy: [{ dueAt: 'desc' }, { createdAt: 'desc' }],
+      skip: window.skip,
       // 多取一筆，只為了知道「後面還有沒有」。老師最怕的不是分頁，
       // 是以為自己看到的就是全部。
-      take: PAGE + 1,
+      take: window.take,
       select: {
         id: true,
         title: true,
@@ -81,8 +162,8 @@ export default async function GradesPage() {
       },
     });
 
-    const truncated = assignments.length > PAGE;
-    const shown = assignments.slice(0, PAGE);
+    const paged = pageSlice(found, sp.page, PAGE);
+    const shown = paged.rows;
 
     // 卡在「進行中」的份數。**首頁的待辦連到這一頁，而這張表以前
     // 沒有任何一欄說得出是哪一份**——一場 32 人的考試裡有 3 個人
@@ -179,12 +260,59 @@ export default async function GradesPage() {
           </Note>
         )}
 
-        {truncated && (
-          <Note tone="warn">
-            只列出最近 {PAGE} 份任務，還有更早的沒有顯示。要找更早的成績，
-            請從「派卷」進到那一份任務。
-          </Note>
-        )}
+        {/* 篩選列。以前這裡是一句「請從派卷進到那一份任務」，
+            而派卷那一頁的提示是「請到成績」——兩句話互相指向對方，
+            而兩頁都看不到。 */}
+        <form className="yz-filters" method="get" action="/grades">
+          <label className="yz-filters__item">
+            <span className="yz-sr">搜尋任務名稱</span>
+            <input
+              name="q"
+              defaultValue={sp.q ?? ''}
+              placeholder="搜尋任務名稱"
+              className="yz-in"
+              style={{ width: 180 }}
+            />
+          </label>
+          <label className="yz-filters__item">
+            <span>科目</span>
+            <select name="subject" defaultValue={sp.subject ?? ''} className="yz-in">
+              <option value="">全部</option>
+              {subjects.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="yz-filters__item">
+            <span>班級</span>
+            <select name="class" defaultValue={sp.class ?? ''} className="yz-in">
+              <option value="">全部</option>
+              {classes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="yz-filters__item">
+            <span>從</span>
+            <input type="date" name="from" defaultValue={sp.from ?? ''} className="yz-in" />
+          </label>
+          <label className="yz-filters__item">
+            <span>到</span>
+            <input type="date" name="to" defaultValue={sp.to ?? ''} className="yz-in" />
+          </label>
+          <button type="submit" className="yz-btn">
+            套用
+          </button>
+          {filtered && (
+            <Link className="yz-btn yz-btn--quiet" href="/grades">
+              清除
+            </Link>
+          )}
+        </form>
 
         <Table
           caption="有作答記錄的任務"
@@ -259,7 +387,15 @@ export default async function GradesPage() {
           rows={rows}
           rowKey={(r) => r.id}
           empty={
-            teachesNothing ? (
+            filtered ? (
+              // 「篩掉了」與「真的沒有」要分得出來。合成一句的話，
+              // 老師會以為這一科從來沒有考過試。
+              <Empty
+                title="這組條件下沒有任務"
+                hint="換一個科目、班級或日期區間看看。也可能是它落在別的日期區間裡。"
+                action={<Link href="/grades">清除篩選</Link>}
+              />
+            ) : teachesNothing ? (
               <Empty
                 title="你還沒有被指定任何授課科目"
                 hint="成績只看得到自己教的科目與自己派出去的任務。請管理員把你加進班級的授課老師名單，這一頁就會有東西。"
@@ -271,6 +407,18 @@ export default async function GradesPage() {
                 action={<Link href="/papers">去組卷</Link>}
               />
             )
+          }
+        />
+
+        <Pager
+          page={paged.page}
+          hasPrev={paged.hasPrev}
+          hasNext={paged.hasNext}
+          from={paged.from}
+          to={paged.to}
+          unit="份"
+          hrefFor={(n) =>
+            keepQuery('/grades', { ...sp }, { page: n === 1 ? undefined : String(n) })
           }
         />
       </main>

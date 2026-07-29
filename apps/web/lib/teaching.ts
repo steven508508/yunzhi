@@ -76,6 +76,40 @@ export async function classSubjectTeachers(classId: string) {
   });
 }
 
+/**
+ * 這個人有沒有被指派教這個班（任何一科）。
+ *
+ * # 為什麼這一支非有不可
+ *
+ * 因為在此之前，班級頁的存取判定查的是 `ClassMembership`
+ * （`classes/[classId]/page.tsx` 的 `mine`、`classes/page.tsx` 的
+ * `where`），而授課指派寫的是 `ClassSubjectTeacher`——**兩張表對不上**。
+ * 於是一位被指派教七個班數學的老師：
+ *
+ *   · `/classes` 上一個班都看不到，畫面寫「你還沒有帶任何班」
+ *   · `/classes/[classId]` 整頁被 Denied
+ *
+ * 而重設密碼與登錄家長同意**兩支 API 本來就允許 TEACHER**，
+ * 路由檔頭甚至寫了理由：「學生是在櫃檯或教室裡跟現場的那一位老師講
+ * 的，而要求他去找導師或管理員，等於這個功能在最需要的那一刻不存在」。
+ * **規則寫對了，畫面把它關起來了**——而畫面比 API 嚴是反的。
+ *
+ * 一週 5 人次的忘記密碼因此全部落在主任身上。
+ *
+ * # 為什麼不查 `subjectId`
+ *
+ * 因為問的是「他進不進得了這個班的名冊」，而名冊不分科。他教哪一科
+ * 決定的是成績看得到哪幾份（`gradeScopeWhere`），那是另一條規則、
+ * 在另一個地方，兩者不該合併。
+ */
+export async function teachesClass(userId: string, classId: string): Promise<boolean> {
+  const row = await prisma.classSubjectTeacher.findFirst({
+    where: { userId, classId },
+    select: { id: true },
+  });
+  return Boolean(row);
+}
+
 /** 這個班目前的導師。 */
 export async function classHomerooms(classId: string) {
   return prisma.classMembership.findMany({

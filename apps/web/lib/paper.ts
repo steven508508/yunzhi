@@ -46,6 +46,7 @@
 import { prisma } from '@/lib/prisma';
 import { requireTenant } from '@/lib/tenant';
 import { mayUse } from '@/lib/nav';
+import { alreadyPicked, usageByQuestion } from '@/lib/paperPlan.mjs';
 
 /** 進得了卷子的題目狀態。理由見檔案開頭的決定二。 */
 export const COMPOSABLE_QUESTION_STATUS = ['PUBLISHED', 'PENDING_REVIEW'] as const;
@@ -232,6 +233,86 @@ export async function deletePaper(paperId: string, actorId: string) {
   return paper;
 }
 
+/**
+ * 複製一份卷子。
+ *
+ * # 為什麼這件事是必要的，而不是方便
+ *
+ * `requireEditablePaper` 在有人開始作答之後就鎖住整份卷子，錯誤訊息叫
+ * 老師「另外建一份」——而在此之前，「另外建一份」的意思是**從幾百題裡
+ * 重挑 25 題**。那句話把老師推向一條系統沒有鋪的路，而且通常是在
+ * 考試已經開始、發現有一題印錯的那個當下。
+ *
+ * 更日常的一種：「上次段考那份改幾題」是出卷最常見的起點。
+ *
+ * # 三個決定
+ *
+ * **一、新卷子一律是 DRAFT。** 複製出來的東西還沒有人看過。直接是
+ * READY 的話，它會出現在派任務的下拉選單裡，與原本那一份只差卷名。
+ *
+ * **二、配分照抄，不重算。** `ExamPaperItem.score` 是「這一份卷子上
+ * 這一題值幾分」，與題庫的預設配分無關（schema 的欄位註解）。回頭去讀
+ * 題庫的話，一份調好配分的卷子複製出來會全部變回 1 分。
+ *
+ * **三、順序用 1..n 重新編號，不照抄原本的 order。** 原卷刪過題的話
+ * order 會有洞（`removePaperItem` 不重新編號），照抄會把洞一起帶過來，
+ * 而那個洞在新卷子上沒有任何意義。
+ */
+export async function duplicatePaper(paperId: string, actorId: string, title?: string) {
+  const tenantId = requireTenant();
+  const src = await prisma.examPaper.findFirst({
+    where: { id: paperId },
+    select: {
+      id: true,
+      subjectId: true,
+      title: true,
+      instructions: true,
+      items: {
+        orderBy: { order: 'asc' },
+        select: { questionId: true, score: true },
+      },
+    },
+  });
+  if (!src) throw new Error('找不到這份試卷');
+
+  const name = (title?.trim() || `${src.title}（複本）`).slice(0, 120);
+
+  const copy = await prisma.$transaction(async (tx) => {
+    const created = await tx.examPaper.create({
+      data: {
+        tenantId,
+        subjectId: src.subjectId,
+        title: name,
+        instructions: src.instructions,
+        createdBy: actorId,
+      },
+    });
+    if (src.items.length > 0) {
+      await tx.examPaperItem.createMany({
+        data: src.items.map((it, i) => ({
+          paperId: created.id,
+          questionId: it.questionId,
+          order: i + 1,
+          score: it.score,
+        })),
+      });
+    }
+    // 與其他寫入路徑同一條規則：總分在同一個交易裡算出來寫回去。
+    // 少了這一行，複本的總分是 0，而它的題目與配分都在——那是
+    // 「派得出去、學生考完每個人都滿分」的形狀。
+    await recalcTotal(tx, created.id);
+    return created;
+  });
+
+  await audit(tenantId, actorId, 'paper.duplicate', copy.id, {
+    from: src.id,
+    fromTitle: src.title,
+    title: name,
+    items: src.items.length,
+  });
+  return copy;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 卷上的題目
 // ─────────────────────────────────────────────────────────────────
@@ -255,7 +336,7 @@ export async function addPaperItem(
 
   const question = await prisma.question.findFirst({
     where: { id: questionId },
-    select: { id: true, subjectId: true, status: true, score: true },
+    select: { id: true, subjectId: true, status: true, score: true, familyId: true },
   });
   if (!question) throw new Error('找不到這一題');
 
@@ -286,11 +367,31 @@ export async function addPaperItem(
     );
   }
 
-  const dup = await prisma.examPaperItem.findFirst({
-    where: { paperId, questionId },
-    select: { id: true, order: true },
+  // 重複的兩種：同一列題目，以及**同一題的另一個版本**。
+  // 後者資料庫擋不住——`UNIQUE (paperId, questionId)` 看到的是兩個
+  // 不同的 id，而它們是同一題改過一次的前後兩版（familyId 跨版本穩定）。
+  // 放行的結果是學生在同一張卷子上看到兩題只差一個字的題目，
+  // 而那件事在夾成兩行的挑題畫面上看不出來。判斷本身在 paperPlan.mjs。
+  const onPaper = await prisma.examPaperItem.findMany({
+    where: { paperId },
+    select: { order: true, questionId: true, question: { select: { familyId: true } } },
   });
-  if (dup) throw new Error(`這一題已經在卷子上了（第 ${dup.order} 題）`);
+  const dup = alreadyPicked(
+    onPaper.map((i) => ({
+      questionId: i.questionId,
+      familyId: i.question.familyId,
+      order: i.order,
+    })),
+    { questionId: question.id, familyId: question.familyId },
+  );
+  if (dup) {
+    throw new Error(
+      dup.kind === 'same'
+        ? `這一題已經在卷子上了（第 ${dup.order} 題）`
+        : `這一題的另一個版本已經在卷子上了（第 ${dup.order} 題）。` +
+          `兩個版本只差在後來修訂的地方，同一張卷子上會出現兩題幾乎一樣的題目。`,
+    );
+  }
 
   const value = score !== undefined ? score : question.score > 0 ? question.score : 1;
   assertScore(value);
@@ -391,6 +492,115 @@ export async function setPaperItemScore(itemId: string, score: number, actorId: 
     to: score,
   });
   return after;
+}
+
+/**
+ * 整批改配分。
+ *
+ * # 為什麼要有這一支
+ *
+ * 因為 25 題的卷子每一題各送一次，是 25 次 PATCH ＋ 25 次整頁重繪，
+ * 而它佔掉老師出一份卷子全部點擊數的四成。「每題 4 分、全部套用」與
+ * 「平均分配到 100 分」這兩個一鍵動作，本質上就是一次送 25 個數字。
+ *
+ * # 為什麼不是在前端跑 25 次單題的那一支
+ *
+ * 因為那樣就有 25 個各自會失敗的請求，而失敗的那幾題會留在畫面上
+ * 顯示新的數字、資料庫裡是舊的。**一個交易一個結果**：全部進去，
+ * 或者一題都沒動。`recalcTotal` 也只跑一次，總分與題目不會有中間狀態。
+ *
+ * @param entries 要改的題目與新配分。沒列到的題目維持原本的配分。
+ */
+export async function setPaperItemScores(
+  paperId: string,
+  entries: readonly { itemId: string; score: number }[],
+  actorId: string,
+) {
+  const tenantId = requireTenant();
+  const paper = await requireEditablePaper(paperId);
+
+  if (entries.length === 0) throw new Error('沒有要調整的配分');
+  const seen = new Set(entries.map((e) => e.itemId));
+  if (seen.size !== entries.length) {
+    throw new Error('同一題送了兩個配分。請重新整理再試一次。');
+  }
+  for (const e of entries) assertScore(e.score);
+
+  const total = await prisma.$transaction(async (tx) => {
+    // 集合比對放在交易裡，理由與 reorderPaperItems 相同：把「查完到
+    // 改完」之間別人動手的空窗縮到最小。這裡還多守一件事——itemId
+    // 一定要屬於這份卷子，否則呼叫端拿別份卷子的 id 進來就繞過了
+    // 上一層對「這份卷子的科目」判過的權限。
+    const mine = await tx.examPaperItem.findMany({
+      where: { paperId, id: { in: [...seen] } },
+      select: { id: true },
+    });
+    if (mine.length !== entries.length) {
+      throw new Error(
+        `送來的 ${entries.length} 題裡有 ${entries.length - mine.length} 題不在這份卷子上。` +
+          `通常是有人同時在改同一份卷子——請重新整理，看到最新的內容再改一次。`,
+      );
+    }
+    for (const e of entries) {
+      await tx.examPaperItem.update({ where: { id: e.itemId }, data: { score: e.score } });
+    }
+    return recalcTotal(tx, paperId);
+  });
+
+  await audit(tenantId, actorId, 'paper.item.scores', paperId, {
+    paper: paper.title,
+    count: entries.length,
+    total,
+  });
+  return { count: entries.length, totalScore: total };
+}
+
+/**
+ * 這幾題**在別的卷子上**用過幾次、用在哪幾份。
+ *
+ * # 為什麼這一句查詢值得存在
+ *
+ * `ExamPaperItem` 上的 `@@index([questionId])` 就是為了這個方向建的，
+ * 而在這之前全 repo 沒有任何一句用 questionId 反查——索引建了沒人用。
+ *
+ * 老師實際要回答的問題是「這一題上次段考考過了沒有」。段考卷裡放一題
+ * 剛考過的，背過答案的人分數會虛高，而那個異常在成績頁上看起來只是
+ * 「這一題答對率特別高」。在這之前唯一的做法是開第二個分頁人工比對
+ * 兩份卷子被夾成兩行的題幹。
+ *
+ * 一次查完再分組，不是一題一句（60 題就是 60 次往返）。
+ *
+ * @param exceptPaperId 排除掉「這一份」——同一份卷子上的重複由
+ *                      `alreadyPicked` 負責，兩件事的訊息完全不同。
+ */
+export type QuestionUsage = Map<
+  string,
+  { count: number; papers: { id: string; title: string }[]; more: number }
+>;
+
+export async function questionUsage(
+  questionIds: readonly string[],
+  exceptPaperId: string,
+  limit = 2,
+): Promise<QuestionUsage> {
+  if (questionIds.length === 0) return new Map();
+  const rows = await prisma.examPaperItem.findMany({
+    where: { questionId: { in: [...questionIds] }, paperId: { not: exceptPaperId } },
+    select: {
+      questionId: true,
+      paperId: true,
+      paper: { select: { title: true, updatedAt: true } },
+    },
+    // 由新到舊：老師要的是「最近哪一份考過」，不是全部的歷史。
+    orderBy: { paper: { updatedAt: 'desc' } },
+    // 一題被三十份卷子用過是可能的（複習卷抄來抄去），而畫面上只列
+    // 前兩份。上限擋住的是「60 題 × 30 份」這種一次拉幾千列的情況。
+    take: 400,
+  });
+  return usageByQuestion(
+    rows.map((r) => ({ questionId: r.questionId, paperId: r.paperId, paperTitle: r.paper.title })),
+    limit,
+  );
 }
 
 /**

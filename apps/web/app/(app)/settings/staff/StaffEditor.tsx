@@ -21,6 +21,16 @@
  * 伺服器端擋得住（`lib/staffRules.mjs`），但一顆按下去必定被退回的
  * 按鈕，對使用者來說與「壞掉的按鈕」沒有分別。前端擋的是誤觸與
  * 白按一次的挫折，伺服器端擋的是規則——兩邊都要有。
+ *
+ * # 為什麼「停用」與「刪除」兩顆都要有
+ *
+ * 因為停用**不釋放登入代號**。`@@unique([tenantId, username])` 之下，
+ * 一個停用的帳號仍然佔著 `T001`，而新來接手的老師最自然的代號正是
+ * `T001`——建立時會撞鍵，而錯誤訊息說「已經有人在用了」，
+ * 那個人是一位半年前離職的老師。
+ *
+ * 停用是可逆的（留職停薪、先關掉再說），刪除是離職。
+ * 兩者的差別要寫在確認視窗裡，否則使用者會挑錯那一顆。
  */
 'use client';
 
@@ -83,6 +93,8 @@ export default function StaffEditor({
   const [editing, setEditing] = useState<Staff | null>(null);
   const [suspending, setSuspending] = useState<Staff | null>(null);
   const [resetting, setResetting] = useState<Staff | null>(null);
+  const [removing, setRemoving] = useState<Staff | null>(null);
+  const [typed, setTyped] = useState('');
   // 兩組動作狀態，不是一組。對話框裡的錯誤要顯示在對話框裡（使用者的
   // 視線在那裡），表格裡那顆「重新啟用」的錯誤要顯示在表格上方——
   // 共用一個 `error` 的話，其中一則訊息會出現在一個沒有打開的對話框裡，
@@ -138,6 +150,17 @@ export default function StaffEditor({
     }
   }
 
+  async function remove(s: Staff) {
+    const ok = await run(async () => {
+      await submitJson(`/api/staff/${s.id}`, { method: 'DELETE' });
+    });
+    if (ok) {
+      setRemoving(null);
+      setTyped('');
+      router.refresh();
+    }
+  }
+
   return (
     <>
       {adding ? (
@@ -161,14 +184,14 @@ export default function StaffEditor({
         </div>
       )}
 
-      {/* 改角色開一張卡片，而不是在表格裡放一個一選就送出的下拉。
+      {/* 改帳號開一張卡片，而不是在表格裡放一個一選就送出的下拉。
           兩個理由：角色異動是**發權限**，不該是一次滑鼠滾輪的意外；
           而且表格裡的下拉沒有地方顯示伺服器退回的理由，
           使用者看到的會是一顆選了又跳回去的控制項。 */}
       {editing && (
         <div className="yz-card" style={{ marginBottom: 22 }}>
           <h2 className="yz-card__title">
-            改「{editing.displayName}」的角色
+            改「{editing.displayName}」的帳號
           </h2>
           <RoleForm
             // key 讓換一位編輯時整個表單重建。少了它，React 會沿用同一個
@@ -177,6 +200,7 @@ export default function StaffEditor({
             key={editing.id}
             staff={editing}
             roles={grantable}
+            roleLocked={roleLockReason(editing)}
             onDone={() => {
               setEditing(null);
               router.refresh();
@@ -257,13 +281,17 @@ export default function StaffEditor({
               if (locked) return <span className="yz-muted">{locked}</span>;
               return (
                 <span className="yz-rowacts" style={{ justifyContent: 'flex-end' }}>
+                  {/* 「改帳號」不再被 roleLockReason 停用。
+                      姓名與登入代號**永遠改得動**——它們不發任何權限，
+                      而在此之前這顆按鈕連同姓名一起被鎖住，於是唯一的
+                      系統管理員（多半就是主任自己）的名字打錯了就是一輩子。
+                      角色那一格在表單裡另外鎖，理由也印在旁邊。 */}
                   <Button
                     variant="quiet"
                     onClick={() => setEditing(s)}
-                    disabled={busy || row.busy || roleLockReason(s) !== null}
-                    title={roleLockReason(s) ?? undefined}
+                    disabled={busy || row.busy}
                   >
-                    改角色
+                    改帳號
                   </Button>
                   <Button variant="quiet" onClick={() => setResetting(s)} disabled={busy || row.busy}>
                     重設密碼
@@ -293,6 +321,26 @@ export default function StaffEditor({
                       重新啟用
                     </Button>
                   )}
+                  {/* 刪除排在最後。它與旁邊那幾顆不是同一種東西：
+                      停用可逆、刪除不可逆，而且只有刪除會把登入代號
+                      放回去給下一位老師用。 */}
+                  <Button
+                    variant="quiet"
+                    onClick={() => {
+                      setTyped('');
+                      setRemoving(s);
+                    }}
+                    disabled={busy || row.busy || s.id === me.id || isLastAdmin(s)}
+                    title={
+                      s.id === me.id
+                        ? '不能刪除自己的帳號'
+                        : isLastAdmin(s)
+                          ? '這是唯一一位可以登入的系統管理員'
+                          : '離職。會把登入代號放回去給別人用'
+                    }
+                  >
+                    刪除
+                  </Button>
                 </span>
               );
             },
@@ -341,6 +389,60 @@ export default function StaffEditor({
           </>
         }
         onConfirm={() => suspending && void suspend(suspending)}
+      />
+
+      {/* 刪除（離職）。與停用分開，理由見檔頭。 */}
+      <ConfirmDialog
+        open={removing !== null}
+        onClose={() => {
+          if (busy) return;
+          clearError();
+          setTyped('');
+          setRemoving(null);
+        }}
+        busy={busy}
+        title={removing ? `刪除「${removing.displayName}」的帳號` : ''}
+        confirmLabel={
+          removing && typed.trim() === removing.username ? '確定刪除，不可復原' : '請先打出登入帳號'
+        }
+        confirmDisabled={!removing || typed.trim() !== removing.username}
+        consequence={
+          <>
+            <p style={{ marginBottom: 12 }}>
+              <strong>這是離職用的，而且不可逆。</strong>只是要暫時關掉他的帳號，
+              請用「停用」——那個放得回來。
+            </p>
+            <p style={{ marginBottom: 12 }}>
+              刪除會把姓名與信箱清掉、密碼作廢、所有裝置登出，而且
+              <strong>把登入帳號「{removing?.username}」放回去</strong>。
+              停用不會放——所以新來接手的老師若要用同一個代號，只有刪除做得到。
+            </p>
+            {removing && removing.teaching > 0 && (
+              <p style={{ marginBottom: 12 }}>
+                他目前有 <strong>{removing.teaching} 筆授課指派</strong>，會一起被清掉，
+                導師身分也是。那幾個班的那幾科<strong>會少一位改得動成績的人</strong>——
+                刪除之前先確認有別人接得起來。
+              </p>
+            )}
+            <p style={{ marginBottom: 12 }}>
+              他出過的題目、組過的卷子、派過的任務與批改記錄<strong>全部保留</strong>，
+              建立者會顯示成「已刪除的帳號」。抽掉那些會讓歷史成績對不回任何人。
+            </p>
+            <p className="yz-hint" style={{ marginBottom: 12 }}>
+              誰在什麼時候刪除了誰會寫進稽核記錄，行為人是你。
+            </p>
+            <TextField
+              label="請打出他的登入帳號以確認"
+              value={typed}
+              onChange={(e) => setTyped(e.currentTarget.value)}
+              hint={`要完全相同：${removing?.username ?? ''}`}
+              autoComplete="off"
+              disabled={busy}
+            />
+            {error && <p className="yz-field__err">{error}</p>}
+          </>
+        }
+        onConfirm={() => removing && void remove(removing)}
       />
 
       {/* 重設密碼 */}
@@ -425,46 +527,99 @@ export default function StaffEditor({
 }
 
 /**
- * 改角色。
+ * 改帳號：姓名、登入代號、信箱、角色。
  *
- * 只有一個欄位，但仍然走 `<Form>`：它負責送出中停用按鈕、接住伺服器
- * 退回的理由並顯示在表單頂端。自己寫三行 useState 的話，被省掉的
- * 永遠是那兩件——而「最後一個管理員不能降級」的理由若沒有被顯示出來，
- * 畫面上就是一顆按了沒反應的按鈕。
+ * # 為什麼四個欄位在同一張表單裡
+ *
+ * 因為它們是同一件事的四個面向——「這個帳號的資料不對了」。
+ * 管理員拿到的通常是一整份更正單（名字打錯、順便換一個代號），
+ * 而分成四次送出是四次等待與四次可能失敗。
+ *
+ * 但**角色那一格會被單獨鎖住**（最後一位系統管理員、自己的角色），
+ * 而姓名與代號永遠改得動：它們不發任何權限。合在一起鎖的話，
+ * 唯一的系統管理員——多半就是主任自己——的名字打錯了就是一輩子。
+ *
+ * # 改代號會把他登出
+ *
+ * 他正拿著舊代號在登入。不講出來的話，他明天照著舊代號打、登不進去、
+ * 試五次把帳號鎖住，而管理員完全不知道發生了什麼。
  */
 function RoleForm({
   staff,
   roles,
+  roleLocked,
   onDone,
   onCancel,
 }: {
   staff: Staff;
   roles: { value: string; label: string }[];
+  /** 角色改不了的話，是為什麼。姓名與代號不受它影響。 */
+  roleLocked: string | null;
   onDone: () => void;
   onCancel: () => void;
 }) {
+  const [displayName, setDisplayName] = useState(staff.displayName);
+  const [username, setUsername] = useState(staff.username);
+  const [email, setEmail] = useState(staff.email ?? '');
   const [systemRole, setSystemRole] = useState(staff.systemRole);
+
+  const idChanged = username.trim() !== staff.username;
 
   return (
     <Form
       onSubmit={async () => {
-        await submitJson(`/api/staff/${staff.id}`, { method: 'PATCH', json: { systemRole } });
+        await submitJson(`/api/staff/${staff.id}`, {
+          method: 'PATCH',
+          json: {
+            displayName: displayName.trim(),
+            username: username.trim(),
+            email: email.trim() || null,
+            // 鎖住時完全不送這個欄位。送一個「與現在相同」的值也行，
+            // 但那會讓伺服器多跑一次規則檢查，而其中一條是
+            // 「不能改自己的角色」——主任改自己的名字時會被那一條擋下來。
+            ...(roleLocked ? {} : { systemRole }),
+          },
+        });
         onDone();
       }}
     >
       {({ busy }) => (
         <>
+          <div className="yz-row">
+            <TextField
+              label="姓名"
+              required
+              value={displayName}
+              onChange={(e) => setDisplayName(e.currentTarget.value)}
+              hint="老師與學生在畫面上看到的名字，導覽列右上角的也是這一個。"
+              autoFocus
+            />
+            <TextField
+              label="登入帳號"
+              required
+              value={username}
+              onChange={(e) => setUsername(e.currentTarget.value)}
+              hint={
+                idChanged
+                  ? '改了之後他會被立刻登出，而且要用新代號才登得進來——記得當場告訴他。密碼不變。'
+                  : '教師代號，例如 T001。中間不能有空白——他會照著它打。'
+              }
+              autoComplete="off"
+            />
+          </div>
           <SelectField
             label="角色"
             required
             value={systemRole}
             onChange={(e) => setSystemRole(e.currentTarget.value)}
+            disabled={roleLocked !== null}
             hint={
-              `目前是${staff.roleLabel}。` +
-              '改成老師之後，他只看得到自己被指派的班級與科目——' +
-              '原本看得到的成績會在下一次重新整理時消失，而他不會收到通知。'
+              roleLocked
+                ? `這個帳號的角色改不了：${roleLocked}。姓名與登入帳號不受影響，照樣改得動。`
+                : `目前是${staff.roleLabel}。` +
+                  '改成老師之後，他只看得到自己被指派的班級與科目——' +
+                  '原本看得到的成績會在下一次重新整理時消失，而他不會收到通知。'
             }
-            autoFocus
           >
             {roles.map((r) => (
               <option key={r.value} value={r.value}>
@@ -477,6 +632,14 @@ function RoleForm({
               <option value={staff.systemRole}>{staff.roleLabel}</option>
             )}
           </SelectField>
+          <TextField
+            label="信箱"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.currentTarget.value)}
+            hint="選填，而且系統目前不會寄任何信。清空請把格子留白。"
+            autoComplete="off"
+          />
           <div className="yz-actions">
             <span className="yz-actions__spacer" />
             <Button variant="quiet" onClick={onCancel} disabled={busy}>

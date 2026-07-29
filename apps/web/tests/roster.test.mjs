@@ -134,3 +134,32 @@ test('不存在的日期要被擋下來，不是靜靜地滑到下個月', () =>
   assert.equal(parseBirth(''), null);
   assert.equal(parseBirth(null), null);
 });
+
+// ── 家長同意欄 ───────────────────────────────────────────────────
+
+test('同意欄的常見標題都對得上', () => {
+  // 這一欄是 200 人補習班第一天唯一真的做不完的那一步的出口：
+  // 逐位登錄是 27 分鐘的純點擊，而在那之前那 200 個帳號一個都登不進去。
+  // 對不上標題的話，櫃檯填了一整欄而系統當它不存在——
+  // 而畫面上會說匯入成功。
+  for (const head of ['家長同意', '同意', '法定代理人同意', '回條', 'consent']) {
+    const cols = matchColumns(['學號', '姓名', head], ROSTER_COLUMNS);
+    assert.equal(cols.consent, 2, `「${head}」沒有被認出來`);
+  }
+});
+
+test('沒有同意欄的名冊照樣讀得動', () => {
+  // 大部分既有的名冊不會有這一欄，而要求櫃檯先加一欄才匯得進來，
+  // 等於要求他們先做一次資料整理——那正是他們想用系統來避免的事。
+  const cols = matchColumns(['學號', '姓名'], ROSTER_COLUMNS);
+  assert.equal(cols.username, 0);
+  assert.equal(cols.consent, undefined);
+});
+
+test('同意欄不會把「家長信箱」搶走', () => {
+  // 兩個標題都以「家長」開頭。搶錯的話，一整欄的信箱會被當成同意，
+  // 而每一個信箱都是「讀不懂的值」——整份名冊匯不進來。
+  const cols = matchColumns(['學號', '姓名', '家長信箱', '家長同意'], ROSTER_COLUMNS);
+  assert.equal(cols.guardianEmail, 2);
+  assert.equal(cols.consent, 3);
+});

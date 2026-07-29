@@ -26,6 +26,37 @@ export default async function YearsPage() {
       include: { _count: { select: { classes: true } } },
     });
 
+    /**
+     * 每一年還有幾個啟用中的班、幾位在籍學生。
+     *
+     * 結算的確認視窗要說得出「7 個班會被封存、198 位學生會被記上離班
+     * 日期」——只寫「確定要結算嗎」的話，看的人沒有任何判斷依據，
+     * 而這是這一頁上唯一一個會同時動到兩百列名冊的動作。
+     *
+     * 一次查完再分組，不是每一年各查一次。
+     */
+    const liveClasses = await prisma.class.findMany({
+      where: { active: true },
+      select: {
+        academicYearId: true,
+        _count: { select: { memberships: { where: { leftAt: null, role: 'STUDENT' } } } },
+      },
+    });
+    const live = new Map<string, { classes: number; members: number }>();
+    for (const c of liveClasses) {
+      const b = live.get(c.academicYearId) ?? { classes: 0, members: 0 };
+      b.classes += 1;
+      b.members += c._count.memberships;
+      live.set(c.academicYearId, b);
+    }
+
+    // 當前學年度已經過期的話要說出來。`endDate` 在此之前只被用來顯示
+    // 與驗證前後順序，**沒有任何程式檢查當前學年度是不是已經過去了**
+    // ——而整個七月安裝的系統，當前學年度都是一個兩天後就到期的舊年度，
+    // 於是接下來開的每一個班都掛錯年。
+    const currentYear = years.find((y) => y.isCurrent) ?? null;
+    const expired = currentYear !== null && currentYear.endDate < new Date();
+
     return (
       <main className="yz-panel">
         <div className="yz-panel__head">
@@ -40,6 +71,14 @@ export default async function YearsPage() {
         {years.length === 0 && (
           <Note tone="warn">
             還沒有任何學年度。先建一個，才走得到下一步（開班 → 匯名冊 → 派任務）。
+          </Note>
+        )}
+        {expired && currentYear && (
+          <Note tone="warn">
+            目前的當前學年度「{currentYear.name}」已經在 {day(currentYear.endDate)} 結束了。
+            現在開的班會掛在它底下，而學生的任務清單、班級列表也還以它為準。
+            要開新學年度的班，請先建立下一個學年度並把它<b>設為當前</b>。
+            舊的那一年收乾淨請用它那一列的「結算」。
           </Note>
         )}
         {years.length > 0 && !years.some((y) => y.isCurrent) && (
@@ -57,6 +96,8 @@ export default async function YearsPage() {
             endDate: day(y.endDate),
             isCurrent: y.isCurrent,
             classes: y._count.classes,
+            activeClasses: live.get(y.id)?.classes ?? 0,
+            activeMembers: live.get(y.id)?.members ?? 0,
           }))}
           suggestion={suggest(years.map((y) => y.name))}
         />

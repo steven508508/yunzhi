@@ -60,8 +60,12 @@ export default function ConsentButton({
         confirmLabel="登錄並啟用帳號"
         consequence={
           <>
+            {/* JSX 不解析 Markdown，所以 `**…**` 會有四個星號原樣印在
+                畫面上——而這裡是整個系統唯一一個講個資法責任的對話框，
+                最不該看起來像沒做完的地方。 */}
             <p style={{ marginBottom: 12 }}>
-              登錄之後這個帳號就可以登入。**請確認你真的已經取得法定代理人的同意**
+              登錄之後這個帳號就可以登入。
+              <strong>請確認你真的已經取得法定代理人的同意</strong>
               ——這筆記錄會連同你的姓名與時間寫進稽核，日後有爭議時它就是憑據。
             </p>
             {error && <p className="yz-field__err">{error}</p>}

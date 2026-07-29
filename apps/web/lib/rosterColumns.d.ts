@@ -4,5 +4,6 @@ export declare const ROSTER_COLUMNS: Record<string, readonly string[]> & {
   guardianEmail: readonly string[];
   email: readonly string[];
   birthDate: readonly string[];
+  consent: readonly string[];
 };
 export declare function parseBirth(raw: unknown): Date | null;

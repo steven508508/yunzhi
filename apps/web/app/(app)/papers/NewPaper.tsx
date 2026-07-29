@@ -4,13 +4,14 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 import { Button } from '@/components/Button';
-import { SelectField, TextField } from '@/components/Field';
+import { SelectField, TextAreaField, TextField } from '@/components/Field';
 import { Form, submitJson } from '@/components/Form';
 
 export default function NewPaper({ subjects }: { subjects: { id: string; name: string }[] }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
+  const [instructions, setInstructions] = useState('');
   const [subjectId, setSubjectId] = useState(subjects[0]?.id ?? '');
 
   if (!open) {
@@ -28,7 +29,7 @@ export default function NewPaper({ subjects }: { subjects: { id: string; name: s
       <Form
         onSubmit={async () => {
           const r = await submitJson<{ paper: { id: string } }>('/api/papers', {
-            json: { subjectId, title },
+            json: { subjectId, title, instructions },
           });
           // 建完直接進編輯畫面。建一份空卷子本身沒有意義，
           // 下一步一定是挑題。
@@ -59,6 +60,17 @@ export default function NewPaper({ subjects }: { subjects: { id: string; name: s
                 ))}
               </SelectField>
             </div>
+            {/* 這一欄印在考卷與作答畫面最上方。在此之前 schema、lib 與 API
+                一路都收，只是沒有任何地方填得進去——於是「不可使用計算機」
+                這種話只能口頭講，而分兩個時段考的兩班不一定聽到同一句。
+                現在留白也沒關係，之後在「編輯卷頭」還補得回來。 */}
+            <TextAreaField
+              label="考試說明（可留白）"
+              value={instructions}
+              onChange={(e) => setInstructions(e.currentTarget.value)}
+              rows={3}
+              hint="印在考卷與作答畫面最上方。例如「本卷共 25 題，第 1–20 題單選、第 21–25 題選填，不可使用計算機」。"
+            />
             <div className="yz-actions">
               <span className="yz-actions__spacer" />
               <Button variant="quiet" onClick={() => setOpen(false)} disabled={busy}>

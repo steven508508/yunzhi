@@ -74,7 +74,12 @@ export const POST = scopedRoute<{ classId: string }>(
       if (form?.get('apply') !== '1') {
         return NextResponse.json({ ok: true, dryRun: true, plan });
       }
-      const result = await applyRoster(params.classId, plan, user.id);
+      // 姓名不同時要不要跟著改，由畫面上一個明確的勾選決定。
+      // **預設不改**：同名同姓不同人而學號打錯的那一次，靜靜地跟著改
+      // 會把另一個人的名字覆蓋掉，而畫面上沒有任何痕跡。
+      const result = await applyRoster(params.classId, plan, user.id, {
+        updateNames: form?.get('updateNames') === '1',
+      });
       return NextResponse.json({ ok: true, dryRun: false, plan, result });
     } catch (e) {
       return NextResponse.json(

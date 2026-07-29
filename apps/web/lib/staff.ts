@@ -49,6 +49,11 @@ import {
   checkStaffUsername,
   checkStatusChange,
 } from '@/lib/staffRules.mjs';
+import {
+  ERASED_STAFF_NAME,
+  checkUsernameChange,
+  erasedUsername,
+} from '@/lib/accountRules.mjs';
 
 export type StaffInput = {
   displayName: string;
@@ -288,6 +293,209 @@ export async function setStaffStatus(
     { username: target.username, systemRole: target.systemRole },
   );
   return updated;
+}
+
+/**
+ * 改姓名、登入代號與信箱。
+ *
+ * # 為什麼這一支非有不可
+ *
+ * `PATCH /api/staff/[userId]` 在此之前只收 `systemRole` 與 `status`，
+ * 而 `User.displayName` 全 repo **只在 `user.create` 時寫過一次**。
+ * 也就是說老師的名字打錯了就是一輩子——導覽列右上角、成績表上的
+ * 建立者、教職員清單，每一處都印著那個錯字，而唯一的補救是停用他、
+ * 用另一個代號重建一個，於是他出過的題目與派過的卷子留在舊帳號上。
+ *
+ * 主任自己的名字也一樣改不掉。
+ *
+ * # 改代號會把他登出
+ *
+ * 他正拿著舊代號在登入。不作廢 session 的話，他手上那個分頁還活著、
+ * 下一次登入卻用不了舊代號，而畫面上只會說「帳號或密碼錯誤」——
+ * 他會以為自己記錯密碼，然後試五次把帳號鎖住。
+ *
+ * # 為什麼改代號不必是系統管理員專屬
+ *
+ * 因為它不發任何權限（那是 `changeStaffRole` 的事）。能動這個帳號的
+ * 人（`checkActOn`）就改得動它的名字——校務管理員動不了系統管理員，
+ * 那一道已經在了。
+ */
+export async function updateStaffProfile(
+  userId: string,
+  patch: { displayName?: string; username?: string; email?: string | null },
+  actor: SessionUser,
+) {
+  const tenantId = requireTenant();
+  const target = await loadStaff(userId);
+
+  const problem = checkActOn(actor.systemRole, target);
+  if (problem) throw new Error(problem);
+
+  const before = await prisma.user.findFirst({
+    where: { id: target.id },
+    select: { id: true, username: true, displayName: true, email: true },
+  });
+  if (!before) throw new Error('找不到這個帳號');
+
+  const data: Record<string, string | null> = {};
+
+  if (patch.displayName !== undefined) {
+    const nameProblem = checkStaffName(patch.displayName);
+    if (nameProblem) throw new Error(nameProblem);
+    const name = patch.displayName.trim();
+    if (name !== before.displayName) data.displayName = name;
+  }
+
+  let usernameChanged = false;
+  if (patch.username !== undefined) {
+    const next = (patch.username ?? '').trim();
+    // 「被誰佔走了」要在這一側查。撞到的多半是某位學生的學號——
+    // 管理員在教職員清單裡找不到那個人，然後以為系統壞了。
+    const takenByOther =
+      next && next !== before.username
+        ? Boolean(
+            await prisma.user.findFirst({
+              where: { username: next, id: { not: before.id } },
+              select: { id: true },
+            }),
+          )
+        : false;
+    const userProblem = checkUsernameChange({
+      current: before.username,
+      next,
+      takenByOther,
+    });
+    if (userProblem) throw new Error(userProblem);
+    if (next !== before.username) {
+      data.username = next;
+      usernameChanged = true;
+    }
+  }
+
+  if (patch.email !== undefined) {
+    // 空字串要變成 null——`@@unique([tenantId, email])` 之下兩個空字串
+    // 會撞在一起。與 `createStaff` 同一條規則。
+    const email = (patch.email ?? '').trim() || null;
+    if (email && email !== before.email) {
+      const dup = await prisma.user.findFirst({
+        where: { email, id: { not: before.id } },
+        select: { id: true },
+      });
+      if (dup) throw new Error(`信箱「${email}」已經登記在另一個帳號上了。`);
+    }
+    if (email !== before.email) data.email = email;
+  }
+
+  if (Object.keys(data).length === 0) return before;
+
+  const [after] = await prisma.$transaction([
+    prisma.user.update({
+      where: { id: before.id },
+      data,
+      select: { id: true, username: true, displayName: true, email: true },
+    }),
+    // 只有改代號才作廢 session。改一個錯字不該把正在改考卷的人踢出去。
+    ...(usernameChanged
+      ? [prisma.session.deleteMany({ where: { userId: before.id } })]
+      : []),
+  ]);
+
+  await audit(tenantId, actor.id, 'staff.update', before.id, {
+    before: { username: before.username, displayName: before.displayName, email: before.email },
+    after: { username: after.username, displayName: after.displayName, email: after.email },
+    loggedOut: usernameChanged,
+  });
+  return after;
+}
+
+/**
+ * 刪除一個教職員帳號。**軟刪除，而且把登入代號放回去。**
+ *
+ * # 停用與刪除的差別，以及為什麼兩個都要有
+ *
+ * 停用（`setStaffStatus`）是可逆的：他還在清單上、授課指派還在、
+ * 重新啟用之後一切照舊。那是給「留職停薪」「先關掉再說」用的。
+ *
+ * 但停用**不釋放登入代號**。`@@unique([tenantId, username])` 之下，
+ * 一個停用的帳號仍然佔著 `T001`，而新來接手的老師最自然的代號正是
+ * `T001`——建立時會撞鍵，而錯誤訊息說「已經有人在用了」，
+ * 那個人是一位半年前離職的老師。
+ *
+ * 所以離職要有一個真的刪除：`deletedAt` 寫入（`requireUser` 據此拒絕
+ * 登入）、代號換成 `[deleted]<內部 id>`、姓名去識別化、session 清空。
+ * `User.deletedAt` 在此之前**只被讀、從來沒有被寫過**——十七處引用
+ * 全是 `deletedAt: null` 的查詢條件。
+ *
+ * # 為什麼不是 DELETE
+ *
+ * 因為他出過的題目、組過的卷子、派過的任務都指著他（schema 是
+ * SetNull）。真的刪掉那一列之後，畫面上會出現一堆查不到名字的建立者，
+ * 而「這一題是誰出的」在題庫的權利聲明上是有意義的。
+ *
+ * # 授課指派要一起清掉
+ *
+ * 不清的話，`gradeScopeWhere` 的 `createdBy` 分支之外還多一條路：
+ * 那幾筆 `ClassSubjectTeacher` 仍然在，而 `/settings/staff` 上一位被
+ * 刪除的老師已經不在清單裡——沒有人看得到它們，也沒有人移得掉。
+ */
+export async function deleteStaff(userId: string, actor: SessionUser) {
+  const tenantId = requireTenant();
+  const target = await loadStaff(userId);
+
+  const problem = checkActOn(actor.systemRole, target);
+  if (problem) throw new Error(problem);
+  if (actor.id === target.id) {
+    throw new Error(
+      '不能刪除自己的帳號。刪掉之後你下一次點擊就會被登出，而且自己救不回來——' +
+        '請找另一位管理員來做這件事。',
+    );
+  }
+  if (target.systemRole === 'SYS_ADMIN' && (await otherActiveSysAdmins(target.id)) === 0) {
+    throw new Error(
+      `「${target.displayName}」是目前唯一一位可以登入的系統管理員，不能刪除。` +
+        '刪掉之後沒有任何人進得了管理功能，而系統裡沒有把權限拿回來的路徑——' +
+        '只能進機房改資料庫。請先指派另一位系統管理員。',
+    );
+  }
+
+  const teaching = await prisma.classSubjectTeacher.count({ where: { userId: target.id } });
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: target.id },
+      data: {
+        username: erasedUsername(target.id),
+        displayName: ERASED_STAFF_NAME,
+        email: null,
+        passwordHash: null,
+        mustChangePassword: false,
+        failedLoginCount: 0,
+        lockedUntil: null,
+        status: 'ARCHIVED',
+        deletedAt: new Date(),
+      },
+    }),
+    prisma.session.deleteMany({ where: { userId: target.id } }),
+    prisma.classSubjectTeacher.deleteMany({ where: { userId: target.id } }),
+    // 導師身分寫在 ClassMembership 上。留著一列 `leftAt: null` 的話，
+    // `assignableClassIds` 仍然把那個班算成他派得了卷的班——一個已經
+    // 刪除的帳號登不進來，所以不會出事，但那一列會讓班級頁的導師欄
+    // 顯示一個沒有名字的人。
+    prisma.classMembership.updateMany({
+      where: { userId: target.id, leftAt: null },
+      data: { isHomeroom: false, leftAt: new Date() },
+    }),
+  ]);
+
+  await audit(tenantId, actor.id, 'staff.delete', target.id, {
+    formerUsername: target.username,
+    systemRole: target.systemRole,
+    teachingRemoved: teaching,
+    // 學號／代號留在稽核裡是刻意的：它是這次刪除的識別依據，
+    // 而它已經不再指向任何可用的帳號——同時它也是「這個代號什麼時候
+    // 被放回去的」唯一說得出來的地方。
+  });
+  return { username: target.username, displayName: target.displayName, teachingRemoved: teaching };
 }
 
 /**

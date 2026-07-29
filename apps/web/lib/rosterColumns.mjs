@@ -15,6 +15,19 @@ export const ROSTER_COLUMNS = {
   guardianEmail: ['家長email', '家長信箱', '家長電子郵件', '監護人信箱', 'guardian_email'],
   email: ['email', '信箱', '電子郵件', '學生信箱'],
   birthDate: ['生日', '出生日期', 'birth', 'birthdate', 'birth_date'],
+  /**
+   * 家長同意。**這一欄是 200 人補習班第一天唯一真的做不完的那一步
+   * 的出口。**
+   *
+   * 沒有它的話，匯入名冊一分鐘、逐一登錄同意半小時（三次點擊加一次
+   * 整頁重繪 × 200 位），而在那之前那 200 個帳號一個都登不進去。
+   * 櫃檯收紙本回條的時候本來就在 Excel 上打勾——讓那一欄直接跟著
+   * 名冊進來，才是這間補習班真實的流程。
+   *
+   * 值怎麼解讀在 `lib/accountRules.mjs` 的 `parseConsentCell`：
+   * 讀不懂一律當成「沒有同意」（fail closed），並在試算畫面上列出來。
+   */
+  consent: ['家長同意', '同意', '法定代理人同意', '同意書', '回條', 'consent'],
 };
 
 /**

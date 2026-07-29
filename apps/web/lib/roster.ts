@@ -33,6 +33,8 @@
  */
 import { randomBytes } from 'node:crypto';
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from '@/lib/prisma';
 // session 的作廢在下面是**跟著密碼寫入同一個交易**做的，所以這裡
 // 不用 `revokeAllSessions`：分成兩次寫入的話，中間那一瞬間新密碼
@@ -43,6 +45,15 @@ import { requireTenant } from '@/lib/tenant';
 import { decodeCsv, matchColumns, parseCsv } from '@/lib/csv.mjs';
 import { OTP_LENGTH, oneTimePassword } from '@/lib/passwordRules.mjs';
 import { ROSTER_COLUMNS as COLUMNS, parseBirth } from '@/lib/rosterColumns.mjs';
+import {
+  ERASED_NAME,
+  checkDisplayName,
+  checkUsernameChange,
+  erasedUsername,
+  parseConsentCell,
+  planConsentBatch,
+} from '@/lib/accountRules.mjs';
+import type { ConsentMethod } from '@/lib/accountRules';
 
 // ─────────────────────────────────────────────────────────────────
 // 班級
@@ -137,6 +148,69 @@ export async function deactivateClass(classId: string, actorId: string) {
   return klass;
 }
 
+/**
+ * 重新啟用一個停用過的班級。
+ *
+ * # 為什麼一定要有這一支
+ *
+ * 因為沒有它，「停用」就是刪除——而 `createClass` 撞到同名的停用班級
+ * 時說的是「要重新啟用它，還是換個名稱？」（見上面），那句話在此之前
+ * 指向一個不存在的動作。一個把人推向一條沒有出口的路的錯誤訊息，
+ * 比沒有訊息更糟。
+ *
+ * 停用是可逆的、刪除不是——這一支就是那個「可逆」。
+ */
+export async function activateClass(classId: string, actorId: string) {
+  const tenantId = requireTenant();
+  const klass = await prisma.class.findFirst({
+    where: { id: classId },
+    select: { id: true, name: true, active: true, academicYear: { select: { name: true } } },
+  });
+  if (!klass) throw new Error('找不到這個班級');
+  if (klass.active) return klass;
+
+  await prisma.class.update({ where: { id: classId }, data: { active: true } });
+  await audit(tenantId, actorId, 'class.activate', classId, {
+    name: klass.name,
+    year: klass.academicYear.name,
+  });
+  return klass;
+}
+
+/**
+ * 這個班已經派過幾份任務、其中幾份還寫得了。
+ *
+ * # 這個數字要出現在名冊匯入完成的畫面上
+ *
+ * 因為 `listStudentTasks` 沒有任何一項比對 `joinedAt` 與
+ * `assignment.createdAt`——只要班對得上，這個班從開學以來派過的每一
+ * 份任務都會出現在新生的清單上。開學三週後插班的學生登入第一件事，
+ * 是看到九個紅字的未交紀錄；而截止時間留白的那幾份 `state` 會是
+ * `OPEN`，也就是他**現在去寫得了三週前的隨堂考**，而那份卷子的答案
+ * 全班已經檢討過了。
+ *
+ * 這一支不改那個行為（`lib/attempt.ts` 是別人的地界），但它讓匯入
+ * 完成的畫面說得出「這 5 位會看到 9 份先前的任務，其中 2 份還寫得了」
+ * ——知道了才處理得了。
+ */
+export async function classPriorTasks(
+  classId: string,
+): Promise<{ total: number; answerable: number }> {
+  const now = new Date();
+  const rows = await prisma.assignment.findMany({
+    where: { targets: { some: { classId } } },
+    select: { openAt: true, dueAt: true, allowLate: true },
+  });
+  return {
+    total: rows.length,
+    answerable: rows.filter(
+      (a) =>
+        (a.openAt === null || a.openAt <= now) &&
+        (a.dueAt === null || a.allowLate || a.dueAt > now),
+    ).length,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 名冊
 // ─────────────────────────────────────────────────────────────────
@@ -150,9 +224,14 @@ export type RosterRow = {
   email?: string | null;
   guardianEmail?: string | null;
   birthDate?: Date | null;
+  /** CSV 的同意欄讀出來的取得方式。`false` 代表這一列沒有同意。 */
+  consent?: ConsentMethod | false;
 };
 
 export type RosterProblem = { line: number; column?: string; message: string };
+
+/** 名冊上的姓名與既有帳號不同的那幾列。**預設不會跟著改**，見 `applyRoster`。 */
+export type RosterRename = { line: number; username: string; from: string; to: string };
 
 export type RosterPlan = {
   encoding: string;
@@ -162,6 +241,10 @@ export type RosterPlan = {
   existing: string[];
   /** 會被新建的帳號。 */
   creating: string[];
+  /** 同意欄帶了同意的列數。這幾位匯入完就登得進去，不必再逐一登錄。 */
+  consenting: number;
+  /** 姓名與既有帳號對不上的那幾列。要不要跟著改由呼叫端決定。 */
+  renames: RosterRename[];
 };
 
 /**
@@ -233,6 +316,23 @@ export async function planRoster(bytes: Uint8Array): Promise<RosterPlan> {
       continue;
     }
 
+    // 讀不懂的同意欄**擋下整份**，不是當成「沒有同意」就算了。
+    // 這一欄產生的是個資法第 15 條的憑據，而「櫃檯打了一個系統看不懂
+    // 的字，於是那 40 位靜靜地維持登不進去」的除錯迴圈沒有出口——
+    // 他會以為是同意功能壞了。全有全無在這裡與其他欄位一致。
+    const consentRaw = cell('consent');
+    const consent = parseConsentCell(consentRaw);
+    if (consent === null) {
+      problems.push({
+        line,
+        column: '家長同意',
+        message:
+          `讀不懂的同意欄「${consentRaw}」。` +
+          '請填「是」「否」，或直接寫取得方式（現場／紙本／線上）。',
+      });
+      continue;
+    }
+
     rows.push({
       line,
       username,
@@ -240,6 +340,7 @@ export async function planRoster(bytes: Uint8Array): Promise<RosterPlan> {
       email: cell('email') || null,
       guardianEmail,
       birthDate,
+      consent,
     });
   }
 
@@ -247,10 +348,22 @@ export async function planRoster(bytes: Uint8Array): Promise<RosterPlan> {
   const already = names.length
     ? await prisma.user.findMany({
         where: { username: { in: names } },
-        select: { username: true },
+        // displayName 一起撈出來，才說得出「第 12 列：王大民 → 王大明」。
+        // 名冊 CSV 有錯字是必然的，而在此之前重匯一次不會更新姓名，
+        // 匯入完成的畫面卻說它成功了——櫃檯讀到的意思是「匯進去了」。
+        select: { username: true, displayName: true },
       })
     : [];
   const existing = new Set(already.map((u) => u.username));
+  const nameOf = new Map(already.map((u) => [u.username, u.displayName]));
+
+  const renames: RosterRename[] = [];
+  for (const r of rows) {
+    const was = nameOf.get(r.username);
+    if (was !== undefined && was !== r.displayName) {
+      renames.push({ line: r.line, username: r.username, from: was, to: r.displayName });
+    }
+  }
 
   return {
     encoding,
@@ -258,6 +371,8 @@ export async function planRoster(bytes: Uint8Array): Promise<RosterPlan> {
     problems,
     existing: [...existing],
     creating: names.filter((n) => !existing.has(n)),
+    consenting: rows.filter((r) => r.consent).length,
+    renames,
   };
 }
 
@@ -266,6 +381,23 @@ export type RosterResult = {
   linked: number;
   /** 新帳號的初始密碼。**只在這一次回傳，不會再取得。** */
   credentials: { username: string; displayName: string; password: string }[];
+  /** CSV 的同意欄一起完成的人數。這幾位不必再逐一登錄。 */
+  consented: number;
+  /** 跟著改掉姓名的人數（只在 `options.updateNames` 為真時才會大於 0）。 */
+  renamed: number;
+  /** 這個班已經派過的任務。新生會全部看得到——見 `classPriorTasks`。 */
+  priorTasks: { total: number; answerable: number };
+};
+
+export type RosterOptions = {
+  /**
+   * 名冊上的姓名與既有帳號不同時，跟著改掉。**預設 false。**
+   *
+   * 靜靜地跟著改是危險的：同名同姓不同人而學號打錯的那一次，
+   * 會把另一個人的名字覆蓋掉，而畫面上沒有任何痕跡。所以試算會把
+   * 每一列列出來（「第 12 列：王大民 → 王大明」），由人明確按下去才改。
+   */
+  updateNames?: boolean;
 };
 
 /**
@@ -275,6 +407,7 @@ export async function applyRoster(
   classId: string,
   plan: RosterPlan,
   actorId: string,
+  options: RosterOptions = {},
 ): Promise<RosterResult> {
   const tenantId = requireTenant();
   if (plan.problems.length) {
@@ -294,17 +427,22 @@ export async function applyRoster(
   const credentials: RosterResult['credentials'] = [];
   let created = 0;
   let linked = 0;
+  let renamed = 0;
+  // 誰的同意是這一次登錄的。稽核要逐位記——個資法要的是「誰在什麼
+  // 時候登錄了誰的同意」，一句「匯入了 200 人」回答不了那個問題。
+  const consented: { id: string; username: string; method: ConsentMethod }[] = [];
 
   // 密碼**在交易外面先算好**。理由見 `mintPasswords`——一句話：
   // bcrypt 一次要 0.3 秒，而 Prisma 的互動式交易預設 5 秒就會被切斷。
   const minted = await mintPasswords(plan.creating);
+  const now = new Date();
 
   // 一個交易。全有全無不是靠事後補救，是靠資料庫。
   await prisma.$transaction(async (tx) => {
     for (const row of plan.rows) {
       let user = await tx.user.findFirst({
         where: { username: row.username },
-        select: { id: true, displayName: true },
+        select: { id: true, displayName: true, consentAt: true, status: true },
       });
 
       if (!user) {
@@ -328,18 +466,43 @@ export async function applyRoster(
             passwordHash: mint.hash,
             mustChangePassword: true,
             // 家長同意之前不得登入。個資法第 15 條：蒐集未成年人的
-            // 個人資料需法定代理人同意。這裡預設擋住，
-            // 由 recordConsent 開啟。
-            status: 'PENDING_CONSENT',
+            // 個人資料需法定代理人同意。這裡預設擋住，由 recordConsent
+            // 或 CSV 的同意欄（下面那一段）開啟。
+            ...(row.consent
+              ? { status: 'ACTIVE' as const, consentAt: now }
+              : { status: 'PENDING_CONSENT' as const }),
           },
-          select: { id: true, displayName: true },
+          select: { id: true, displayName: true, consentAt: true, status: true },
         });
+        if (row.consent) consented.push({ id: user.id, username: row.username, method: row.consent });
         credentials.push({
           username: row.username,
           displayName: row.displayName,
           password: mint.password,
         });
         created++;
+      } else {
+        // 既有帳號的兩種更新。兩者都是**只在有差別時才寫**：
+        // 每一列無條件 update 會讓 200 人的名冊多 200 次寫入，
+        // 而那些寫入全部落在同一個交易裡。
+        const patch: { displayName?: string; consentAt?: Date; status?: 'ACTIVE' } = {};
+        if (options.updateNames && user.displayName !== row.displayName) {
+          patch.displayName = row.displayName;
+          renamed++;
+        }
+        // **已經有同意紀錄的人不重寫。** `consentAt` 記的是第一次取得
+        // 同意的時間，覆蓋成今天等於把那筆憑據改掉了。與
+        // `recordConsent` 的 `if (student.consentAt) return` 同一條規則。
+        if (row.consent && !user.consentAt) {
+          patch.consentAt = now;
+          // 停權或已封存的帳號**不因為一份名冊就被放回來**：那兩種狀態
+          // 是有人明確按下去的，而名冊匯入不知道原因。只開啟等待同意的。
+          if (user.status === 'PENDING_CONSENT') patch.status = 'ACTIVE';
+          consented.push({ id: user.id, username: row.username, method: row.consent });
+        }
+        if (Object.keys(patch).length > 0) {
+          await tx.user.update({ where: { id: user.id }, data: patch });
+        }
       }
 
       await tx.classMembership.upsert({
@@ -358,10 +521,25 @@ export async function applyRoster(
     class: klass.name,
     created,
     linked,
+    renamed,
+    consented: consented.length,
     encoding: plan.encoding,
   });
+  // 同意的稽核走 `consent.record`，與逐位登錄那一支同一個 action 名稱。
+  // 分成兩個名稱的話，查「這個學生的同意是誰登錄的」的人會只翻其中
+  // 一個然後說「沒有記錄」——與密碼重設同一條規則（見 `auditAuth`）。
+  if (consented.length > 0) {
+    await writeConsentAudit(tenantId, actorId, consented, `名冊匯入（${klass.name}）`);
+  }
 
-  return { created, linked, credentials };
+  return {
+    created,
+    linked,
+    credentials,
+    consented: consented.length,
+    renamed,
+    priorTasks: await classPriorTasks(classId),
+  };
 }
 
 /**
@@ -825,6 +1003,540 @@ export async function recordConsent(
     note: note ?? null,
   });
   return updated;
+}
+
+/**
+ * 整班或勾選一批，一次登錄家長同意。
+ *
+ * # 為什麼非有這一支不可
+ *
+ * 逐位登錄是三次點擊加一次整頁重繪。200 位以每位 8 秒估是**27 分鐘
+ * 的純點擊**，而且中間不能被櫃檯電話打斷（打斷了要回去找剛剛做到
+ * 哪一位）。在那之前那 200 個帳號一個都登不進去。
+ *
+ * 名冊匯入 200 人是一分鐘，啟用 200 人是半小時——這是裝機第一天
+ * 真正的時間殺手，而它不是一個「不方便」，是一個做不完。
+ *
+ * # 冪等
+ *
+ * 已經有同意紀錄的人**不重寫**。`consentAt` 是個資法第 15 條的憑據，
+ * 記的是第一次取得同意的時間；整班一鍵按第二次（兩位老師同時操作、
+ * 或按完重新整理再按一次）若把所有人都寫一次，那些人的同意日期會
+ * 集體變成第二次按下的時刻——**一份被覆蓋過的憑據等於沒有憑據**。
+ * 規則本身在 `lib/accountRules.mjs` 的 `planConsentBatch`（有測試）。
+ *
+ * # 為什麼是 updateMany 而不是逐位 update
+ *
+ * 因為 200 位逐位 update 是 200 次往返，而租戶隔離讓每一次操作變成
+ * 三句 SQL（見 `lib/prismaClient.mjs`）——那正是名冊匯入撞到的那面牆。
+ * 這裡條件對每一位都相同，所以一句 `updateMany` 就做得完。
+ *
+ * @param classId 這一批人所屬的班級。**權限與稽核都繫在它上面**，
+ *   所以不接受一個跨班的 id 清單——那會變成一支「給我任何 userId
+ *   就幫你啟用帳號」的 API。
+ * @param studentIds 勾選了哪幾位。`null` 代表整班。
+ */
+export async function recordConsentBatch(
+  classId: string,
+  studentIds: readonly string[] | null,
+  actorId: string,
+  method: ConsentMethod,
+  note?: string,
+): Promise<{ className: string; recorded: number; alreadyDone: number; missing: number }> {
+  const tenantId = requireTenant();
+  const klass = await prisma.class.findFirst({
+    where: { id: classId },
+    select: { id: true, name: true },
+  });
+  if (!klass) throw new Error('找不到這個班級');
+
+  // 只認這個班在籍的學生。少了這一道，一個過期的畫面（另一個分頁上
+  // 上學期的名冊）送出來的 id 會讓已經轉走的人被重新啟用。
+  const members = await prisma.classMembership.findMany({
+    where: { classId, leftAt: null, role: 'STUDENT' },
+    select: {
+      user: {
+        select: { id: true, username: true, consentAt: true, status: true, systemRole: true },
+      },
+    },
+    orderBy: { joinedAt: 'asc' },
+  });
+  const students = members.map((m) => m.user).filter((u) => u.systemRole === 'STUDENT');
+
+  const plan = planConsentBatch(students, studentIds ?? null);
+  if (plan.toRecord.length === 0) {
+    if (plan.alreadyDone.length > 0) {
+      // 「什麼都沒發生」與「本來就都好了」在畫面上長得一樣，但意思
+      // 完全不同。說出來，否則按第二次的人會以為失敗了。
+      return {
+        className: klass.name,
+        recorded: 0,
+        alreadyDone: plan.alreadyDone.length,
+        missing: plan.missing.length,
+      };
+    }
+    throw new Error(`「${klass.name}」沒有選到任何一位需要登錄同意的學生。`);
+  }
+
+  const now = new Date();
+  await prisma.user.updateMany({
+    where: {
+      id: { in: plan.toRecord },
+      // 條件裡再寫一次 `consentAt: null`：查詢與寫入之間有人剛按過的話，
+      // 這一句會跳過他，而不是把他的同意日期改成現在。
+      consentAt: null,
+      systemRole: 'STUDENT',
+    },
+    data: { consentAt: now, status: 'ACTIVE' },
+  });
+
+  const byId = new Map(students.map((s) => [s.id, s]));
+  await writeConsentAudit(
+    tenantId,
+    actorId,
+    plan.toRecord.map((id) => ({ id, username: byId.get(id)?.username ?? id, method })),
+    note ?? `整批登錄（${klass.name}）`,
+  );
+
+  return {
+    className: klass.name,
+    recorded: plan.toRecord.length,
+    alreadyDone: plan.alreadyDone.length,
+    missing: plan.missing.length,
+  };
+}
+
+/**
+ * 同意紀錄的稽核，一次寫一批。
+ *
+ * `createMany` 而不是迴圈裡逐筆 create：200 位就是 200 次往返，
+ * 而每一次在租戶隔離底下是三句 SQL。
+ *
+ * **每一位一列**，不是整批一列。個資事件調查問的是「這位學生的同意
+ * 是誰、什麼時候、用什麼方式登錄的」，而 `targetId` 指向那一位學生
+ * 才查得到——記成一列「登錄了 200 位」的話，要查某一位就得把
+ * metadata 裡的陣列撈出來自己找，而 `[tenantId, targetType, targetId]`
+ * 那個索引完全用不上。
+ */
+async function writeConsentAudit(
+  tenantId: string,
+  actorId: string,
+  rows: readonly { id: string; username: string; method: ConsentMethod }[],
+  note: string,
+) {
+  await prisma.auditLog.createMany({
+    data: rows.map((r) => ({
+      tenantId,
+      category: 'USER' as const,
+      action: 'consent.record',
+      actorId,
+      targetType: 'consent',
+      targetId: r.id,
+      after: { student: r.username, method: r.method, note } as never,
+    })),
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 帳號本身：改姓名、改代號、退補、刪除
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * 改一位學生的姓名、登入代號與聯絡資料。
+ *
+ * # 為什麼這一支非有不可
+ *
+ * 在此之前 `User.displayName`／`username`／`email` 全 repo **只在
+ * `user.create` 時寫過一次，沒有任何更新路徑**。名冊匯入找到既有帳號
+ * 時只 upsert 班級關係，而匯入完成的畫面說它成功了——櫃檯讀到的
+ * 意思是「匯進去了」，但名字沒變。
+ *
+ * 兩百筆名冊裡有三個錯字是必然的，而在此之前唯一的補救是給那位學生
+ * 一個新學號、重新匯入——於是他過去三個月的作答與成績留在舊帳號上，
+ * 那正是家長約談時要拿出來的資料。**這是每學期都會發生的事。**
+ *
+ * # 改登入代號會把他登出
+ *
+ * 因為他正拿著舊代號在登入。不作廢 session 的話，他手上那個分頁還
+ * 活著、下一次登入卻用不了舊代號，而畫面上只會說「帳號或密碼錯誤」
+ * ——他會以為自己記錯密碼，然後試五次把帳號鎖住。
+ *
+ * 密碼**不動**：改代號不是重設密碼，兩件事混在一起的話，一個純粹
+ * 改錯字的動作會讓那位學生隔天登不進來。
+ */
+export async function updateStudent(
+  studentId: string,
+  patch: {
+    displayName?: string;
+    username?: string;
+    email?: string | null;
+    guardianEmail?: string | null;
+  },
+  actorId: string,
+) {
+  const tenantId = requireTenant();
+  const before = await prisma.user.findFirst({
+    where: { id: studentId, systemRole: 'STUDENT', deletedAt: null },
+    select: {
+      id: true,
+      username: true,
+      displayName: true,
+      email: true,
+      guardianEmail: true,
+    },
+  });
+  // 與 `loadResettableStudent` 同一句話：找不到與「那是老師的帳號」
+  // 回同一種錯誤，分開講等於告訴對方「這個 id 是一個老師的帳號」。
+  if (!before) throw new Error('找不到這位學生。只有學生帳號可以從名冊修改。');
+
+  const data: Record<string, string | null> = {};
+
+  if (patch.displayName !== undefined) {
+    const problem = checkDisplayName(patch.displayName);
+    if (problem) throw new Error(problem);
+    const name = patch.displayName.trim();
+    if (name !== before.displayName) data.displayName = name;
+  }
+
+  let usernameChanged = false;
+  if (patch.username !== undefined) {
+    const next = patch.username.trim();
+    // 先查再判：`checkUsernameChange` 是純函式，「被誰佔走了」要由
+    // 這一側查出來。撞到的多半是另一位學生的學號或某位老師的代號，
+    // 而資料庫丟出來的 P2002 加一個欄位名，櫃檯看不懂那是什麼。
+    const takenByOther =
+      next && next !== before.username
+        ? Boolean(
+            await prisma.user.findFirst({
+              where: { username: next, id: { not: before.id } },
+              select: { id: true },
+            }),
+          )
+        : false;
+    const problem = checkUsernameChange({
+      current: before.username,
+      next,
+      takenByOther,
+    });
+    if (problem) throw new Error(problem);
+    if (next !== before.username) {
+      data.username = next;
+      usernameChanged = true;
+    }
+  }
+
+  if (patch.email !== undefined) {
+    // 空字串要變成 null。`@@unique([tenantId, email])` 之下兩個空字串
+    // 會撞在一起，而錯誤訊息是 P2002 加一個欄位名——看的人不會想到
+    // 是「都沒填」。與 `createStaff` 同一條規則。
+    const email = (patch.email ?? '').trim() || null;
+    if (email && email !== before.email) {
+      const dup = await prisma.user.findFirst({
+        where: { email, id: { not: before.id } },
+        select: { id: true },
+      });
+      if (dup) throw new Error(`信箱「${email}」已經登記在另一個帳號上了。`);
+    }
+    if (email !== before.email) data.email = email;
+  }
+
+  if (patch.guardianEmail !== undefined) {
+    const g = (patch.guardianEmail ?? '').trim() || null;
+    if (g && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(g)) {
+      throw new Error(`「${g}」看起來不像一個信箱。`);
+    }
+    if (g !== before.guardianEmail) data.guardianEmail = g;
+  }
+
+  if (Object.keys(data).length === 0) return before;
+
+  const [after] = await prisma.$transaction([
+    prisma.user.update({
+      where: { id: before.id },
+      data,
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        email: true,
+        guardianEmail: true,
+      },
+    }),
+    // 只有改代號才作廢 session。改一個錯字不該把正在考試的人踢出去。
+    ...(usernameChanged
+      ? [prisma.session.deleteMany({ where: { userId: before.id } })]
+      : []),
+  ]);
+
+  await audit(tenantId, actorId, 'user.update', before.id, {
+    student: before.username,
+    before: {
+      username: before.username,
+      displayName: before.displayName,
+      email: before.email,
+      guardianEmail: before.guardianEmail,
+    },
+    after: {
+      username: after.username,
+      displayName: after.displayName,
+      email: after.email,
+      guardianEmail: after.guardianEmail,
+    },
+    loggedOut: usernameChanged,
+  });
+  return after;
+}
+
+/**
+ * 退補：把一位學生停用。
+ *
+ * # 這一支補的是一個法遵缺口
+ *
+ * 在此之前，一位退費不來的學生能做的只有「移出班級」，之後的狀態是：
+ * `status` 仍然是 `ACTIVE`、密碼還能用、**他登得進來**（看到的是
+ * 「現在沒有任務」），而姓名、學號、家長信箱、生日全部留在 `users`
+ * 表裡，永久。`/settings/staff` 的「停用」明確擋掉學生，
+ * 而它的錯誤訊息說「學生帳號請到他所屬的班級頁處理」——
+ * **那是一句指向空處的話**，因為班級頁上沒有這個功能。
+ *
+ * `UserStatus.ARCHIVED` 在此之前是一個產生不出來的 enum 值。
+ *
+ * # 一個動作做完三件事
+ *
+ * 停用、離開所有班級、作廢所有 session。分成三顆按鈕的話，
+ * 漏掉任何一件的症狀都是「看起來處理完了，實際上沒有」——
+ * 而漏掉 session 那一件，他手上開著的分頁還能繼續作答。
+ *
+ * **不是刪除。** 他的作答與成績留著（班級統計要用），
+ * 個資的清除是另一件事，走 `eraseStudent`。
+ */
+export async function archiveStudent(studentId: string, actorId: string) {
+  const tenantId = requireTenant();
+  const student = await loadStudentAccount(studentId);
+
+  const open = await prisma.attempt.findFirst({
+    where: { userId: studentId, status: 'IN_PROGRESS' },
+    select: { assignment: { select: { title: true } } },
+  });
+  if (open) {
+    throw new Error(
+      `${student.displayName}正在作答「${open.assignment.title}」。` +
+        '現在停用會把他從考場裡登出，而那一份就停在寫到一半的狀態。' +
+        '等他交卷再停用；若是要中止這一份，請到成績頁把它作廢。',
+    );
+  }
+
+  const leftAt = new Date();
+  const [, classesLeft] = await prisma.$transaction([
+    prisma.user.update({
+      where: { id: student.id },
+      data: { status: 'ARCHIVED' },
+    }),
+    prisma.classMembership.updateMany({
+      where: { userId: student.id, role: 'STUDENT', leftAt: null },
+      data: { leftAt },
+    }),
+    prisma.session.deleteMany({ where: { userId: student.id } }),
+  ]);
+
+  await audit(tenantId, actorId, 'user.archive', student.id, {
+    student: student.username,
+    studentName: student.displayName,
+    previousStatus: student.status,
+    classesLeft: classesLeft.count,
+  });
+  return { ...student, classesLeft: classesLeft.count };
+}
+
+/**
+ * 停用之後又回來了：把帳號放回可登入。
+ *
+ * **班籍不會跟著回來。** 退補時寫的 `leftAt` 是「他那時候真的不在了」，
+ * 清掉等於竄改記錄；而他回來讀的多半也不是同一個班。要入班就到那個
+ * 班的名冊匯入或復原——那一步本來就要做一次決定。
+ *
+ * 密碼也不動：他原本的密碼還有效。忘記了走重設密碼。
+ */
+export async function restoreStudent(studentId: string, actorId: string) {
+  const tenantId = requireTenant();
+  const student = await loadStudentAccount(studentId);
+  if (student.status === 'ACTIVE') return student;
+
+  // 沒有同意紀錄的人放回 `PENDING_CONSENT` 而不是 `ACTIVE`。
+  // 個資法第 15 條的要件不會因為帳號被停用又啟用就消失，而直接放成
+  // ACTIVE 等於用「重新啟用」這條路繞過整個同意機制。
+  const status = student.consentAt ? 'ACTIVE' : 'PENDING_CONSENT';
+  await prisma.user.update({
+    where: { id: student.id },
+    data: { status, failedLoginCount: 0, lockedUntil: null },
+  });
+
+  await audit(tenantId, actorId, 'user.restore', student.id, {
+    student: student.username,
+    studentName: student.displayName,
+    status,
+  });
+  return { ...student, status };
+}
+
+/**
+ * 個資刪除（個資法第 11 條第 3 項）。**去識別化，不是 DELETE。**
+ *
+ * # 為什麼不真的刪掉那一列
+ *
+ * 因為 `Attempt` 與 `AttemptAnswer` 掛在 `userId` 上，而那些是**別人
+ * 的資料也需要的東西**：一場 30 人的段考，班級平均、各題答對率、
+ * 級分對照全部是拿那 30 份算出來的。刪掉一位的作答，去年那場考試的
+ * 平均會在今天改變，而畫面上不會有任何痕跡——一份三個月前印出來給
+ * 家長看的成績單，今天再開一次會是不同的數字。
+ *
+ * 所以刪的是**可識別的個人資料**，留的是**已經去識別化的統計事實**：
+ *
+ *   姓名 → 「已刪除的學生」　　　學號 → `[deleted]<內部 id>`
+ *   信箱、家長信箱、生日 → 清空　　密碼 → 清空（再也登不進來）
+ *   同意紀錄 → 清空　　　　　　　所有 session、家長綁定 → 刪除
+ *   `deletedAt` → 現在（`requireUser` 據此拒絕登入）
+ *
+ * # 學號一定要換掉
+ *
+ * `@@unique([tenantId, username])` 沒有把 `deletedAt` 算進去，所以留著
+ * 原學號等於**那個學號被一個已刪除的帳號永久佔住**。補習班的學號依
+ * 入學年度編號、會重覆使用，下一年的新生拿到同一個學號時，名冊匯入
+ * 會 `findFirst` 到這個殼、把新生接上去——而名冊上顯示的是
+ * 「已刪除的學生」，沒有人看得出發生了什麼。換掉之後原學號立刻放得回去。
+ *
+ * # 會影響什麼，要在按下去之前講出來
+ *
+ * 他過去的分數還在每一份成績表上，只是名字變成「已刪除的學生」。
+ * 這是刻意的：抽掉那幾列會改寫歷史統計，而那比留下一個沒有名字的
+ * 列更糟。呼叫端的確認視窗要把這一句寫出來。
+ */
+export async function eraseStudent(studentId: string, actorId: string) {
+  const tenantId = requireTenant();
+  const student = await loadStudentAccount(studentId);
+
+  const attempts = await prisma.attempt.count({ where: { userId: student.id } });
+  const leftAt = new Date();
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: student.id },
+      data: {
+        username: erasedUsername(student.id),
+        displayName: ERASED_NAME,
+        email: null,
+        guardianEmail: null,
+        birthDate: null,
+        // Json 欄位要用 `Prisma.DbNull` 才會真的寫成 SQL NULL。
+        // 給 `undefined` 的話 Prisma 的解讀是「不要動這一欄」——
+        // 於是無障礙設定（可能含身心狀況的線索）留在一個已經去識別化
+        // 的帳號上，而畫面上完全看不出來。
+        a11yProfile: Prisma.DbNull,
+        consentAt: null,
+        passwordHash: null,
+        mustChangePassword: false,
+        failedLoginCount: 0,
+        lockedUntil: null,
+        status: 'ARCHIVED',
+        deletedAt: leftAt,
+      },
+    }),
+    prisma.classMembership.updateMany({
+      where: { userId: student.id, leftAt: null },
+      data: { leftAt },
+    }),
+    prisma.session.deleteMany({ where: { userId: student.id } }),
+    prisma.guardianLink.deleteMany({ where: { studentId: student.id } }),
+  ]);
+
+  // 稽核記的是**動作**，不是被刪掉的內容。把姓名與學號寫進 after 等於
+  // 在另一張表裡留一份副本——那正是這個動作要消除的東西。學號留著是
+  // 因為它是這次刪除的識別依據（家長來信說的就是那個學號），
+  // 而它已經不再指向任何可用的帳號。
+  await audit(tenantId, actorId, 'user.erase', student.id, {
+    formerUsername: student.username,
+    attemptsKept: attempts,
+    basis: '個資法第 11 條第 3 項：特定目的消失或期限屆滿',
+  });
+  return { username: student.username, displayName: student.displayName, attempts };
+}
+
+/** 讀出一個學生帳號。已經刪除的擋在這裡，訊息不透露對象是誰。 */
+async function loadStudentAccount(studentId: string) {
+  const student = await prisma.user.findFirst({
+    where: { id: studentId, systemRole: 'STUDENT', deletedAt: null },
+    select: {
+      id: true,
+      username: true,
+      displayName: true,
+      status: true,
+      consentAt: true,
+    },
+  });
+  if (!student) throw new Error('找不到這位學生。只有學生帳號可以從名冊處理。');
+  return student;
+}
+
+/**
+ * 轉班：一個動作做完「移出舊班」與「加入新班」。
+ *
+ * # 為什麼要是一個動作
+ *
+ * 因為在此之前那是兩步，而**沒有人告訴你要做第二步**。移出的確認視窗
+ * 說「他的帳號本身不受影響，如果他同時在別的班，那邊照常」——
+ * 它沒有說「你現在要去另一個班把他加回去」。只做第一步的結果是這位
+ * 學生登入後看到「現在沒有任務」，而名冊上他不在任何班。
+ * 每學期發生 5 到 10 次。
+ *
+ * # 他會看不到原班的檢討
+ *
+ * `listStudentTasks` 只認 `leftAt: null` 的班，所以移出的那一秒，
+ * 他清單上原班的每一份考試都消失了——包含上週剛考完、老師剛放行
+ * 解析的那一份。資料還在（`listOwnAttempts` 不查班級，
+ * `/take/[assignmentId]/result` 這個網址還打得開），但沒有任何一頁
+ * 會給他那個網址。這一支不改那個行為（`lib/attempt.ts` 是別人的
+ * 地界），但呼叫端的確認視窗必須把它講出來，而老師拿得到那些網址
+ * ——見 `/classes/[classId]/students/[studentId]`。
+ */
+export async function transferStudent(
+  fromClassId: string,
+  toClassId: string,
+  studentId: string,
+  actorId: string,
+) {
+  const tenantId = requireTenant();
+  if (fromClassId === toClassId) throw new Error('轉出與轉入是同一個班。');
+
+  const target = await prisma.class.findFirst({
+    where: { id: toClassId },
+    select: { id: true, name: true, active: true },
+  });
+  if (!target) throw new Error('找不到要轉入的班級。請重新整理再選一次。');
+  if (!target.active) {
+    throw new Error(
+      `「${target.name}」已經停用了，轉進去他不會收到任何任務。請先把那個班重新啟用，或改選別的班。`,
+    );
+  }
+
+  // 先移出。`leaveClass` 會擋掉「考試進行中」與「已經移出了」，
+  // 而那兩道正是轉班最需要的——考試中轉班等於把人從考場裡拿掉。
+  const left = await leaveClass(fromClassId, studentId, actorId);
+
+  await prisma.classMembership.upsert({
+    where: { classId_userId_role: { classId: toClassId, userId: studentId, role: 'STUDENT' } },
+    create: { classId: toClassId, userId: studentId, role: 'STUDENT' },
+    // 曾經在這個班待過（轉出去又轉回來）就把 leftAt 清掉，不要建第二列。
+    // 與名冊匯入的 upsert 語意一致：同一個人在同一個班只會有一列。
+    update: { leftAt: null },
+  });
+
+  await audit(tenantId, actorId, 'class.member_transfer', studentId, {
+    student: left.user.username,
+    studentName: left.user.displayName,
+    from: left.class.name,
+    to: target.name,
+  });
+  return { student: left.user.displayName, from: left.class.name, to: target.name };
 }
 
 /**

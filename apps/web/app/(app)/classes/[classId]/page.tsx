@@ -5,13 +5,21 @@ import { isHomeroomOf } from '@/lib/auth';
 import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
-import { assignableStaff, classHomerooms, classSubjectTeachers } from '@/lib/teaching';
+import {
+  assignableStaff,
+  classHomerooms,
+  classSubjectTeachers,
+  teachesClass,
+} from '@/lib/teaching';
 import { Denied, Empty, Note } from '@/components/Feedback';
 import { Table } from '@/components/Table';
+import ClassTools from './ClassTools';
 import ConsentButton from './ConsentButton';
-import { LeaveClass, RejoinClass } from './Membership';
+import ConsentBatch from './ConsentBatch';
+import { LeaveClass, RejoinClass, TransferClass } from './Membership';
 import { ResetClass, ResetOne } from './ResetPassword';
 import RosterImport from './RosterImport';
+import StudentEditor from './StudentEditor';
 import Teachers from './Teachers';
 
 export const dynamic = 'force-dynamic';
@@ -42,18 +50,47 @@ export default async function ClassPage({
     if (!klass) notFound();
 
     const isAdmin = ADMIN.has(user.systemRole);
-    const mine = await prisma.classMembership.findFirst({
-      where: { classId, userId: user.id, leftAt: null },
-      select: { id: true },
-    });
-    if (!isAdmin && !mine) {
+    // 存取判定要**同時**看兩張表。在此之前只查 `ClassMembership`，
+    // 而授課指派寫的是 `ClassSubjectTeacher`——於是一位被指派教這個班
+    // 數學的老師整頁被 Denied，而重設密碼與登錄家長同意那兩支 API
+    // 本來就允許他。**規則寫對了，畫面把它關起來了**，而畫面比 API 嚴
+    // 是反的。理由詳見 `lib/teaching.ts` 的 `teachesClass`。
+    const [membership, teaching] = await Promise.all([
+      prisma.classMembership.findFirst({
+        where: { classId, userId: user.id, leftAt: null },
+        select: { id: true },
+      }),
+      teachesClass(user.id, classId),
+    ]);
+    if (!isAdmin && !membership && !teaching) {
       return (
         <main className="yz-panel">
-          <Denied what={`「${klass.name}」的名冊`} why="你不在這個班的名冊裡。" />
+          <Denied
+            what={`「${klass.name}」的名冊`}
+            why="你不在這個班的名冊裡，也沒有被指派教這個班。請管理員把你加進授課老師名單。"
+          />
         </main>
       );
     }
-    const mayEdit = isAdmin || (await isHomeroomOf(user.id, classId));
+
+    const isHomeroom = !isAdmin && (await isHomeroomOf(user.id, classId));
+
+    /**
+     * 兩級權限，對得上兩支 API 各自的規則。
+     *
+     *   `mayManage`  管理員與導師。改名冊、移出、轉班、整班重設密碼、
+     *                改學生資料、退補——與匯入名冊同一條規則
+     *                （`POST /api/classes/[classId]/roster`）。
+     *   `mayAssist`  再加上這個班的授課老師。重設一位的密碼、
+     *                登錄家長同意——與那兩支路由允許的角色完全相同。
+     *
+     * 分成兩級是因為它們的後果不同：整班重設會讓 30 個人明天登不進來，
+     * 單一位重設是急件（學生站在櫃檯說登不進去，現場的那一位老師就要
+     * 處理得了）。合成一級的話，不是把急件關起來，就是把整班的權限
+     * 發給每一位科任老師。
+     */
+    const mayManage = isAdmin || isHomeroom;
+    const mayAssist = mayManage || teaching;
 
     // 在名冊上的與已經移出的分兩次查，不是查回來再自己分。
     // 一次查完再分的話，兩份的排序、欄位、空狀態都得自己拼，而**已移出
@@ -86,7 +123,24 @@ export default async function ClassPage({
       orderBy: { leftAt: 'desc' },
     });
 
-    const waiting = members.filter((m) => !m.user.consentAt).length;
+    const waiting = members.filter((m) => !m.user.consentAt);
+
+    // 轉班的候選：其他還啟用中的班。只在真的可能用到時才查——
+    // 科任老師轉不了班，多一次查詢換一個他按不到的下拉沒有意義。
+    const transferTargets = mayManage
+      ? await prisma.class.findMany({
+          where: { active: true, id: { not: classId } },
+          orderBy: [{ academicYear: { startDate: 'desc' } }, { name: 'asc' }],
+          select: { id: true, name: true, academicYear: { select: { name: true } } },
+          // 轉班的下拉不該是一份三年份的班級史。夠用就好。
+          take: 60,
+        })
+      : [];
+    const targets = transferTargets.map((c) => ({
+      id: c.id,
+      name: c.name,
+      year: c.academicYear.name,
+    }));
 
     // 授課老師與導師只有管理員動得了（見 lib/teaching.ts 的檔頭：
     // 指派發出去的是權限，不是排課表）。所以不是管理員的話連查都不查
@@ -112,35 +166,73 @@ export default async function ClassPage({
           <h1>{klass.name}</h1>
           <p className="yz-panel__sub">
             {klass.academicYear.name}　·　{members.length} 位學生
-            {!klass.active && '　·　已停用'}
+            {!klass.active && '　·　已封存'}
             　·　<Link href="/classes">回到班級列表</Link>
+            {' '}·{' '}
+            <Link href={`/classes/${classId}/grades`}>這個班整學期的成績</Link>
           </p>
         </div>
 
-        {waiting > 0 && (
+        {!klass.active && (
           <Note tone="warn">
-            有 {waiting} 位學生還沒有法定代理人的同意紀錄，帳號無法登入。
-            個資法第 15 條要求蒐集未成年人的個人資料需法定代理人同意——
-            這不是形式，沒有同意紀錄，這些資料的蒐集就沒有依據。
+            這個班已經封存。它不會出現在班級列表的預設檢視與派卷的班級清單上，
+            但名冊、成績與作答都還在。要重新使用請按下面的「重新啟用」。
           </Note>
         )}
 
-        {mayEdit && <RosterImport classId={classId} className={klass.name} />}
+        {waiting.length > 0 && !mayAssist && (
+          <Note tone="warn">
+            有 {waiting.length} 位學生還沒有法定代理人的同意紀錄，帳號無法登入。
+            個資法第 15 條要求蒐集未成年人的個人資料需法定代理人同意——
+            這不是形式，沒有同意紀錄，這些資料的蒐集就沒有依據。
+            要登錄請找該班導師或管理員。
+          </Note>
+        )}
+
+        {/* 批次登錄排在名冊表格之前：它是這一頁上唯一一件「不做的話，
+            剛匯進來的每一個帳號都登不進去」的事，而且它只在有人待處理
+            時才出現——處理完就消失，不會變成永遠佔著版面的一塊。 */}
+        {mayAssist && waiting.length > 0 && (
+          <ConsentBatch
+            classId={classId}
+            className={klass.name}
+            students={waiting.map((m) => ({
+              id: m.user.id,
+              username: m.user.username,
+              displayName: m.user.displayName,
+            }))}
+          />
+        )}
+
+        {mayManage && <RosterImport classId={classId} className={klass.name} />}
 
         <Table
           caption={`${klass.name}的學生名冊`}
           columns={[
             { key: 'u', head: '學號', cell: (m: Row) => m.user.username },
-            { key: 'n', head: '姓名', cell: (m: Row) => m.user.displayName },
+            {
+              key: 'n',
+              head: '姓名',
+              // 姓名是連結。在此之前它是純文字，而全系統沒有任何一頁
+              // 以學生為單位——家長明天來約談，要回答「這學期考了幾次、
+              // 哪一科在退步」，唯一的辦法是一份一份點進成績頁用 Ctrl+F
+              // 找他的名字。
+              cell: (m: Row) => (
+                <Link href={`/classes/${classId}/students/${m.user.id}`}>
+                  {m.user.displayName}
+                </Link>
+              ),
+            },
             {
               key: 'c',
               head: '家長同意',
               cell: (m: Row) =>
                 m.user.consentAt ? (
                   <span title={m.user.consentAt.toLocaleDateString('zh-TW')}>已取得</span>
-                ) : mayEdit ? (
+                ) : mayAssist ? (
                   // 沒有這顆按鈕的話，匯入名冊建出來的帳號永遠登不進去，
                   // 而系統裡沒有任何方式可以解決——那是一條死路。
+                  // 整批那一顆在上面，這一顆留給「只有他的回條今天到」。
                   <ConsentButton studentId={m.user.id} studentName={m.user.displayName} />
                 ) : (
                   <span className="yz-warn">未取得</span>
@@ -160,11 +252,13 @@ export default async function ClassPage({
                   '可登入'
                 ) : m.user.status === 'PENDING_CONSENT' ? (
                   <span className="yz-warn">等待同意</span>
+                ) : m.user.status === 'ARCHIVED' ? (
+                  <span className="yz-warn">已退補</span>
                 ) : (
                   m.user.status
                 ),
             },
-            ...(mayEdit
+            ...(mayAssist
               ? [
                   {
                     key: 'x',
@@ -173,20 +267,41 @@ export default async function ClassPage({
                     head: <span className="yz-sr">操作</span>,
                     cell: (m: Row) => (
                       <span className="yz-rowacts">
-                        {/* 重設密碼排在移出前面：它一天會被按好幾次，
-                            移出一學期按幾次。破壞性的那一個不該擋在
-                            常用的那一個前面。 */}
+                        {/* 重設密碼排在最前面：它一天會被按好幾次，
+                            編輯與移出一學期按幾次。破壞性的那一個不該
+                            擋在常用的那一個前面。 */}
                         <ResetOne
                           studentId={m.user.id}
                           studentName={m.user.displayName}
                           username={m.user.username}
                         />
-                        <LeaveClass
-                          classId={classId}
-                          className={klass.name}
-                          studentId={m.user.id}
-                          studentName={m.user.displayName}
-                        />
+                        {mayManage && (
+                          <>
+                            <StudentEditor
+                              student={{
+                                id: m.user.id,
+                                username: m.user.username,
+                                displayName: m.user.displayName,
+                                guardianEmail: m.user.guardianEmail,
+                                status: m.user.status,
+                              }}
+                              mayErase={isAdmin}
+                            />
+                            <TransferClass
+                              classId={classId}
+                              className={klass.name}
+                              studentId={m.user.id}
+                              studentName={m.user.displayName}
+                              targets={targets}
+                            />
+                            <LeaveClass
+                              classId={classId}
+                              className={klass.name}
+                              studentId={m.user.id}
+                              studentName={m.user.displayName}
+                            />
+                          </>
+                        )}
                       </span>
                     ),
                   },
@@ -199,7 +314,7 @@ export default async function ClassPage({
             <Empty
               title="這個班還沒有學生"
               hint={
-                mayEdit
+                mayManage
                   ? '用 CSV 匯入整份名冊。Excel 存出來的 Big5 也讀得懂，不必先轉檔。'
                   : '要調整名冊請找該班導師或管理員。'
               }
@@ -211,7 +326,7 @@ export default async function ClassPage({
             會有一半是已經不在的人，而老師每天要看的是在籍的那一半。
             但也不能不顯示：看不到就復原不了，而「不小心把人移出了」
             是這一頁最可能發生的誤操作。 */}
-        {mayEdit && departed.length > 0 && (
+        {mayManage && departed.length > 0 && (
           <details className="yz-fold">
             <summary className="yz-fold__head">
               已移出的學生（{departed.length}）
@@ -221,12 +336,21 @@ export default async function ClassPage({
                 這些人<strong>不會收到這個班的新任務</strong>，也不算進應交人數。
                 他們過去的作答與成績都還在，仍然對得回這個班——
                 移出寫的是離班日期，不是刪掉那一列。
+                他們自己的清單上看不到這個班的檢討了，但點姓名進去拿得到那些網址。
               </p>
               <Table
                 caption={`${klass.name}已移出的學生`}
                 columns={[
                   { key: 'u', head: '學號', cell: (m: Row) => m.user.username },
-                  { key: 'n', head: '姓名', cell: (m: Row) => m.user.displayName },
+                  {
+                    key: 'n',
+                    head: '姓名',
+                    cell: (m: Row) => (
+                      <Link href={`/classes/${classId}/students/${m.user.id}`}>
+                        {m.user.displayName}
+                      </Link>
+                    ),
+                  },
                   {
                     key: 'l',
                     head: '移出日期',
@@ -282,22 +406,41 @@ export default async function ClassPage({
           />
         )}
 
-        {/* 整班重設密碼擺在最下面，而且與名冊之間隔著一段。
-            它是這一頁最危險的動作（全班現有的密碼同時失效），
-            不該與每天在按的那幾顆放在一起。 */}
-        {mayEdit && members.length > 0 && (
+        {/* 整班重設密碼與封存擺在最下面，而且與名冊之間隔著一段。
+            它們是這一頁最危險的動作，不該與每天在按的那幾顆放在一起。 */}
+        {mayManage && (
           <div className="yz-danger">
             <h2 className="yz-card__title">整批處理</h2>
-            <p className="yz-hint" style={{ marginBottom: 10 }}>
-              重設全班密碼會讓這 {members.length} 位學生<strong>現在的密碼同時失效</strong>，
-              包含已經改過、自己記得的人。只有一位登不進去的話，
-              請用上面名冊那一列的「重設密碼」。
-            </p>
-            <ResetClass
-              classId={classId}
-              className={klass.name}
-              students={members.length}
-            />
+            {members.length > 0 && (
+              <>
+                <p className="yz-hint" style={{ marginBottom: 10 }}>
+                  重設全班密碼會讓這 {members.length} 位學生
+                  <strong>現在的密碼同時失效</strong>，包含已經改過、自己記得的人。
+                  只有一位登不進去的話，請用上面名冊那一列的「重設密碼」。
+                  <strong>新密碼只顯示那一次</strong>，畫面上有「列印這一頁」——
+                  離開之前一定要印，否則隔天早上這 {members.length} 個人都登不進來。
+                </p>
+                <ResetClass
+                  classId={classId}
+                  className={klass.name}
+                  students={members.length}
+                />
+              </>
+            )}
+            {isAdmin && (
+              <div style={{ marginTop: members.length > 0 ? 16 : 0 }}>
+                <p className="yz-hint" style={{ marginBottom: 10 }}>
+                  改班名會同時改掉學生畫面上看到的名稱。封存把這個班從列表與派卷的
+                  勾選清單上收起來，名冊與成績都留著。
+                </p>
+                <ClassTools
+                  classId={classId}
+                  className={klass.name}
+                  active={klass.active}
+                  members={members.length}
+                />
+              </div>
+            )}
           </div>
         )}
       </main>

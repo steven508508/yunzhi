@@ -14,14 +14,25 @@ import { Button } from '@/components/Button';
 import { Note } from '@/components/Feedback';
 
 type Problem = { line: number; column?: string; message: string };
+type Rename = { line: number; username: string; from: string; to: string };
 type Plan = {
   encoding: string;
   rows: { line: number; username: string; displayName: string }[];
   problems: Problem[];
   existing: string[];
   creating: string[];
+  consenting: number;
+  renames: Rename[];
 };
 type Credentials = { username: string; displayName: string; password: string }[];
+type Result = {
+  created: number;
+  linked: number;
+  consented: number;
+  renamed: number;
+  credentials: Credentials;
+  priorTasks: { total: number; answerable: number };
+};
 
 const ENCODING_LABEL: Record<string, string> = {
   'utf-8': 'UTF-8',
@@ -42,7 +53,10 @@ export default function RosterImport({
   const fileRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
-  const [creds, setCreds] = useState<Credentials | null>(null);
+  const [done, setDone] = useState<Result | null>(null);
+  // 姓名不同時要不要跟著改。**預設不改**：同名同姓不同人而學號打錯的
+  // 那一次，靜靜地跟著改會把另一個人的名字覆蓋掉，而畫面上沒有痕跡。
+  const [updateNames, setUpdateNames] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -53,13 +67,16 @@ export default function RosterImport({
     try {
       const fd = new FormData();
       fd.set('file', file);
-      if (apply) fd.set('apply', '1');
+      if (apply) {
+        fd.set('apply', '1');
+        if (updateNames) fd.set('updateNames', '1');
+      }
       const res = await fetch(`/api/classes/${classId}/roster`, { method: 'POST', body: fd });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.error ?? `伺服器回應 ${res.status}`);
       setPlan(data.plan);
       if (apply) {
-        setCreds(data.result.credentials);
+        setDone(data.result as Result);
         router.refresh();
       }
     } catch (e) {
@@ -70,10 +87,43 @@ export default function RosterImport({
   }
 
   // 匯入完成：把初始密碼列出來。**這是唯一一次拿得到。**
-  if (creds) {
+  if (done) {
+    const creds = done.credentials;
     return (
       <div className="yz-card" style={{ marginBottom: 22 }}>
         <h2 className="yz-card__title">名冊已匯入</h2>
+
+        {/* 做了什麼要逐項說。只說「匯入成功」的話，同意欄與姓名更新
+            這兩件事有沒有生效，看的人分不出來。 */}
+        <Note>
+          新增 {done.created} 個帳號、{done.linked} 位入班
+          {done.consented > 0 && `、${done.consented} 位的家長同意一起登錄好了`}
+          {done.renamed > 0 && `、更新了 ${done.renamed} 位的姓名`}。
+          {done.consented === 0 && done.created > 0 && (
+            <>
+              　新帳號<strong>還登不進去</strong>，要先在名冊上登錄家長同意——
+              上面那一塊可以整批做。
+            </>
+          )}
+        </Note>
+
+        {/* 插班生會收到這個班從開學以來的每一份任務。這件事在此之前
+            沒有任何地方會說，而學生登入第一件事是看到一整排紅字的
+            未交紀錄——其中還可能有他現在寫得了、但全班已經檢討過的。 */}
+        {done.created > 0 && done.priorTasks.total > 0 && (
+          <Note tone="warn">
+            這個班先前已經派過 {done.priorTasks.total} 份任務，
+            <strong>新加進來的學生會全部看到</strong>：截止日已過的會顯示成未交
+            {done.priorTasks.answerable > 0 && (
+              <>
+                ，而其中 <strong>{done.priorTasks.answerable} 份現在還寫得了</strong>
+                ——如果那幾份全班已經檢討過答案，請先到「派卷」把它們的截止時間補上
+              </>
+            )}
+            。要讓他們免除某一份，到那一份任務把派發對象改成個別指定。
+          </Note>
+        )}
+
         {creds.length === 0 ? (
           <Note>沒有新增帳號——名冊上的學生都已經有帳號了，只是把他們加進這個班。</Note>
         ) : (
@@ -111,7 +161,7 @@ export default function RosterImport({
           <Button
             variant="primary"
             onClick={() => {
-              setCreds(null);
+              setDone(null);
               setPlan(null);
               setFile(null);
               if (fileRef.current) fileRef.current.value = '';
@@ -131,6 +181,34 @@ export default function RosterImport({
         CSV 檔，第一列是欄位標題。至少要有「學號」與「姓名」兩欄，
         欄位名稱不必改成特定的寫法。Excel 存出來的 Big5 直接丟進來就好。
       </p>
+      {/* 同意欄要在**上傳之前**就說出來。事後才知道有這一欄的話，
+          兩百位的同意已經一位一位按完了——那是半小時。 */}
+      <details className="yz-fold" style={{ marginBottom: 12 }}>
+        <summary className="yz-fold__head">還讀得懂哪些欄位（含家長同意）</summary>
+        <div className="yz-fold__body">
+          <p className="yz-hint" style={{ marginBottom: 8 }}>
+            除了學號與姓名，這幾欄有填就會一起帶進來：
+          </p>
+          <ul style={{ marginLeft: 18, fontSize: 12.5, lineHeight: 2 }}>
+            <li>
+              <b>家長信箱</b>（也認得「家長email」「監護人信箱」）
+            </li>
+            <li>
+              <b>生日</b>（「95/3/2」讀成民國 95 年）
+            </li>
+            <li>
+              <b>家長同意</b>——填「是」或直接寫取得方式（<code>現場</code>／
+              <code>紙本</code>／<code>線上</code>）。
+              <strong>這一欄有填的人匯進來就登得進去</strong>，不必再一位一位登錄。
+              填「否」或留白代表還沒取得。讀不懂的值會擋下整份並指出是第幾列。
+            </li>
+          </ul>
+          <p className="yz-hint" style={{ marginTop: 8 }}>
+            一列示範：<code>學號,姓名,家長信箱,生日,家長同意</code> →{' '}
+            <code>S1140312,王大明,mom@example.com,95/3/2,紙本</code>
+          </p>
+        </div>
+      </details>
 
       {error && <Note tone="error">{error}</Note>}
 
@@ -171,7 +249,45 @@ export default function RosterImport({
               <Note>
                 讀到 {plan.rows.length} 位學生：新增 {plan.creating.length} 個帳號，
                 {plan.existing.length} 位已經有帳號（會加進「{className}」，不會重建）。
+                {plan.consenting > 0
+                  ? `其中 ${plan.consenting} 位的 CSV 帶了家長同意，匯入後直接可以登入。`
+                  : '沒有任何一列帶家長同意，所以新帳號匯進來還登不進去。'}
               </Note>
+
+              {/* 姓名不同要列出來，而且要人明確按下去才改。
+                  靜靜地跟著改是危險的：同名同姓不同人而學號打錯的那一次，
+                  會把另一個人的名字覆蓋掉，而畫面上沒有任何痕跡。 */}
+              {plan.renames.length > 0 && (
+                <>
+                  <Note tone="warn">
+                    有 {plan.renames.length} 位的姓名與系統裡現有的不一樣。
+                    <b>預設不會改</b>——要改請勾下面那一格。
+                  </Note>
+                  <ul style={{ marginLeft: 18, fontSize: 12.5, lineHeight: 2 }}>
+                    {plan.renames.slice(0, 20).map((r) => (
+                      <li key={r.username}>
+                        第 {r.line} 列（{r.username}）：{r.from} → <b>{r.to}</b>
+                      </li>
+                    ))}
+                    {plan.renames.length > 20 && (
+                      <li>…還有 {plan.renames.length - 20} 位</li>
+                    )}
+                  </ul>
+                  <label className="yz-check">
+                    <input
+                      type="checkbox"
+                      checked={updateNames}
+                      onChange={(e) => setUpdateNames(e.currentTarget.checked)}
+                    />
+                    <span>
+                      跟著改掉這 {plan.renames.length} 位的姓名。
+                      <span className="yz-hint">
+                        　學號打錯的話會覆蓋到另一個人，請先確認上面那份對照。
+                      </span>
+                    </span>
+                  </label>
+                </>
+              )}
               {/*
                 每一個新帳號都要算一次密碼雜湊，那是刻意慢的運算
                 （擋暴力破解），約三分之一秒一個。人多的時候按下確認

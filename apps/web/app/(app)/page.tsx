@@ -175,7 +175,20 @@ export default async function HomePage() {
         }),
         admin
           ? prisma.class.count({ where: { active: true } })
-          : prisma.classMembership.count({ where: { userId: user.id, leftAt: null } }),
+          : // 非管理員的「我帶幾個班」要**兩張表都算**。只算
+            // `ClassMembership` 的話，一位被指派教七個班數學的老師會
+            // 看到「0 個班（你帶的）」，而 `/classes` 那一頁也是空的
+            // ——同一個系統的兩處對同一件事給出相反的答案，
+            // 而他其實派得了那七個班的卷。
+            prisma.class.count({
+              where: {
+                active: true,
+                OR: [
+                  { memberships: { some: { userId: user.id, leftAt: null } } },
+                  { subjectTeachers: { some: { userId: user.id } } },
+                ],
+              },
+            }),
         prisma.knowledgePoint.count(),
       ]);
 
@@ -237,15 +250,42 @@ export default async function HomePage() {
       },
     });
 
-    // 管理員專屬的兩項：沒有它們，後面每一步都做不下去。
-    const [years, pendingConsent] = admin
+    /**
+     * 管理員專屬的四項：沒有它們，後面每一步都做不下去。
+     *
+     * # 為什麼「教職員帳號」與「授課指派」非在這裡不可
+     *
+     * 因為在此之前，一個做完學年度、班級、名冊、同意、知識點的全新
+     * 系統，首頁會顯示**「沒有待辦的事」**——而此時系統裡是 0 位老師、
+     * 0 筆授課指派。裝機的人會認為這件事做完了。
+     *
+     * 而 `lib/teaching.ts` 的檔頭自己寫著後果：「沒有指派的老師登得
+     * 進來，但每一頁對他都是空的。而空的畫面與『還沒有資料』長得
+     * 一模一樣——他會以為系統還沒開始用，**不會來說『我沒有權限』**。」
+     *
+     * 導覽列上確實有「教職員」，但導覽列上的一個字與待辦清單上一句
+     * 「老師登得進來卻什麼都看不到」，在裝機第一天的效果完全不同。
+     *
+     * `staffCount` 用「不是學生也不是家長」數，而不是列舉四種角色：
+     * 日後多一種職員角色（規格裡的 FRONT_DESK）時，列舉的那一份會
+     * 漏掉它，而症狀是「明明建了帳號，待辦還說沒有」。
+     */
+    const [years, pendingConsent, staffCount, teachingCount] = admin
       ? await Promise.all([
           prisma.academicYear.count(),
           prisma.user.count({
             where: { systemRole: 'STUDENT', consentAt: null, deletedAt: null },
           }),
+          prisma.user.count({
+            where: {
+              systemRole: { notIn: ['STUDENT', 'GUARDIAN'] },
+              status: 'ACTIVE',
+              deletedAt: null,
+            },
+          }),
+          prisma.classSubjectTeacher.count(),
         ])
-      : [0, 0];
+      : [0, 0, 0, 0];
 
     const todo: TodoItem[] = [];
 
@@ -259,6 +299,18 @@ export default async function HomePage() {
         act: true,
       });
     }
+    // 老師帳號排在班級之前：開班之後下一件事是指派授課老師，
+    // 而沒有帳號就指派不了。順序照「擋住後面所有事的排最前面」。
+    if (admin && staffCount <= 1) {
+      todo.push({
+        n: 0,
+        what: '還沒有其他教職員帳號',
+        why: '目前只有安裝時建立的那一個管理員。老師沒有帳號就登不進來，也指派不了授課班級——而題本要老師自己匯入、卷子要老師自己組。',
+        href: '/settings/staff',
+        label: '建立老師帳號',
+        act: true,
+      });
+    }
     if (admin && years > 0 && classes === 0) {
       todo.push({
         n: 0,
@@ -266,6 +318,16 @@ export default async function HomePage() {
         why: '班級是派任務、看成績、算能力分析的單位。學生要先在某個班裡，才收得到任何東西。',
         href: '/classes',
         label: '開一個班',
+        act: true,
+      });
+    }
+    if (admin && classes > 0 && staffCount > 1 && teachingCount === 0) {
+      todo.push({
+        n: 0,
+        what: '還沒有任何授課指派',
+        why: '老師登得進來，但成績查不到、卷子派不了、分數也改不動——而他看到的是空白畫面，不是錯誤訊息，所以他不會來說自己沒有權限。到班級頁把每一位指派成某個班某一科的授課老師。',
+        href: '/classes',
+        label: '去指派',
         act: true,
       });
     }
@@ -356,9 +418,16 @@ export default async function HomePage() {
             ))}
           </ul>
         ) : (
+          // 空狀態要照系統實際的狀況說話。舊版寫「題本都校對完了，
+          // 學生的同意紀錄也齊了」——那句話在一題都還沒有、一位老師
+          // 都還沒有的全新系統上是誤導的，而那正是最常看到它的時候。
           <Empty
             title="沒有待辦的事"
-            hint="題本都校對完了，學生的同意紀錄也齊了。要新增題目就從匯入開始。"
+            hint={
+              questions === 0
+                ? '設定都到位了，但題庫還是空的——下一步是匯入第一份題本，校對完就組得了卷子。'
+                : '題本都校對完了，學生的同意紀錄也齊了。要新增題目就從匯入開始。'
+            }
           />
         )}
 

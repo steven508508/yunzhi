@@ -14,6 +14,7 @@ import {
   removePaperItem,
   reorderPaperItems,
   setPaperItemScore,
+  setPaperItemScores,
 } from '@/lib/paper';
 import { prisma } from '@/lib/prisma';
 import { scopedRoute } from '@/lib/route';
@@ -70,13 +71,25 @@ export const POST = scopedRoute<{ paperId: string }>(async (req: NextRequest, { 
 // ── 重排或改配分 ─────────────────────────────────────────────────
 
 /**
- * 兩種形狀二選一，刻意不合併成一個「什麼都能改」的物件：
- * 重排要的是整份順序、改配分要的是一題，混在一起會出現
+ * 三種形狀三選一，刻意不合併成一個「什麼都能改」的物件：
+ * 重排要的是整份順序、改配分要的是一題或一批，混在一起會出現
  * 「送了順序又送了配分」這種沒有人想清楚過的請求。
+ *
+ * `scores` 是後來加的第三種。單題那一種留著不是為了相容——
+ * 老師手動改一格配分時送 25 個數字，等於把另外 24 題也一起寫一次，
+ * 而那 24 次寫入在稽核記錄上看起來像是有人改了整份卷子的配分。
+ *
+ * 25 題是最常見的一份段考卷；100 給的是餘裕，不是設計上限。
  */
 const Patch = z.union([
   z.object({ order: z.array(z.string().min(1)).min(1) }),
   z.object({ itemId: z.string().min(1), score: z.number().min(0).max(1000) }),
+  z.object({
+    scores: z
+      .array(z.object({ itemId: z.string().min(1), score: z.number().min(0).max(1000) }))
+      .min(1)
+      .max(500),
+  }),
 ]);
 
 export const PATCH = scopedRoute<{ paperId: string }>(async (req: NextRequest, { user, params }) => {
@@ -94,6 +107,14 @@ export const PATCH = scopedRoute<{ paperId: string }>(async (req: NextRequest, {
   try {
     if ('order' in parsed.data) {
       const result = await reorderPaperItems(params.paperId, parsed.data.order, user.id);
+      return NextResponse.json({ ok: true, ...result });
+    }
+    // 整批配分。**itemId 屬不屬於這份卷子由 setPaperItemScores 在交易裡
+    // 驗**——與下面單題那條各自驗一次，不共用：這一條要在同一個交易裡
+    // 比對集合（不然「查完到改完」之間有人加了一題），而那件事只有
+    // 進到 lib 才做得到。
+    if ('scores' in parsed.data) {
+      const result = await setPaperItemScores(params.paperId, parsed.data.scores, user.id);
       return NextResponse.json({ ok: true, ...result });
     }
     // **itemId 一定要對著這份卷子驗一次。** 上面的權限是對

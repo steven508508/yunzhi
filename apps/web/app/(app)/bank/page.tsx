@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { Denied } from '@/components/Feedback';
 import { MathText } from '@/components/MathText';
+import { Pager } from '@/components/Pager';
+import { PAGE_SIZE, keepQuery, pageQuery, pageSlice } from '@/lib/listing.mjs';
 import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
@@ -25,7 +27,7 @@ const USABLE = ['PUBLISHED', 'PENDING_REVIEW', 'DRAFT'] as const;
 export default async function BankPage({
   searchParams,
 }: {
-  searchParams: Promise<{ subject?: string; q?: string; status?: string }>;
+  searchParams: Promise<{ subject?: string; q?: string; status?: string; page?: string }>;
 }) {
   const sp = await searchParams;
   return scopedPage(async (user) => {
@@ -47,7 +49,20 @@ export default async function BankPage({
 
   const retiredOnly = sp.status === 'RETIRED';
 
-  const [questions, retiredCount] = await Promise.all([
+  /**
+   * 分頁。
+   *
+   * 舊版固定 `take: 100` 而且沒有分頁——**超過 100 題之後，
+   * 舊的題目在這一頁上就不存在了**。而題庫是只增不減的：一學期匯
+   * 十份題本就是四百題，於是第一份題本裡的題目再也點不到，
+   * 而題庫頁是老師挑題組卷的唯一入口。
+   *
+   * 搜尋與科目篩選以前就有，它們擋得住一部分——但「我知道有這一題、
+   * 只是想不起關鍵字」的情況擋不住，而那是最常見的一種。
+   */
+  const window = pageQuery(sp.page, PAGE_SIZE);
+
+  const [found, retiredCount] = await Promise.all([
     prisma.question.findMany({
       where: {
         tenantId: user.tenantId,
@@ -56,7 +71,9 @@ export default async function BankPage({
         ...(sp.q ? { content: { contains: sp.q, mode: 'insensitive' as const } } : {}),
       },
       orderBy: { createdAt: 'desc' },
-      take: 100,
+      skip: window.skip,
+      // 多取一筆，只為了知道「後面還有沒有」。
+      take: window.take,
       include: {
         subject: { select: { name: true } },
         options: { select: { id: true }, take: 1 },
@@ -71,13 +88,18 @@ export default async function BankPage({
     }),
   ]);
 
-  const keep = (extra: Record<string, string | undefined>) => {
-    const params = new URLSearchParams();
-    const merged = { subject: sp.subject, q: sp.q, status: sp.status, ...extra };
-    for (const [k, v] of Object.entries(merged)) if (v) params.set(k, v);
-    const s = params.toString();
-    return s ? `/bank?${s}` : '/bank';
-  };
+  const paged = pageSlice(found, sp.page, PAGE_SIZE);
+  const questions = paged.rows;
+
+  // 換科目、切「已下架」、改搜尋字都要**把頁碼歸零**。不歸零的話，
+  // 停在第 5 頁換一個只有 30 題的科目會得到一片空白，
+  // 而使用者看到的是「這一科沒有題目」。
+  const keep = (extra: Record<string, string | undefined>) =>
+    keepQuery(
+      '/bank',
+      { subject: sp.subject, q: sp.q, status: sp.status },
+      { page: undefined, ...extra },
+    );
 
   return (
     <div className="yz-app">
@@ -87,7 +109,9 @@ export default async function BankPage({
           是一頁亂碼。 */}
       <header className="yz-head">
         <span className="yz-head__title">題庫</span>
-        <span className="yz-head__sub">{questions.length} 題</span>
+        <span className="yz-head__sub">
+          {paged.from > 0 ? `第 ${paged.from}–${paged.to} 題` : '0 題'}
+        </span>
       </header>
 
       <div style={{ padding: '9px 22px', borderBottom: '1px solid var(--rule)', display: 'flex', gap: 14, fontSize: 12 }}>
@@ -120,7 +144,9 @@ export default async function BankPage({
                 ? '沒有下架的題目。'
                 : sp.q
                   ? `找不到含「${sp.q}」的題目。`
-                  : '題庫是空的。先匯入一份題本。'}
+                  : paged.page > 1
+                    ? '這一頁沒有題目了——大概是有人在你翻頁的時候下架了幾題。回第一頁看看。'
+                    : '題庫是空的。先匯入一份題本。'}
             </p>
           ) : (
             <table className="yz-table">
@@ -168,6 +194,22 @@ export default async function BankPage({
               </tbody>
             </table>
           )}
+
+          <Pager
+            page={paged.page}
+            hasPrev={paged.hasPrev}
+            hasNext={paged.hasNext}
+            from={paged.from}
+            to={paged.to}
+            unit="題"
+            hrefFor={(n) =>
+              keepQuery(
+                '/bank',
+                { subject: sp.subject, q: sp.q, status: sp.status },
+                { page: n === 1 ? undefined : String(n) },
+              )
+            }
+          />
         </div>
       </main>
     </div>
