@@ -70,12 +70,18 @@ export default async function HomePage() {
       if (running.length > 0) {
         // 寫到一半的排最前面而且是唯一的硃砂色：有時限的那幾份正在
         // 倒數，而學生看不到伺服器的時鐘。
+        //
+        // 這句話學生會照著做，所以不可以承諾伺服器不會做的事。
+        // 舊版寫「時間到了系統會自動收卷」，而**伺服器沒有排程收卷**
+        // （下面第 213 行的註解說明了為什麼那是刻意的）。自動交卷只
+        // 發生在作答畫面還開著的時候，所以這裡要講的是「不要關掉它」。
         todo.push({
           n: running.length,
           what: '份寫到一半',
           why:
             `${running[0].title}${running.length > 1 ? ' 等' : ''}還沒交。` +
-            '有時限的會繼續倒數，時間到了系統會自動收卷。',
+            '有時限的會繼續倒數，時間到了系統會在作答畫面上自動送出，' +
+            '所以請不要提前關掉那個畫面。',
           href: running[0].openAttemptId
             ? `/take/${running[0].assignmentId}`
             : '/take',

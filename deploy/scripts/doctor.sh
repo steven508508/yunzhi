@@ -99,7 +99,12 @@ fi
 # ═══════════════════════════════════════════════════════════════
 
 if [[ "${MODE}" == "docker" ]]; then
-  for svc in postgres redis minio web worker ai caddy; do
+  # backup 一定要在這張清單裡。
+  #
+  # 它不在的時候，備份容器就算 unhealthy 也不會被任何地方報出來——
+  # 而「備份天天失敗」的唯一症狀就是那個 unhealthy。三層指示燈
+  # （容器 healthcheck、這張清單、下面的 backup.age）原本同時是綠的。
+  for svc in postgres redis minio web worker ai caddy backup; do
     state="$(compose ps --format '{{.State}}' "${svc}" 2>/dev/null | head -1)"
     health="$(compose ps --format '{{.Health}}' "${svc}" 2>/dev/null | head -1)"
     case "${state}" in
@@ -239,14 +244,36 @@ fi
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/yunzhi}"
 if [[ -d "${BACKUP_DIR}" ]]; then
+  # 備份守護行程留下的失敗紀錄。**這一項要排在 backup.age 前面**：
+  # 昨天的備份成功、今天的失敗時，backup.age 還是綠的（才 20 小時），
+  # 而真正該被看到的是「今天失敗了，原因是什麼」。
+  fail_marker="${BACKUP_DIR}/.last-failure"
+  if [[ -f "${fail_marker}" ]]; then
+    fail_when="$(cut -d'|' -f1 "${fail_marker}" 2>/dev/null)"
+    fail_why="$(cut -d'|' -f2- "${fail_marker}" 2>/dev/null)"
+    fail backup.lastrun "上一次備份失敗（${fail_when:-時間不明}）：${fail_why:-原因不明}" \
+      "詳細日誌：docker compose logs --tail 100 backup。修好之後下一次成功會自動清掉這個標記。"
+  else
+    pass backup.lastrun "上一次備份沒有留下失敗紀錄"
+  fi
+
   latest="$(find "${BACKUP_DIR}" -maxdepth 1 -name 'yunzhi-*.tar.gz*' ! -name '*.sha256' -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1)"
   if [[ -n "${latest}" ]]; then
     ts="${latest%% *}"; file="${latest#* }"
     age_h=$(( ( $(date +%s) - ${ts%.*} ) / 3600 ))
-    if (( age_h > 48 )); then
-      fail backup.age "最新備份已 ${age_h} 小時" "備份排程可能沒在跑。檢查：docker compose logs backup 或 systemctl status yunzhi-backup.timer"
+    # 門檻對齊「每日一次」這個實際排程，而不是留兩天的餘裕。
+    #
+    #   26 小時：錯過了一次排程。備份容器的補跑機制（STALE_SECONDS
+    #           也是 26 小時）在這個點上已經觸發過，所以這是黃燈。
+    #   30 小時：補跑也沒成功。那個迴圈在超時之後是持續重試的，
+    #           四小時都沒生出一份備份等於它真的壞了 —— 紅燈。
+    #
+    # 原本是 48 小時才紅。以每日備份、RPO 15 分鐘的承諾來說，
+    # 「兩天沒有備份還算警告」這件事本身就是錯的。
+    if (( age_h > 30 )); then
+      fail backup.age "最新備份已 ${age_h} 小時（預期每日一次）" "備份排程沒在跑。檢查：docker compose logs --tail 100 backup 或 systemctl status yunzhi-backup.timer"
     elif (( age_h > 26 )); then
-      soft backup.age "最新備份已 ${age_h} 小時" "預期每日一次"
+      soft backup.age "最新備份已 ${age_h} 小時" "已經錯過一次排程。若下一輪補跑成功會自動恢復；沒有的話這裡會轉紅。"
     else
       pass backup.age "最新備份 ${age_h} 小時前（$(basename "${file}")）"
     fi
@@ -254,6 +281,25 @@ if [[ -d "${BACKUP_DIR}" ]]; then
     pass backup.count "共 ${count} 份備份"
   else
     fail backup.exists "沒有任何備份" "./deploy/scripts/backup.sh"
+  fi
+
+  # 異地副本。**這是「這台機器毀了會怎樣」的答案。**
+  #
+  # 預設 BACKUP_REMOTE_* 四項全空，也就是：備份與資料庫在同一顆磁碟上，
+  # 而解密備份的 BACKUP_ENCRYPTION_KEY 在同一台機器的 .env 裡。
+  # 機器毀了，三樣東西一起沒有。這件事文件警告過，但沒有任何一個
+  # 地方會在日常維運中提醒它，所以它永遠不會被排進待辦。
+  #
+  # 這一項設定好之後會轉綠，所以它不是那種每次都亮、久了就被無視的
+  # 常駐警告——doctor 的輸出要保持「有黃燈就是真的有事」。
+  if [[ -n "${BACKUP_REMOTE_ENDPOINT:-}" && -n "${BACKUP_REMOTE_BUCKET:-}" ]]; then
+    pass backup.offsite "異地備份已設定（${BACKUP_REMOTE_ENDPOINT}）"
+  elif [[ "${BACKUP_ENCRYPTION_ENABLED:-true}" == "true" ]]; then
+    soft backup.offsite "所有備份、資料庫、以及解密備份的金鑰都在這一台機器上" \
+      "這台機器毀了就三樣一起沒有（金鑰在 .env，.env 也只在這裡）。設定 BACKUP_REMOTE_*，並把 BACKUP_ENCRYPTION_KEY 抄到機器以外的地方。做法見 docs/UBUNTU.md 的「異地備份與金鑰保管」。"
+  else
+    soft backup.offsite "沒有設定異地備份，所有備份都只在這一台機器上" \
+      "磁碟或機殼壞掉時，資料庫與全部備份一起消失。做法見 docs/UBUNTU.md 的「異地備份與金鑰保管」。"
   fi
 
   # 這一項是本工具最重要的檢查之一。備份天天跑但從沒還原過，
@@ -285,6 +331,53 @@ if [[ "${WAL_ARCHIVE_ENABLED:-true}" == "true" ]]; then
     fail wal.archive "WAL 歸檔失敗 ${wal_fail} 次" "Postgres 會累積 WAL 直到磁碟寫滿。檢查歸檔目錄權限：docker compose logs postgres | grep -i archive"
   elif [[ -n "${wal_last}" ]]; then
     pass wal.archive "WAL 歸檔正常（最後一次 ${wal_last}）"
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# AI 用量
+# ═══════════════════════════════════════════════════════════════
+#
+# 「帳單來了才知道用了多少」在這套系統是預設狀態：畫面上唯一顯示成本
+# 的地方是單一份題本的匯入進度頁，沒有任何彙總。這裡把「本月用了多少」
+# 拉到 doctor 的輸出裡，讓每週跑一次健檢的人看得到趨勢。
+#
+# ai_usage_logs 跟 attempts 一樣開著 FORCE RLS，所以要走
+# pg_scalar_all_tenants —— 直接用 pg_query 拿到的一律是 0，
+# 而 0 看起來就像「這個月沒有用 AI」。
+#
+# mock 模式不花錢，整段跳過。**連標題也不印**：一個底下什麼都沒有的
+# 區段看起來像「檢查過了、都正常」，而那正是 upgrade.sh 的考試檢查
+# 空轉了一整版沒有人發現的原因。
+if [[ "${AI_PROVIDER:-mock}" != "mock" ]]; then
+  (( JSON_OUT )) || section "AI 用量"
+  ai_tokens="$(pg_scalar_all_tenants "SELECT coalesce(sum(\"inputTokens\" + \"outputTokens\"),0) FROM ai_usage_logs WHERE \"createdAt\" >= date_trunc('month', now())")"
+  ai_budget="${AI_MONTHLY_TOKEN_BUDGET:-0}"
+  [[ "${ai_budget}" =~ ^[0-9]+$ ]] || ai_budget=0
+
+  if [[ ! "${ai_tokens}" =~ ^[0-9]+$ ]]; then
+    soft ai.usage "查不到本月 AI 用量" "資料表可能還沒建立（遷移未執行）。用量查詢見 docs/OPERATIONS.md 的「AI 成本與預算」。"
+  elif (( ai_budget > 0 )); then
+    ai_pct=$(( ai_tokens * 100 / ai_budget ))
+    # 上限的實際語意是「開始一份新題本之前檢查一次」，所以超過 100%
+    # 不是「被擋住了」而是「下一份匯入會被擋住」——訊息要講這件事。
+    if (( ai_pct >= 100 )); then
+      fail ai.budget "本月 AI 用量 ${ai_tokens} token，已達上限 ${ai_budget}（${ai_pct}%）" \
+        "**新的題本匯入會被拒絕**（考試、計分、既有解析不受影響）。要放行：調高 .env 的 AI_MONTHLY_TOKEN_BUDGET 後重啟 worker。"
+    elif (( ai_pct >= 80 )); then
+      soft ai.budget "本月 AI 用量 ${ai_tokens} token，已用掉上限的 ${ai_pct}%" \
+        "上限只在每份題本**開始之前**檢查一次，所以一份大題本可以一次衝過頭。"
+    else
+      pass ai.budget "本月 AI 用量 ${ai_tokens} token（上限 ${ai_budget}，${ai_pct}%）"
+    fi
+  else
+    pass ai.usage "本月 AI 用量 ${ai_tokens} token（AI_MONTHLY_TOKEN_BUDGET=0，沒有設上限）"
+  fi
+
+  # 沒有單價就換算不出金額，而那正是「我想知道花了多少錢」的答案。
+  if [[ -z "${AI_PRICING:-}" ]]; then
+    soft ai.pricing "AI_PRICING 是空的，成本估算永遠是 0 元" \
+      "匯入進度頁的成本提示不會出現、ai_usage_logs 的 estimatedCost 全是 null。填上你的閘道單價（格式見 .env.example）。token 數本身還是有記。"
   fi
 fi
 

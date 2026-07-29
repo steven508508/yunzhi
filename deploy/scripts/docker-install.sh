@@ -327,3 +327,22 @@ dim "   未驗證過的備份等於沒有備份。"
 dim "2. 把 .env 備份到密碼管理器或離線儲存。"
 dim "   遺失 BACKUP_ENCRYPTION_KEY 等於所有加密備份作廢。"
 echo
+
+# 異地備份。**這是唯一一個「發生了就什麼都救不回來」的預設值**，
+# 所以它要出現在安裝完成的畫面上，不是只寫在文件裡。
+if [[ -z "${BACKUP_REMOTE_ENDPOINT:-}" || -z "${BACKUP_REMOTE_BUCKET:-}" ]]; then
+  err "現在這台機器毀了，資料與備份會一起消失。"
+  dim "備份寫在 ${BACKUP_DIR:-/var/backups/yunzhi}，與資料庫**同一顆磁碟**；"
+  dim "而解密備份用的 BACKUP_ENCRYPTION_KEY 就在這台機器的 .env 裡。"
+  dim "磁碟壞掉、機器被偷、勒索軟體——任何一種都會讓三樣一起沒有，"
+  dim "而且沒有那把金鑰，備份在數學上還原不回來。"
+  dim ""
+  dim "今天就能做完的兩步（十分鐘）："
+  dim "  1. 把 BACKUP_ENCRYPTION_KEY 抄進密碼管理器或印出來鎖起來"
+  dim "  2. 在 .env 填 BACKUP_REMOTE_ENDPOINT / BUCKET / ACCESS_KEY / SECRET_KEY"
+  dim "     再 docker compose up -d backup"
+  dim ""
+  dim "沒有 S3 端點時的替代做法（rsync 到另一台機器）："
+  dim "  docs/UBUNTU.md 的「異地備份與金鑰保管」一節"
+  echo
+fi

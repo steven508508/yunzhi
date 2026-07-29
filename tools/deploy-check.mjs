@@ -587,6 +587,70 @@ check('VERSION 與最新的 git tag 一致', () => {
   );
 });
 
+/**
+ * 文件裡不能有比 VERSION 舊的版本字串。
+ *
+ * 上一項檢查的是 VERSION 對 git tag，**沒有檢查文件**。實際發生的事：
+ * `docs/中午部署.md` 與 `docs/UBUNTU.md` 的第一個指令是
+ * `git checkout v0.20.0`，而那個 tag 真的存在——所以照著做**會成功、
+ * 不會有任何錯誤訊息**，然後裝出一個沒有科目、沒有教職員帳號、
+ * 沒有授課指派的 v0.20.0：整套系統開箱即無法使用，而畫面上沒有
+ * 任何一個地方說得出原因。
+ *
+ * 「照著文件做反而裝到死路版本」是這一項要擋的東西。發版時 VERSION
+ * 一改，這裡就會逼人把文件一起改——那正是上次沒有發生的事。
+ */
+check('文件裡的版本字串與 VERSION 一致', () => {
+  const version = read('VERSION').trim();
+
+  // 走查報告與進度紀錄**刻意**引用舊版本：它們在描述「當時的狀況」
+  // 或原樣引述有問題的那一行。把它們改成新版號會讓紀錄失真，
+  // 所以這裡排除，而不是去改它們。
+  const frozen = /^docs\/(情境-|功能清單|夜間進度|施工藍圖)/;
+
+  const docs = [
+    'README.md',
+    ...readdirSync(join(ROOT, 'docs'))
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => `docs/${f}`),
+  ].filter((f) => existsSync(join(ROOT, f)) && !frozen.test(f));
+
+  // 三種「這是現在的版本」的寫法。其他提法（「上一版 v0.19.0」、
+  // 「學生端在 v0.20.0 上線」）是歷史敘述，不在這裡管——
+  // 管了會逼人把正確的歷史改錯。
+  const patterns = [
+    // 照著貼就會切到那一版的指令。這一條是最要命的。
+    [/git\s+checkout\s+"?v(\d+\.\d+\.\d+)"?/g, 'git checkout'],
+    // 文件開頭宣告自己描述的是哪一版。
+    [/版本\s*\*\*v(\d+\.\d+\.\d+)\*\*/g, '文件標頭的版本宣告'],
+    // 驗收指令的預期輸出。對不上的話，照著看的人會以為裝錯版本。
+    [/"appVersion"\s*:\s*"(\d+\.\d+\.\d+)"/g, '/api/version 的範例輸出'],
+  ];
+
+  const bad = [];
+  for (const f of docs) {
+    const lines = read(f).split('\n');
+    lines.forEach((line, i) => {
+      for (const [re, what] of patterns) {
+        re.lastIndex = 0;
+        for (const m of line.matchAll(re)) {
+          if (m[1] !== version) {
+            bad.push(`${f}:${i + 1} 的${what}寫著 ${m[1]}，而 VERSION 是 ${version}`);
+          }
+        }
+      }
+    });
+  }
+
+  assert(
+    bad.length === 0,
+    `${bad.join('\n       ')}\n` +
+      `       舊的 tag 是存在的，所以照著文件做會「成功」地裝到舊版，\n` +
+      `       而少掉的往往是整條動線而不是一個功能。安裝指令不要寫死版本號：\n` +
+      `       git clone 拿到的預設分支就是最新版，要確認就 cat VERSION。`,
+  );
+});
+
 check('遷移不會在有資料的資料庫上中止', () => {
   const dir = join(ROOT, 'packages/db/migrations');
   for (const name of readdirSync(dir)) {

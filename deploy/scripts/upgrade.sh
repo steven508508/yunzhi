@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     --force) FORCE=1; shift ;;
     --no-auto-rollback) NO_AUTO_ROLLBACK=1; shift ;;
     --yes|-y) export YZ_ASSUME_YES=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) die "不認得的參數：$1" ;;
   esac
 done
@@ -51,13 +51,35 @@ section "1／8  安全檢查"
 # ═══════════════════════════════════════════════════════════════
 
 # 升級把正在作答的學生踢出去，是這套系統能造成的最直接傷害。
-active_exams="$(pg_scalar "SELECT count(*) FROM information_schema.tables WHERE table_name='exam_sessions'")"
+#
+# 這段檢查踩過兩個坑，都是「看起來通過了其實根本沒查」：
+#
+# 一、表名。作答的表叫 attempts（schema.prisma 的 @@map），
+#    這裡本來查的是 exam_sessions —— 一張全 repo 只出現在這兩行的表。
+#    於是條件永遠不成立，整個 if 被跳過，連 else 的「沒有進行中的
+#    考試」都不會印，畫面上那一段是空的，看起來像檢查通過了。
+#
+# 二、RLS。attempts 開著 FORCE ROW LEVEL SECURITY，**表格擁有者也
+#    逃不掉**。只把表名改對而照舊用 pg_scalar 查，拿到的還是 0：
+#    不報錯、不警告，一樣放行。所以要走 pg_scalar_all_tenants。
+attempts_exists="$(pg_scalar "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='attempts'")"
 
-if [[ "${active_exams}" == "1" ]]; then
-  in_progress="$(pg_scalar "SELECT count(*) FROM exam_sessions WHERE status='IN_PROGRESS'")"
-  if (( ${in_progress:-0} > 0 )); then
-    err "目前有 ${in_progress} 位學生正在作答。"
-    err "升級會中斷他們的考試 —— 前端雖有本地暫存，但體驗上等同當機。"
+if [[ "${attempts_exists}" == "1" ]]; then
+  in_progress="$(pg_scalar_all_tenants "SELECT count(*) FROM attempts WHERE status='IN_PROGRESS'")"
+  if [[ ! "${in_progress}" =~ ^[0-9]+$ ]]; then
+    # 查得到表卻數不出來（權限、連線中斷）。沉默地當成 0 就是重蹈
+    # 上面那個覆轍，所以這裡明講「不知道」。
+    err "查不出目前有沒有人在作答（查詢沒有回傳數字）。"
+    err "無法確認就升級，等於賭現在沒有人在考試。"
+    if (( FORCE )); then
+      warn "已指定 --force，繼續升級。"
+    else
+      die "請先確認：./deploy/scripts/db-shell.sh --readonly -c \"SELECT count(*) FROM attempts WHERE status='IN_PROGRESS'\"；確定沒人在考再加 --force。"
+    fi
+  elif (( in_progress > 0 )); then
+    err "目前有 ${in_progress} 份作答正在進行中。"
+    err "升級會停掉 web 與 worker，這些學生的考試會當場中斷。"
+    err "**前端沒有本機暫存**：已經送到伺服器的答案還在，最後幾題會漏。"
     if (( FORCE )); then
       warn "已指定 --force，繼續升級。"
     else
@@ -66,6 +88,12 @@ if [[ "${active_exams}" == "1" ]]; then
   else
     ok "沒有進行中的考試"
   fi
+else
+  # 全新安裝（遷移還沒跑）會走到這裡，那是正常的；但「連不上資料庫」
+  # 也會走到這裡，而那時候升級是不該繼續的。分不出來就要說出來。
+  warn "資料庫裡找不到 attempts 表，無法確認是否有人正在作答。"
+  dim "全新安裝（遷移還沒跑過）是正常的；否則多半是連不上資料庫。"
+  dim "確認：./deploy/scripts/doctor.sh"
 fi
 
 # shellcheck disable=SC2015  # ok() 是 printf 包裝、必定回 0，warn 不會被誤觸發

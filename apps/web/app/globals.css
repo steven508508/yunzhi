@@ -1348,3 +1348,244 @@ textarea.yz-in { resize: vertical; line-height: 1.7; }
   .yz-review__body { padding-left: 0; }
   .yz-review__ansrow { flex-wrap: wrap; }
 }
+
+/* ═══ 作答畫面（手機）══════════════════════════════════════════
+   全部是 v0.21.0 的情境走查（docs/情境-學生應考.md）量出來的問題，
+   量測條件是 390 × 664、`isMobile`、`hasTouch`。
+
+   那一份的結論：**這一頁是照 iPad 設計的，手機是縮出來的。**
+   390px 下固定介面佔掉 329px（49.5%），第一個選項在 y=537——
+   打開一題，在捲動之前一個選項都看不到。下面這一段把那 329px
+   降到約 130px，並且把四個低於觸控下限的目標補上去。
+
+   排在檔案最末尾是刻意的：這裡有幾條要蓋掉前面的規則
+   （`.yz-take__bar` 的 sticky、`.yz-take__num` 的尺寸），
+   靠的是層疊順序而不是 `!important`。 */
+
+/* ── 考試模式 ─────────────────────────────────────────────────
+   作答中把全站導覽列整條收掉。它在手機上把「登出」換行成獨立的
+   一整排、就在螢幕最頂端（.yz-nav__right 在 ≤620px 時 width:100%），
+   而學生伸手去拉狀態列或滑掉通知時按到的就是它——代價是重打一次
+   10 碼的臨時密碼，而倒數不會停。考試畫面本來就該是一個沒有出口的
+   畫面；要離開的正當方式只有一個，就是交卷。
+
+   用 display:none 而不是視覺上藏起來：留在 DOM 裡的話 Tab 鍵仍然
+   走得到那顆「登出」，而 iPad 上很多人接了鍵盤。 */
+body[data-yz-taking] .yz-nav { display: none; }
+
+/* 下拉重新整理在整場考試中隨時是待發狀態：版面是巢狀捲動
+   （.yz-shell 100vh + .yz-shell__main overflow-y:auto），文件本身
+   永遠在 scrollTop 0，所以只要內層捲到頂端——也就是每一題剛換過去
+   的時候——一個往下的撥動就會被瀏覽器攔截成重新整理。
+   而學生最想重新整理的時刻，正是存檔狀態不明的時候。
+   同一條也擋掉橫向的連鎖捲動（見下面的數學式）。 */
+body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
+
+/* ── 黏著的頂部區塊 ───────────────────────────────────────────
+   狀態列、警示、題號欄合成一塊。分開的時候：題號欄會捲走（標了待
+   複查的題目要先捲回最上面才點得到），而唯一會講重話的警示
+   （「有 N 題沒有存成功，請舉手」）在學生做出任何反應之前，
+   就已經在正常的閱讀動作中被捲掉了。 */
+.yz-take__top {
+  position: sticky; top: 0; z-index: 3;
+  background: var(--paper);
+}
+/* 已經由外層黏著，內層再黏一次會在捲動時抖一下。 */
+.yz-take__top .yz-take__bar { position: static; }
+
+.yz-take__notice { display: flex; align-items: baseline; gap: 10px; }
+/* 錯誤級的提示要學生自己按掉，不能靠下一則訊息把它蓋掉。 */
+.yz-take__noticex {
+  flex: 0 0 auto;
+  font-size: 11.5px; color: var(--ink-2);
+  border-bottom: 1px dotted var(--rule);
+  min-height: 44px; padding: 0 4px;
+}
+.yz-take__noticex:hover { color: var(--ink); }
+
+/* 存檔送不出去。狀態列右上角那 11.5px 的最淺墨色承載著整場考試最
+   重要的一則資訊，所以送不出去的時候它必須換一種顏色與字重——
+   而真正說明「你現在該做什麼」的是它下面那條 role="alert" 的橫幅。 */
+.yz-take__save--bad { color: var(--mark); font-weight: 600; }
+
+/* 交卷之後：作答題數少於總題數時上硃砂色。它現在與「這是一個正常的
+   標題」長得一樣。 */
+.yz-take__short { color: var(--mark); }
+
+/* 「交出去了」與「還沒」必須一眼分得出來。 */
+.yz-take__done { border-left: 2px solid var(--ink); }
+.yz-take__donemark {
+  font-family: var(--font-doc); font-size: 21px; font-weight: 600;
+  letter-spacing: .06em;
+}
+.yz-take__donesub { font-size: 12.5px; color: var(--ink-2); margin-top: 4px; }
+
+/* ── 數學式不可以撐破版面 ─────────────────────────────────────
+   `.katex-display` 的橫捲前面（約 236 行）已經處理了，**行內式沒有**。
+   KaTeX 的行內輸出多數情況下會在運算子處斷行，所以一般的長式子沒事；
+   但單一個不可斷的結構（\dfrac、\overline、行內矩陣、\sqrt 包一長串）
+   會產生一個拆不開的 .base，那一塊多寬就撐多寬。
+
+   而 .yz-shell__main 有 overflow-y: auto，依 CSS 規範它的 overflow-x
+   會被計算成 auto——所以溢出的結果不是被切掉，是**整個考試畫面可以
+   左右拉**，而 position: sticky 只固定它宣告的那一軸，倒數與交卷鈕
+   會跟著滑出螢幕。量出來：390px 下一條 \dfrac 讓 .yz-shell__main 的
+   scrollWidth 到 435，倒數與交卷鈕各往左移 45px。
+
+   做法與獨立公式一致：讓溢出留在那一段文字裡面，不要傳染給整頁。 */
+.yz-take__stem .yz-math,
+.yz-take__stimulus .yz-math,
+.yz-take__optbody .yz-math {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+/* 選項是 flex，不給 min-width:0 的話這個項目不會縮，overflow 也就
+   永遠不會發生——它會直接把整列推寬。 */
+.yz-take__optbody { flex: 1 1 auto; min-width: 0; }
+
+/* ── 觸控目標 ─────────────────────────────────────────────────
+   量出來的（390px）：選項 366×47–76 合格，其餘三個都不合格——
+   題號格 34×34、標記待複查 58×21、底列的按鈕 118×34。
+   44px 是 WCAG 2.5.5 的下限，而 .yz-take__opt 上面那段註解證明
+   這條規則本來就知道，只是沒有套到其他元件上。 */
+@media (max-width: 620px) {
+  /* 題號欄改成一排橫捲。25 格 × 44px 排不進 390px，換行的話是四排
+     176px——比原本的 127px 更糟。橫捲之後這一塊從 127px 降到約 56px，
+     而且每一格都按得到。目前這一格由 JS 捲進視野（見作答頁的
+     scrollIntoView），所以不會出現「這一排停在第 7 題不動」。 */
+  .yz-take__nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    padding: 6px 12px;
+  }
+  .yz-take__nav::-webkit-scrollbar { display: none; }
+  .yz-take__num { flex: 0 0 auto; width: 44px; height: 44px; font-size: 13.5px; }
+
+  /* 標記待複查：原本沒有 padding、沒有 min-height，只有一條點線底線，
+     而且被 margin-left:auto 推到最右邊——單手拿手機時那是拇指最難
+     構到的角落。 */
+  .yz-take__flag {
+    display: inline-flex; align-items: center;
+    min-height: 44px; padding: 0 10px;
+    font-size: 12.5px;
+    /* 桌機那條點線底線在 44px 高的盒子裡會浮在文字下面十幾 px，
+       看起來像沒對齊的裝飾而不是一顆按鈕。手機上改成整圈細框。 */
+    border: 1px solid var(--rule); border-radius: var(--r-sm);
+  }
+  .yz-take__flag--on { border-color: var(--mark); }
+  .yz-take__noticex {
+    border: 1px solid var(--rule); border-radius: var(--r-sm);
+    display: inline-flex; align-items: center;
+  }
+
+  /* 交卷是整場考試最後一個、也最不能按錯的動作，而它繼承的
+     .yz-btn（padding 5px 14px + font-size 12.5px）只有 34px 高。 */
+  .yz-take__foot .yz-btn { min-height: 44px; }
+
+  /* 警示夾在狀態列與題號欄之間而且黏著，所以它每多一行都是從題目
+     那邊拿走的。字級與行距壓緊，並且把 .yz-note 為段落間距留的
+     14px 下緣去掉——這裡它下面就是題號欄。 */
+  .yz-take__notice { padding: 6px 12px 0; }
+  .yz-take__top .yz-note {
+    font-size: 12px; line-height: 1.6;
+    margin-bottom: 0; padding: 6px 9px;
+  }
+  /* 兩則警示同時出現（存不進去 ＋ 剩五分鐘）是最壞的情況，而它剛好
+     是學生最需要看到題目的時候。超過就讓警示自己捲，不要把題目推
+     到螢幕外面。 */
+  .yz-take__alerts { max-height: 26vh; overflow-y: auto; overscroll-behavior: contain; }
+
+  /* iOS Safari 對計算字級小於 16px 的輸入框，在對焦時會自動放大版面
+     而且離開之後不會縮回去——放大之後倒數與交卷鈕都在螢幕外。
+     同一份 CSS 的選填題格位（.yz-take__slot .yz-in）已經為此寫了
+     16px，只是非選的 textarea 漏了。 */
+  .yz-take__text { font-size: 16px; }
+}
+
+/* ── 題目編輯 ─────────────────────────────────────────────── */
+
+/* 題目內頁的編輯區。每一段之間用髮絲線分隔，與匯入校對頁同一套語言
+   （.yz-fieldset），不用卡片堆疊。 */
+.yz-qedit { margin-top: 6px; }
+.yz-qedit fieldset { border: none; padding: 0; margin: 18px 0 0; }
+
+/* 題幹的即時預覽。**這一塊不是裝飾**：老師打的是 `$\frac{3}{4}$`，
+   而學生看到的是排出來的分數——中間任何一個大括號打錯，只有排出來
+   才看得見。所以預覽緊貼在輸入框下面，不是收在另一個分頁裡。 */
+.yz-qedit__preview {
+  margin: -4px 0 4px;
+  padding: 8px 10px;
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-doc);
+  font-size: 14px;
+  line-height: var(--lh-doc);
+  min-height: 38px;
+}
+.yz-qedit__previewlabel {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-bottom: 2px;
+}
+
+.yz-qedit__stimulus {
+  font-family: var(--font-doc);
+  font-size: 13.5px;
+  line-height: var(--lh-doc);
+}
+
+/* 題型與配分並排：它們都很短，各佔一整行只是浪費捲動。 */
+.yz-qedit__pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+
+/* 選項一列一列排，答案那一列用左邊的實心線標出來——與 .yz-opt 的
+   「答案用印刷體圓點」同一個想法：不用綠色藥丸。 */
+.yz-qedit__rows { list-style: none; margin: 0 0 10px; padding: 0; }
+.yz-qedit__row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0 4px 8px;
+  border-left: 2px solid transparent;
+}
+.yz-qedit__row--ans { border-left-color: var(--ink); background: var(--select); }
+.yz-qedit__row .yz-in { flex: 1 1 auto; min-width: 0; }
+.yz-qedit__label { flex: 0 0 56px; text-align: center; }
+/* 勾選框本身只有 13px。整個方格放大到 26px 可點區域，圖形不變——
+   iPad 上點不中的後果是老師連按好幾次，最後把答案設到別的選項上。 */
+.yz-qedit__pick {
+  flex: 0 0 auto; min-width: 26px; min-height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+
+/* 知識點的勾選項排成一片，不是一行一個——一科可能有三四十個。 */
+.yz-qedit__kps .yz-chips { gap: 4px 18px; }
+.yz-qedit__kps .yz-check { margin: 0; }
+
+/* 「用在哪裡」：卷子與底下的任務。巢狀清單，靠縮排表示從屬。 */
+.yz-qedit__uses { list-style: none; margin: 0; padding: 0; font-size: 12.5px; line-height: 1.9; }
+.yz-qedit__uses ul { list-style: none; margin: 0 0 6px; padding-left: 18px; color: var(--ink-2); }
+.yz-qedit__uses > li { margin-bottom: 6px; }
+
+.yz-qstatus__now { font-size: 12.5px; color: var(--ink-2); margin-bottom: 8px; }
+
+/* 已送分。**紅字而不是色塊**：它是校對記號，不是狀態藥丸。
+   這一個標記存在的理由是那一題的答對率會停在 3% 而得分率是 100%，
+   沒有它，下一個看成績頁的人只會覺得統計壞了。 */
+.yz-award {
+  font-family: var(--font-doc);
+  font-size: 11.5px;
+  color: var(--mark);
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .yz-qedit__pair { grid-template-columns: 1fr; }
+  .yz-qedit__row { flex-wrap: wrap; }
+  .yz-qedit__label { flex: 0 0 44px; }
+}

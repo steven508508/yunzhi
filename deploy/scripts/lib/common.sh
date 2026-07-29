@@ -271,6 +271,30 @@ pg_scalar() {
   pg_exec psql -U "${POSTGRES_USER}" -d "${db}" -tAc "$1" 2>/dev/null | tr -d '\r'
 }
 
+# 單句查詢，**跨所有租戶**。
+#
+# 業務資料表全部開著 RLS（ENABLE ＋ FORCE），而 FORCE 的意思是
+# **連表格擁有者也逃不掉**。POSTGRES_USER 正是擁有者，所以維運腳本
+# 用 pg_scalar 去數 attempts 或 ai_usage_logs，拿到的一律是 0 ——
+# 不報錯、不警告，看起來就像「現在沒有人在考試」。
+#
+# 這是最危險的一種錯：升級腳本的「有人在考試就不升級」照這條路寫，
+# 會永遠放行。所以維運層要數業務資料時一律走這一支。
+#
+# app.cross_tenant 是 tools/tenancy.mjs 定義的逃生口，設計上就是給
+# 「不屬於任何一家補習班」的程式用的（背景工作者、遷移、備份）。
+# 維運腳本屬於同一類。tools/rls-check.mjs 只掃 .ts/.mjs/.js/.sql，
+# 不掃 shell，所以這裡不會被它擋——但理由要寫下來，不是因為掃不到。
+#
+# `SET` 自己也會在 stdout 印一行命令標籤，所以要 tail -1。
+# 查詢失敗時（表不存在、連不上）留下的是那個 "SET" 字串而不是數字，
+# 呼叫端必須用 `=~ ^[0-9]+$` 判斷，不可以直接當數字用。
+pg_scalar_all_tenants() {
+  local db="${2:-${POSTGRES_DB}}"
+  pg_exec psql -U "${POSTGRES_USER}" -d "${db}" \
+    -tAc "SET app.cross_tenant='on'; $1" 2>/dev/null | tr -d '\r' | tail -1
+}
+
 # 資料庫所在處的 shell（用於 tar 傳輸等）
 pg_sh() {
   local mode; mode="$(detect_mode)"

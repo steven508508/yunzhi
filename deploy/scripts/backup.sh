@@ -99,6 +99,16 @@ else
 fi
 
 # ── 3. 物件儲存 ─────────────────────────────────────────────────
+#
+# 失敗的後果值得寫清楚：資料庫還原之後題目文字全都在，但每一道
+# 「如右圖」的題目變成一片空白，每一份題本原檔消失。而完成訊息會說
+# 「資料表 68 張、使用者 213 位」，看起來完全正常。
+#
+# 所以這裡要做兩件事：**在檔案上留下痕跡**（manifest 的
+# includesObjects 與 objectCount，讓還原端問得出來），
+# 以及**在畫面上講出後果**（不是一句「匯出失敗」）。
+OBJECTS_OK=false
+OBJ_COUNT=0
 if (( INCLUDE_OBJECTS )); then
   info "匯出物件儲存…"
   mkdir -p "${WORK}/objects"
@@ -107,10 +117,15 @@ if (( INCLUDE_OBJECTS )); then
         mc mirror --quiet local/${S3_BUCKET} /tmp/mirror >/dev/null 2>&1
         tar -cf - -C /tmp/mirror . ; rm -rf /tmp/mirror" 2>/dev/null \
       | tar -xf - -C "${WORK}/objects" 2>/dev/null; then
-    obj_count="$(find "${WORK}/objects" -type f 2>/dev/null | wc -l)"
-    ok "物件 ${obj_count} 個"
+    OBJ_COUNT="$(find "${WORK}/objects" -type f 2>/dev/null | wc -l)"
+    OBJECTS_OK=true
+    ok "物件 ${OBJ_COUNT} 個"
   else
-    warn "物件儲存匯出失敗。題目文字仍在資料庫中，但**圖片與題本原檔不在這份備份裡**。"
+    err "物件儲存匯出失敗。"
+    err "這份備份**只有資料庫**：題目文字在，題本原檔與題目附圖不在。"
+    dim "用它還原出來的系統，每一道帶圖的題目是空白的，而畫面上不會報錯。"
+    dim "常見原因：MinIO 沒起來（docker compose ps minio）、S3_SECRET_KEY 不對。"
+    dim "manifest 已記下 includesObjects: false，還原時 restore.sh 會擋一次。"
   fi
 else
   info "已指定 --no-objects，略過物件儲存。"
@@ -130,7 +145,8 @@ cat > "${WORK}/manifest.json" <<EOF
   "schemaHash": "${schema_hash}",
   "postgres": { "database": "${POSTGRES_DB}", "sizeBytes": ${db_size_bytes}, "dumpFormat": "custom" },
   "walArchive": ${WAL_ARCHIVE_ENABLED:-true},
-  "includesObjects": $( ((INCLUDE_OBJECTS)) && echo true || echo false ),
+  "includesObjects": ${OBJECTS_OK},
+  "objectCount": ${OBJ_COUNT},
   "encrypted": ${BACKUP_ENCRYPTION_ENABLED:-true},
   "envKeys": [$(grep -oE '^[A-Z_]+=' "${YZ_ROOT}/.env" 2>/dev/null | tr -d '=' | sed 's/.*/"&"/' | paste -sd, - || echo '')]
 }
@@ -197,12 +213,24 @@ ok "$(basename "${ARCHIVE}")"
 dim "位置：${ARCHIVE}"
 dim "大小：$(human_size "${final_size}")"
 dim "耗時：${elapsed} 秒"
+if [[ "${OBJECTS_OK}" == true ]]; then
+  dim "物件：${OBJ_COUNT} 個（題本原檔與題目附圖）"
+else
+  # 完成訊息不可以看起來一切正常。這一份備份還原出來會缺圖，
+  # 而那是還原完成之後才會被學生發現的事。
+  err "物件：**沒有**。這份備份只含資料庫。"
+fi
 
 if (( ! QUIET )); then
   echo
   warn "備份完成不等於備份可用。"
   dim "定期執行還原演練：./deploy/scripts/verify-restore.sh"
   dim "未經還原驗證的備份，在真的需要它的那一天可能是壞的。"
+  if [[ "${OBJECTS_OK}" != true ]] && (( INCLUDE_OBJECTS )); then
+    echo
+    err "這一份不要當成完整備份。"
+    dim "排除 MinIO 的問題之後重跑一次：./deploy/scripts/backup.sh"
+  fi
 fi
 
 # 給呼叫端（upgrade.sh、uninstall.sh）用

@@ -31,7 +31,9 @@ import { scopedPage } from '@/lib/page';
 import { METHOD_LABELS } from '@/lib/gsat.mjs';
 import { checkReleaseChange, releaseControl } from '@/lib/release.mjs';
 import { updateAssignment } from '@/lib/assignment';
+import { awardedOnAssignment } from '@/lib/question';
 import { classStats, mayGrade, mayViewGrades, regradeAssignment } from '@/lib/scoring';
+import { AwardOne } from './Award';
 import { FinalizeOne } from './Finalize';
 import { RegradeAll, RegradeOne } from './Regrade';
 import { ReleaseControl } from './Release';
@@ -227,6 +229,10 @@ export default async function AssignmentGradesPage({
 
     const mayEdit = await mayGrade(user, exists.paper.subjectId);
     const stats = await classStats(assignmentId);
+    // 哪幾題被送過分。**沒有這一段的話送分是看不見的**：那一題的
+    // 答對率停在 3%、平均得分率卻是 100%，而下一個看這一頁的人
+    // 只會覺得統計壞掉了。
+    const awarded = await awardedOnAssignment(assignmentId);
     type ScoreRow = (typeof stats.scores)[number];
     type QRow = (typeof stats.questions)[number];
     type OpenRow = (typeof stats.unfinished)[number];
@@ -583,6 +589,13 @@ export default async function AssignmentGradesPage({
               答對率的分母是交卷人數，<strong>未作答計為答錯</strong>——老師問的是
               「這一題全班有多少人會」。多選題的「平均得分率」會高於答對率，
               那個差就是部分給分吃掉的部分。
+              {awarded.size > 0 && (
+                <>
+                  　標成「已送分」的那 {awarded.size} 題<strong>不論作答一律得滿分</strong>
+                  ，所以它的平均得分率是 100%，而答對率仍然是本來有多少人會——
+                  那個差是刻意留著的。
+                </>
+              )}
             </p>
             <Table
               caption="各題答對率"
@@ -604,6 +617,27 @@ export default async function AssignmentGradesPage({
                   numeric: true,
                   cell: (q: QRow) =>
                     q.needsReview ? <span className="yz-warn">{q.needsReview}</span> : '',
+                },
+                {
+                  key: 'g',
+                  head: mayEdit ? '送分' : <span className="yz-sr">送分</span>,
+                  cell: (q: QRow) =>
+                    mayEdit ? (
+                      <AwardOne
+                        assignmentId={assignmentId}
+                        questionId={q.questionId}
+                        order={q.order}
+                        score={q.score}
+                        awarded={awarded.has(q.questionId)}
+                        affected={stats.submitted}
+                      />
+                    ) : awarded.has(q.questionId) ? (
+                      // 改不動的人也要看得見這一題被送過分，否則他會拿著
+                      // 一份「答對率 3%、得分率 100%」的統計去問人。
+                      <span className="yz-award">已送分</span>
+                    ) : (
+                      ''
+                    ),
                 },
               ]}
               rows={stats.questions}

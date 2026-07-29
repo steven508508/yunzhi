@@ -225,7 +225,7 @@ sudo chown -R "$(id -un):$(id -gn)" /var/backups/yunzhi
 # 三個端點
 curl localhost:3000/api/healthz    # {"alive":true,...}      行程活著
 curl localhost:3000/api/readyz     # {"ready":true,...}      資料庫與 Redis 都通
-curl localhost:3000/api/version    # {"appVersion":"0.20.0"} 現在跑的是哪一版
+curl localhost:3000/api/version    # {"appVersion":"0.21.0"} 現在跑的是哪一版
 
 # 容器狀態（全部要是 running，web / postgres / redis / minio 要是 healthy）
 docker compose ps
@@ -646,17 +646,92 @@ ls -lh /var/backups/yunzhi/
 ./deploy/scripts/restore.sh /var/backups/yunzhi/yunzhi-20260728-031500.tar.gz
 ```
 
+還原時如果那份備份不含物件儲存，腳本會在**覆蓋資料庫之前**停下來要你
+打一次 `RESTORE WITHOUT OBJECTS`。那不是形式——用一份沒有物件的備份
+還原，出來的系統每一道「如右圖」的題目都是空白的。
+
+### 異地備份與金鑰保管
+
+**這一節是「這台機器毀了會怎樣」的答案，預設狀態的答案是「全沒了」。**
+
+裝好之後的預設是：
+
+| 東西 | 在哪裡 |
+|---|---|
+| 資料庫 | 這台機器的磁碟 |
+| 每日備份 | **同一顆磁碟**（`/var/backups/yunzhi`） |
+| 解密備份用的 `BACKUP_ENCRYPTION_KEY` | **同一台機器**的 `.env` |
+
+三樣東西在同一個籃子裡。磁碟壞掉、機器被偷、機房淹水、勒索軟體加密整台——
+任何一種都會讓資料庫與全部備份一起消失，而且備份是加密的，
+**就算你有一份複本、沒有那把金鑰，它在數學上也還原不回來**。
+
+`doctor.sh` 會提醒這件事（`backup.offsite`），設定好之後那一項轉綠。
+
+**第一步：把金鑰放到機器以外的地方。** 今天就做，五分鐘：
+
+```bash
+grep '^BACKUP_ENCRYPTION_KEY=' .env
+```
+
+把那一整行貼進密碼管理器，或印出來鎖進抽屜。**不要只存在這台機器上，
+也不要只存在同一間機房的另一台機器上。**
+
+**第二步：把備份複製到別的地方。** 系統支援任何 S3 相容端點
+（另一台機器上的 MinIO、NAS 的 S3 服務、雲端物件儲存都可以）。
+在 `.env` 填四個欄位：
+
+```bash
+BACKUP_REMOTE_ENDPOINT=https://s3.你的儲存空間
+BACKUP_REMOTE_BUCKET=yunzhi-backup
+BACKUP_REMOTE_ACCESS_KEY=<存取金鑰>
+BACKUP_REMOTE_SECRET_KEY=<秘密金鑰>
+```
+
+```bash
+docker compose up -d backup     # 套用設定
+docker compose logs --tail 30 backup
+```
+
+下一次備份完成後日誌會出現「已複製到異地」。沒有出現就是設定不對——
+那一行的下一句會寫「異地複製失敗——這份備份只存在本機磁碟上」。
+
+**沒有 S3 端點可用時的替代做法**，一樣有效，只是要自己排程：
+
+```bash
+# 例：每天 05:00 把最新的備份 rsync 到另一台機器
+# crontab -e
+0 5 * * * rsync -a --delete-after \
+  $(ls -t /var/backups/yunzhi/yunzhi-*.tar.gz* | head -4) \
+  備份帳號@另一台機器:/srv/yunzhi-backup/
+```
+
+**第三步：驗證異地那一份真的能用。** 一份沒有被還原過的異地備份
+與沒有備份的差別只是心理上的。把它抓回來跑一次：
+
+```bash
+./deploy/scripts/verify-restore.sh /path/to/從異地抓回來的備份.tar.gz.enc
+```
+
 ### 升級
 
 ```bash
 git fetch --tags
-git checkout v0.20.0
+git tag -l 'v*' --sort=-v:refname | head -5     # 有哪些版本可以升
+git checkout v<要升到的版本>                     # 例如最上面那一個
 ./deploy/scripts/upgrade.sh
 ```
+
+**不要照抄某一份文件裡寫死的版本號。** 文件會過期，而 checkout 到一個
+比現在還舊的標籤是**會成功的**——沒有任何錯誤訊息，然後你裝出一個少了
+幾條動線的系統。要升到哪一版由 `git tag` 的輸出決定，不是由文件決定。
 
 它會：檢查有沒有人正在考試 → 記錄回滾點 → 完整備份 → 建置新版
 （這一步失敗不影響現有服務）→ 進維護模式 → 遷移 → 重啟 → 驗證，
 失敗自動回滾。
+
+第一步是真的會擋的：有任何一份作答的狀態是「進行中」，腳本就中止並
+告訴你有幾份。要在考試中硬升級得自己加 `--force`。
 
 ### 回滾
 
@@ -677,6 +752,22 @@ git checkout v0.20.0
 ```bash
 curl localhost:3000/api/version
 ```
+
+**回滾需要舊版的映像還在這台機器上。** 磁碟滿的時候最自然的動作是
+`docker image prune`，而它會把舊版映像刪掉——離線 tarball 部署的目錄
+裡沒有 `.git`，所以連「重新建置舊版」這條退路也是斷的。
+`rollback.sh` 會在動資料庫**之前**先檢查這件事並告訴你怎麼辦，
+但最省事的做法是每次升級成功之後先把舊版存起來：
+
+```bash
+OLD=$(curl -s localhost:3000/api/version | grep -oP '"appVersion":"\K[^"]+')
+mkdir -p /var/backups/yunzhi/images
+docker save "yunzhi/web:${OLD}" "yunzhi/worker:${OLD}" "yunzhi/ai:${OLD}" \
+  | gzip > "/var/backups/yunzhi/images/yunzhi-${OLD}.tar.gz"
+```
+
+要用的時候 `gunzip -c yunzhi-<版本>.tar.gz | docker load`。
+留最近兩版就夠了，再舊的資料庫 schema 也對不上。
 
 ### 改設定之後套用
 

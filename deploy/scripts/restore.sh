@@ -6,13 +6,17 @@
 #   ./deploy/scripts/restore.sh --latest
 #   ./deploy/scripts/restore.sh <備份檔> --to "2026-07-27 14:30:00"   # 時間點還原
 #   ./deploy/scripts/restore.sh <備份檔> --into yunzhi_drill          # 還原到另一個資料庫（演練用）
+#   ./deploy/scripts/restore.sh <備份檔> --skip-objects                # 只還原資料庫，不動物件儲存
 #
-# 三個安全設計：
+# 四個安全設計：
 #   1. 還原前一定先備份現況（除非 --no-safety-backup）。
 #      「還原了才發現拿錯備份」是很常見的，而那時原本的資料已經沒了。
 #   2. schema hash 不符時要求明確確認。用新版程式讀舊版 schema
 #      會以難以預料的方式壞掉，而且往往不是立刻壞。
 #   3. --into 讓演練不碰正式資料庫。
+#   4. 物件儲存缺漏會在**覆蓋資料庫之前**就擋下來。缺了它，還原出來的
+#      系統是「題目文字都在、每一道帶圖的題目是空白」，而完成訊息
+#      看起來完全正常 —— 那是最難被發現的一種還原失敗。
 
 # shellcheck source=lib/common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
@@ -32,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     --no-safety-backup) SAFETY_BACKUP=0; shift ;;
     --skip-objects) SKIP_OBJECTS=1; shift ;;
     --yes|-y) export YZ_ASSUME_YES=1; shift ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     -*) die "不認得的參數：$1" ;;
     *) ARCHIVE="$1"; shift ;;
   esac
@@ -102,10 +106,14 @@ fi
 ok "解壓完成"
 
 # ── 中繼資料與相容性 ────────────────────────────────────────────
+B_OBJECTS="unknown"
+B_OBJCOUNT="unknown"
 if [[ -f "${WORK}/manifest.json" ]]; then
   b_ver="$(grep -oP '"appVersion":\s*"\K[^"]+' "${WORK}/manifest.json" || echo unknown)"
   b_time="$(grep -oP '"createdAt":\s*"\K[^"]+' "${WORK}/manifest.json" || echo unknown)"
   b_hash="$(grep -oP '"schemaHash":\s*"\K[^"]+' "${WORK}/manifest.json" || echo unknown)"
+  B_OBJECTS="$(grep -oP '"includesObjects":\s*\K(true|false)' "${WORK}/manifest.json" || echo unknown)"
+  B_OBJCOUNT="$(grep -oP '"objectCount":\s*\K[0-9]+' "${WORK}/manifest.json" || echo unknown)"
   info "備份建立於 ${b_time}，版本 ${b_ver}"
 
   cur_ver="${APP_VERSION:-$(cat "${YZ_ROOT}/VERSION" 2>/dev/null || echo unknown)}"
@@ -118,6 +126,61 @@ if [[ -f "${WORK}/manifest.json" ]]; then
     dim "還原後請立刻執行遷移：docker compose run --rm migrate"
     (( IS_DRILL )) || confirm_phrase "結構不符，仍要繼續？" "RESTORE ANYWAY"
   fi
+fi
+
+# ── 物件儲存的可用性 ────────────────────────────────────────────
+#
+# **這一段要在覆蓋資料庫之前跑完，不是等到還原完才發現。**
+#
+# 原本的判斷是還原到最後一步的 `[[ -d "${WORK}/objects" ]]`：目錄不在
+# 就靜靜跳過。於是最壞的一條路是完全無聲的——資料庫還原成功、
+# 完成訊息說「資料表 68 張、使用者 213 位」，而每一道「如右圖」的題目
+# 是空白的、每一份題本原檔不見了，沒有人在過程中看到任何一個字。
+#
+# 三種狀態要分開，因為使用者要做的事不一樣：
+#   ok       備份裡有物件，照原樣還原
+#   absent   備份本身就沒有物件（備份當下 MinIO 掛了，或用了 --no-objects）
+#   mismatch 備份說有物件，但解壓出來的目錄不在或是空的 → 備份檔壞了
+OBJECTS_STATE=ok
+if (( SKIP_OBJECTS )); then
+  OBJECTS_STATE=skipped
+elif [[ ! -d "${WORK}/objects" ]] || [[ -z "$(ls -A "${WORK}/objects" 2>/dev/null)" ]]; then
+  if [[ "${B_OBJECTS}" == "true" ]]; then
+    OBJECTS_STATE=mismatch
+  else
+    OBJECTS_STATE=absent
+  fi
+else
+  have_objs="$(find "${WORK}/objects" -type f 2>/dev/null | wc -l)"
+  if [[ "${B_OBJCOUNT}" =~ ^[0-9]+$ ]] && (( have_objs < B_OBJCOUNT )); then
+    OBJECTS_STATE=mismatch
+  fi
+fi
+
+if (( ! IS_DRILL )); then
+  case "${OBJECTS_STATE}" in
+    ok)
+      if [[ "${B_OBJCOUNT}" =~ ^[0-9]+$ ]]; then
+        ok "物件儲存：${B_OBJCOUNT} 個，備份裡都在"
+      else
+        ok "物件儲存：備份裡有（這份備份沒記數量）"
+      fi ;;
+    skipped)
+      warn "已指定 --skip-objects：物件儲存不還原。"
+      dim "題目文字會還原，圖片與題本原檔維持現在 MinIO 裡的內容。" ;;
+    absent)
+      err "這份備份**不含物件儲存**。"
+      err "還原之後：題目文字都在，但每一道「如右圖」的題目會是空白，題本原檔也不在。"
+      dim "備份當下 MinIO 連不上、或那次備份帶了 --no-objects，都會是這樣。"
+      dim "先確認有沒有別的備份含物件：ls -t ${BACKUP_DIR}/yunzhi-*.tar.gz*"
+      confirm_phrase "確定要用一份沒有圖的備份還原？" "RESTORE WITHOUT OBJECTS" ;;
+    mismatch)
+      err "這份備份說它含物件儲存，但解壓出來對不上。"
+      err "manifest 記的是 ${B_OBJCOUNT} 個，實際解出 ${have_objs:-0} 個。"
+      dim "這代表備份檔本身不完整（打包時被中斷，或磁碟寫滿）。"
+      dim "換一份備份，或加 --skip-objects 只還原資料庫。"
+      die "不用一份對不上的備份覆蓋資料庫。" ;;
+  esac
 fi
 
 # ── 安全備份 ────────────────────────────────────────────────────
@@ -262,7 +325,9 @@ if [[ -n "${TARGET_TIME}" ]]; then
 fi
 
 # ── 物件儲存 ────────────────────────────────────────────────────
-if (( ! SKIP_OBJECTS )) && (( ! IS_DRILL )) && [[ -d "${WORK}/objects" ]]; then
+# 狀態在上面（覆蓋資料庫之前）就決定好了，這裡只負責執行與回報。
+OBJECTS_RESTORED=0
+if (( ! IS_DRILL )) && [[ "${OBJECTS_STATE}" == "ok" ]]; then
   info "還原物件儲存…"
   if tar -cf - -C "${WORK}/objects" . 2>/dev/null | s3_sh "
         rm -rf /tmp/restore && mkdir -p /tmp/restore && tar -xf - -C /tmp/restore
@@ -270,8 +335,13 @@ if (( ! SKIP_OBJECTS )) && (( ! IS_DRILL )) && [[ -d "${WORK}/objects" ]]; then
         mc mirror --quiet --overwrite /tmp/restore local/${S3_BUCKET} >/dev/null 2>&1
         rm -rf /tmp/restore" 2>/dev/null; then
     ok "物件儲存已還原"
+    OBJECTS_RESTORED=1
   else
-    warn "物件儲存還原失敗。題目文字已還原，但圖片與題本原檔可能缺失。"
+    # 這裡不 die：資料庫已經還原完了，中止只會讓應用停在停機狀態。
+    # 但完成訊息必須說出來，而且要給下一步。
+    err "物件儲存還原失敗。資料庫已經還原，圖片與題本原檔沒有。"
+    dim "MinIO 是否在跑：docker compose ps minio"
+    dim "排除之後可以只補物件：./deploy/scripts/restore.sh ${ARCHIVE}"
   fi
 fi
 
@@ -301,6 +371,21 @@ elapsed=$(( $(date +%s) - started ))
 section "完成"
 ok "資料表 ${n_tables} 張、使用者 ${n_users} 位、租戶 ${n_tenants} 個"
 dim "耗時 ${elapsed} 秒（RTO 參考值）"
+
+# 「還原完成」這四個字不可以在缺圖的情況下單獨出現。
+# 上面那一行（68 張表、213 位使用者）看起來永遠是正常的。
+if (( ! IS_DRILL )); then
+  case "${OBJECTS_STATE}" in
+    ok)
+      if (( OBJECTS_RESTORED )); then
+        ok "物件儲存已還原（題本原檔與題目附圖）"
+      else
+        err "物件儲存**沒有**還原成功——帶圖的題目會是空白的。"
+      fi ;;
+    skipped) warn "物件儲存依 --skip-objects 未還原。" ;;
+    absent)  err "這份備份不含物件儲存：帶圖的題目會是空白的，題本原檔不在。" ;;
+  esac
+fi
 
 if (( IS_DRILL )); then
   echo

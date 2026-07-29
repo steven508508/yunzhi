@@ -40,6 +40,7 @@ import type { Prisma } from '@prisma/client';
 import { AttemptError, orderOptions, readLayout, type TakeOption } from '@/lib/attempt';
 import { slotList, splitAlternatives } from '@/lib/grading.mjs';
 import { prisma } from '@/lib/prisma';
+import { readAward } from '@/lib/questionEdit.mjs';
 import {
   maySeeResult,
   pickExplanation,
@@ -286,6 +287,12 @@ export async function loadAttemptResult(
         answerKeys: true,
         answerSlots: true,
         answerText: true,
+        // 送分的旗標在這一欄裡。**沒有它，被送分而學生剛好空白的
+        // 那一題會變成一個對不起來的帳**：總分含了那 5 分（分數以
+        // 卷面題目為準算出來，不是以作答記錄），但這一題上寫著
+        // 「沒有作答 — / 5 分」，而空白的題目沒有 attempt_answers 列
+        // 可以掛 scoreNote。學生自己加總會少 5 分。
+        scoringRule: true,
         qualityFlags: true,
         group: { select: { stimulus: true, label: true } },
         options: {
@@ -426,7 +433,15 @@ export async function loadAttemptResult(
       correctTexts: options.length > 0 ? null : correctTextList(q.answerText),
       verdict,
       earnedScore: mine?.earnedScore ?? null,
-      scoreNote: mine?.scoreNote ?? null,
+      // 有作答記錄時，計分已經把送分的說明寫進 scoreNote 了
+      // （見 lib/grading.mjs）。沒有作答記錄的那一種在這裡補一句——
+      // 補的是**畫面上的文字，不是一列作答記錄**：憑空生一列等於在
+      // 稽核上宣稱他在交卷之後作答過。
+      scoreNote:
+        mine?.scoreNote ??
+        (readAward(q.scoringRule)
+          ? `這一題全班送分：不論作答，一律得 ${item.score} 分，已經算進你的總分。`
+          : null),
       // 原稿詳解還沒改寫時，這一題連查都不必查——`commit.ts` 在這種
       // 情況下根本沒有建 Explanation 列，原文留在候選題上。
       explanation: pendingRewrite ? null : pickExplanation(explainBy.get(q.id) ?? []),

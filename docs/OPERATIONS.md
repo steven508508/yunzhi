@@ -30,9 +30,24 @@
 ./deploy/scripts/doctor.sh --config-only
 ```
 
-檢查範圍：設定完整性與權限、服務狀態、資料庫與 Redis 連通性、
-連線數餘裕、長交易、磁碟與記憶體、備份新鮮度、**還原演練紀錄**、
-WAL 歸檔狀態。
+檢查範圍：設定完整性與權限、服務狀態（含 `backup` 容器）、
+資料庫與 Redis 連通性、連線數餘裕、長交易、磁碟與記憶體、
+**上一次備份成功與否**、備份新鮮度、異地備份、**還原演練紀錄**、
+WAL 歸檔狀態、本月 AI 用量與預算。
+
+**沒有任何東西會自動跑它。** 沒有 cron、沒有 systemd timer、
+沒有容器會定期執行 `doctor.sh`，首頁也不顯示它的結果。
+所以上面「每週一次」那一列是真的要有人記得——把它排進行事曆，
+或自己加一條：
+
+```bash
+# crontab -e：每天早上七點跑一次，有失敗才寄信
+0 7 * * * cd /opt/yunzhi && ./deploy/scripts/doctor.sh >/tmp/yz-doctor.log 2>&1 \
+  || mail -s "雲端智學健檢有失敗" 你的信箱 </tmp/yz-doctor.log
+```
+
+備份天天失敗這件事，在有人跑 `doctor.sh` 之前是完全靜默的
+（容器 healthcheck 會轉紅，但沒有人在看 `docker compose ps`）。
 
 ---
 
@@ -147,19 +162,71 @@ docker compose exec postgres psql -U yunzhi -d yunzhi -c "
 
 ## AI 成本與預算
 
+### 看用了多少
+
+最省事的一條是 `doctor.sh`——它會印本月的 token 總量、佔上限的百分比，
+以及「單價沒設所以算不出金額」這件事：
+
 ```bash
-docker compose exec postgres psql -U yunzhi -d yunzhi -c "
-  SELECT purpose, tier, count(*) AS calls,
-         sum(\"inputTokens\") AS in_tok, sum(\"outputTokens\") AS out_tok
-  FROM ai_usage_logs WHERE \"createdAt\" > now() - interval '30 days'
-  GROUP BY purpose, tier ORDER BY 5 DESC;"
+./deploy/scripts/doctor.sh          # 看「AI 用量」那一段
 ```
 
-`AI_MONTHLY_TOKEN_BUDGET` 設定月度上限。超過時 AI 功能降級為不可用，
-但**考試、客觀題評分、已生成的解析全部照常運作**。
+要分得更細（哪個功能最貴、哪個模型最貴）就下 SQL。
+**注意 `SET app.cross_tenant`：`ai_usage_logs` 開著 RLS（ENABLE ＋ FORCE），
+少了這一句每一個 sum 都會回 0，而 0 看起來就像「這個月沒有用 AI」。**
 
-`tokens_estimated = true` 表示上游閘道沒回報 usage，數字是估算的 ——
-成本歸因僅供參考，不能當帳單用。
+```bash
+./deploy/scripts/db-shell.sh --readonly -c "
+  SET app.cross_tenant='on';
+  SELECT purpose, tier, model, count(*) AS calls,
+         sum(\"inputTokens\")  AS in_tok,
+         sum(\"outputTokens\") AS out_tok
+  FROM ai_usage_logs WHERE \"createdAt\" >= date_trunc('month', now())
+  GROUP BY 1,2,3 ORDER BY 5 DESC;"
+```
+
+畫面上唯一顯示成本的地方是單一份題本的匯入進度頁，**沒有任何彙總畫面**。
+所以「這個月花了多少」目前只有上面這兩條路。
+
+### 換算成錢
+
+`estimatedCost` 這一欄靠 `.env` 的 `AI_PRICING` 換算，而它**預設是空的**。
+空的時候每一次呼叫都估成 0 元，於是：`ai_usage_logs.estimatedCost` 全是 null、
+`import_jobs.aiCostTwd` 累積成 0、匯入進度頁那一行成本提示（條件是 `> 0`）
+**永遠不會出現**。token 數本身照樣有記，只是換算不出金額。
+
+要有金額就照你的閘道實際單價填 `AI_PRICING`（格式見 `.env.example`），
+然後重啟 worker。它是估算值，不是帳單——`tokens_estimated = true`
+表示上游閘道連 usage 都沒回報，那一列的 token 數本身也是估的。
+
+### 上限超過會怎樣
+
+`AI_MONTHLY_TOKEN_BUDGET` **預設是 0，也就是沒有上限。** 設成正整數之後，
+實際行為是這樣，三點都要知道：
+
+**一、它只擋新的題本匯入。** 超過上限時，下一個匯入工作會直接失敗
+（狀態 FAILED），老師看到的訊息是「本月 AI 用量已達上限（x / y token）。
+題本匯入暫停，但考試、客觀題評分、既有解析都不受影響」。
+**考試、自動計分、已經生成好的解析全部照常**——這是刻意的降級設計，
+預算用完不該讓考試停擺。
+
+**二、它是「開始之前檢查一次」，不是「花到上限就停」。**
+檢查點在每一個匯入工作的**起點**，之後那份題本會跑
+SEGMENTING → EXTRACTING → SOLVING → ANNOTATING 四個 AI 階段、
+幾百次模型呼叫，中間**不再檢查**。所以一份 200 頁的大題本可以一口氣
+把用量衝到上限的 150%。上限的實際語意是
+「已經超支就不給開新的」，不是「本月最多花這麼多」。
+真的要控成本，把上限設得比你能接受的天花板低一截。
+
+**三、改上限要重啟。** 值是從環境變數讀的，沒有畫面可以改：
+
+```bash
+nano .env                                   # 改 AI_MONTHLY_TOKEN_BUDGET
+docker compose up -d --force-recreate worker
+```
+
+半夜老師要匯一份明天要用的題本、而預算剛好滿了——這時候你要 SSH 進去
+做上面這兩件事。想避開就別把上限壓得太貼近實際用量。
 
 ---
 
@@ -174,14 +241,29 @@ df -h                                            # 確認磁碟餘裕
 ```
 
 考試期間**不要**做這些事：升級、金鑰輪替、還原、重啟服務。
-`upgrade.sh` 會主動偵測進行中的考試並拒絕執行。
+
+`upgrade.sh` 的第一步會數 `attempts` 裡狀態是 `IN_PROGRESS` 的作答，
+有任何一份就中止並印出份數。要在考試中硬升級必須自己加 `--force`。
+（這個檢查曾經是死的：它查的是一張不存在的表名，而且沒有帶跨租戶的
+資料庫脈絡——兩件事各自都會讓它永遠回 0。兩個都修掉了。）
+
+**金鑰輪替沒有這種保護。** `gen-secrets.sh --rotate AUTH_SECRET`
+會讓所有人立即登出，包含正在作答的學生，而且沒有任何確認會提到考試。
 
 系統不可用時的降級流程（要印出來放在櫃檯）：
 
-1. 考試中斷 — 學生的作答存在瀏覽器 IndexedDB，恢復後會自動續傳。
-   **請學生不要關閉分頁**，這是最重要的一句話。
+1. 考試中斷 — **答案是即時送到伺服器的，已經送出去的那幾題不會掉；
+   瀏覽器本機沒有任何暫存**，所以最後正在寫、還沒送出的那一題會不見。
+   請學生**不要關閉分頁**，恢復後重新整理就能接續同一份考卷
+   （題目與選項的順序是伺服器記下來的，不會因為重整而改變）。
+   恢復之後請學生回到那份考卷，從最後有作答的那一題檢查起。
 2. 超過 15 分鐘無法恢復 — 改用紙本，事後掃描上傳。
 3. 到班離班通知發不出去 — 櫃檯改用紙本簽到，恢復後補登。
+
+> 這一段以前寫的是「學生的作答存在瀏覽器 IndexedDB，恢復後會自動續傳」。
+> **那個 IndexedDB 不存在**（全前端沒有 IndexedDB、localStorage 或
+> sessionStorage）。印出來放櫃檯的紙上寫一個不成立的保證，比什麼都不寫更糟：
+> 櫃檯會照著它安撫學生，而學生真的會掉最後那幾題。
 
 ---
 

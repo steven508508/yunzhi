@@ -1,5 +1,5 @@
 /**
- * 客觀題自動評分。**純函式、零相依。**
+ * 客觀題自動評分。**純函式、零外部相依。**
  *
  * # 為什麼整段抽成 .mjs
  *
@@ -8,6 +8,11 @@
  * Prisma 引擎、不需要跑起 Next。與資料庫互動的那一層在
  * `lib/scoring.ts`，它只負責「讀出來、算、寫回去」，
  * 所有會算錯的邏輯都在這個檔案裡，而這個檔案有 `tests/grading.test.mjs`。
+ *
+ * 唯一的 import 是同樣純函式的 `questionEdit.mjs`，而且只借一支
+ * `readAward`——「這一題有沒有被送分」的判定必須只有一份。判定各寫
+ * 一份的話，最可能的分歧是「成績頁標著已送分、計分沒有送」：老師按了
+ * 送分、標記亮起來、學生的分數一分都沒動，而沒有人會去比對這兩段程式。
  *
  * # 三條貫穿整份實作的規則
  *
@@ -33,6 +38,7 @@
  *           **計算結果低於零分或全部未作答者以 0 分計**
  *   選填題：整題全對才給分，答錯不倒扣
  */
+import { readAward } from './questionEdit.mjs';
 
 // ═══════════════════════════════════════════════════════════════
 // 文字正規化與數學等價
@@ -595,12 +601,60 @@ export function gradeShortAnswerByRule(answerText, rule, score) {
 const MANUAL_TYPES = new Set(['ESSAY', 'TRANSLATION', 'SHORT_ANSWER']);
 
 /**
- * 一題的計分。把題型分派到上面那幾個函式。
+ * 一題的計分，**含送分**。
+ *
+ * # 為什麼送分是在這裡處理，而不是把分數寫進作答記錄
+ *
+ * 因為計分是可以重跑的。老師按「全班送分」之後若只是把
+ * `attempt_answers.earnedScore` 改成滿分，那麼下一次有人按「重新計分」
+ * （改了另一題的答案、或某位學生的個案）就會照標準答案重算，
+ * 把送分安靜地蓋掉——沒有錯誤訊息，老師幾週後才會發現「我明明送過分」。
+ *
+ * 旗標存在題目上（`Question.scoringRule.awardAll`），每一次計分都重讀，
+ * 所以重算幾次結果都一樣。
+ *
+ * # 為什麼保留原本的對錯判定，只換掉分數
+ *
+ * `isCorrect` 是「這個學生本來會不會這一題」，成績頁的**答對率**就是
+ * 數它。送分時把它一律改成 true 的話，這一題的答對率會變成 100%，
+ * 而那正是老師下一堂課要不要重講的依據——一個被送分的爛題目會看起來
+ * 像全班都學會了。分數歸分數、對錯歸對錯，兩者本來就分開存。
  *
  * @param {object} item 題目端的資料（見 gradeAttempt 的說明）
  * @param {object|null} answer 學生端的資料
  */
 function gradeItem(item, answer) {
+  const base = gradeByType(item, answer);
+  const award = readAward(item.scoringRule);
+  if (!award) return base;
+
+  const score = roundScore(Number(item.score) || 0);
+  // 原判定只在確定的時候提一句。送分的題目多半正是資料有問題的那種
+  // （`needsReview`），那時候說「你原本判定為答錯」是在說謊。
+  const verdict = base.isCorrect === true ? '答對' : base.isCorrect === false ? '答錯' : null;
+  return {
+    ...base,
+    earnedScore: score,
+    // 學生的檢討頁會原樣印出這一句（`AttemptAnswer.scoreNote`）。
+    // 沒有這一句的話，他看到一個滿分卻對不上自己選的答案，
+    // 只會以為系統算錯了。
+    scoreNote:
+      `這一題全班送分：不論作答，一律得 ${formatScore(score)} 分。` +
+      (verdict ? `（你原本的作答判定為${verdict}，送分之後不影響得分。）` : ''),
+    // 送分之後這一題就沒有什麼要人確認的了——留著 needsReview 的話，
+    // 整份作答會一直停在「待評分」，學生永遠等不到成績。
+    needsReview: false,
+    autoGraded: true,
+  };
+}
+
+/**
+ * 照題型分派到上面那幾個計分函式。
+ *
+ * @param {object} item 題目端的資料（見 gradeAttempt 的說明）
+ * @param {object|null} answer 學生端的資料
+ */
+function gradeByType(item, answer) {
   const score = Number(item.score) || 0;
   const type = String(item.type ?? '');
   const a = answer ?? {};

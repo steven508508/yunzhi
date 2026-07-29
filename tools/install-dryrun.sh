@@ -408,6 +408,28 @@ else
     pass "備份加密設定完整"
   fi
 
+  # 異地備份。這一項在裝機當天看起來最不急，而它是唯一一個
+  # 「發生的時候什麼都救不回來」的設定。
+  #
+  # 預設是四個欄位全空，也就是：資料庫在這顆磁碟、每天的備份在**同一顆
+  # 磁碟**、而解密備份用的 BACKUP_ENCRYPTION_KEY 在**同一台機器**的 .env 裡。
+  # 磁碟壞掉或機器被偷，三樣一起沒有；而且備份是加密的，
+  # 就算有人手上有一份複本，沒有那把金鑰在數學上也還原不回來。
+  #
+  # 這裡刻意不是 fail：小型補習班第一天不見得有 S3 端點，
+  # 擋住安裝只會讓人把它註解掉。但它必須被看見一次。
+  if [[ -z "$(env_get BACKUP_REMOTE_ENDPOINT)" || -z "$(env_get BACKUP_REMOTE_BUCKET)" ]]; then
+    if [[ "$(env_get BACKUP_ENCRYPTION_ENABLED)" != "false" ]]; then
+      warned "沒有異地備份：備份、資料庫、解密金鑰三樣都在這一台機器上" \
+        "這台機器毀了就全沒了（金鑰在 .env，.env 也只在這裡）。上線前至少做兩件事：把 BACKUP_ENCRYPTION_KEY 抄進密碼管理器，並設定 BACKUP_REMOTE_*。做法見 docs/UBUNTU.md 的「異地備份與金鑰保管」。"
+    else
+      warned "沒有異地備份：備份與資料庫在同一顆磁碟上" \
+        "磁碟壞掉時兩者一起消失。設定 BACKUP_REMOTE_*，做法見 docs/UBUNTU.md 的「異地備份與金鑰保管」。"
+    fi
+  else
+    pass "異地備份已設定（$(env_get BACKUP_REMOTE_ENDPOINT)）"
+  fi
+
   _ai="$(env_get AI_PROVIDER)"; _ai="${_ai:-mock}"
   if [[ "${_ai}" != "mock" && -z "$(env_get AI_API_KEY)" ]]; then
     fail "AI_PROVIDER=${_ai} 但 AI_API_KEY 是空的" "填入金鑰，或先設 AI_PROVIDER=mock 完成安裝，之後改設定重跑 ./deploy/scripts/docker-install.sh 即可。"

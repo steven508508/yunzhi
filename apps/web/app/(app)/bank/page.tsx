@@ -4,13 +4,28 @@ import { MathText } from '@/components/MathText';
 import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
+import { readAward } from '@/lib/questionEdit.mjs';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * 題庫列表。
+ *
+ * # 為什麼要有狀態這一欄與「已下架」這個篩選
+ *
+ * 原本這一頁只列 `PUBLISHED` 與 `PENDING_REVIEW`。有了下架功能之後，
+ * 那等於**下架是一條單行道**——按下去題目就從這一頁消失，連同把它
+ * 救回來的按鈕。老師會以為題目被刪掉了。
+ *
+ * 所以：預設仍然只看得到還能用的那些（那是他每天要挑題的清單），
+ * 但「已下架」在篩選列上，而且數量看得見。
+ */
+const USABLE = ['PUBLISHED', 'PENDING_REVIEW', 'DRAFT'] as const;
 
 export default async function BankPage({
   searchParams,
 }: {
-  searchParams: Promise<{ subject?: string; q?: string }>;
+  searchParams: Promise<{ subject?: string; q?: string; status?: string }>;
 }) {
   const sp = await searchParams;
   return scopedPage(async (user) => {
@@ -30,20 +45,39 @@ export default async function BankPage({
     orderBy: { order: 'asc' },
   });
 
-  const questions = await prisma.question.findMany({
-    where: {
-      tenantId: user.tenantId,
-      status: { in: ['PUBLISHED', 'PENDING_REVIEW'] },
-      ...(sp.subject ? { subjectId: sp.subject } : {}),
-      ...(sp.q ? { content: { contains: sp.q, mode: 'insensitive' as const } } : {}),
-    },
-    orderBy: { createdAt: 'desc' },
-    take: 100,
-    include: {
-      subject: { select: { name: true } },
-      options: { select: { id: true }, take: 1 },
-    },
-  });
+  const retiredOnly = sp.status === 'RETIRED';
+
+  const [questions, retiredCount] = await Promise.all([
+    prisma.question.findMany({
+      where: {
+        tenantId: user.tenantId,
+        status: retiredOnly ? { in: ['RETIRED'] } : { in: [...USABLE] },
+        ...(sp.subject ? { subjectId: sp.subject } : {}),
+        ...(sp.q ? { content: { contains: sp.q, mode: 'insensitive' as const } } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      include: {
+        subject: { select: { name: true } },
+        options: { select: { id: true }, take: 1 },
+      },
+    }),
+    prisma.question.count({
+      where: {
+        tenantId: user.tenantId,
+        status: 'RETIRED',
+        ...(sp.subject ? { subjectId: sp.subject } : {}),
+      },
+    }),
+  ]);
+
+  const keep = (extra: Record<string, string | undefined>) => {
+    const params = new URLSearchParams();
+    const merged = { subject: sp.subject, q: sp.q, status: sp.status, ...extra };
+    for (const [k, v] of Object.entries(merged)) if (v) params.set(k, v);
+    const s = params.toString();
+    return s ? `/bank?${s}` : '/bank';
+  };
 
   return (
     <div className="yz-app">
@@ -57,14 +91,21 @@ export default async function BankPage({
       </header>
 
       <div style={{ padding: '9px 22px', borderBottom: '1px solid var(--rule)', display: 'flex', gap: 14, fontSize: 12 }}>
-        <Link href="/bank" style={{ fontWeight: sp.subject ? 400 : 600 }}>全部</Link>
+        <Link href={keep({ subject: undefined })} style={{ fontWeight: sp.subject ? 400 : 600 }}>全部</Link>
         {subjects.map((s) => (
-          <Link key={s.id} href={`/bank?subject=${s.id}`} style={{ fontWeight: sp.subject === s.id ? 600 : 400 }}>
+          <Link key={s.id} href={keep({ subject: s.id })} style={{ fontWeight: sp.subject === s.id ? 600 : 400 }}>
             {s.name}
           </Link>
         ))}
+        <span style={{ color: 'var(--rule)' }}>|</span>
+        {/* 下架的題目要找得回來，否則「下架」就是刪除。 */}
+        <Link href={keep({ status: retiredOnly ? undefined : 'RETIRED' })}
+              style={{ fontWeight: retiredOnly ? 600 : 400, color: retiredOnly ? undefined : 'var(--ink-2)' }}>
+          已下架{retiredCount > 0 ? `（${retiredCount}）` : ''}
+        </Link>
         <form style={{ marginLeft: 'auto' }}>
           {sp.subject && <input type="hidden" name="subject" value={sp.subject} />}
+          {sp.status && <input type="hidden" name="status" value={sp.status} />}
           <input name="q" defaultValue={sp.q ?? ''} placeholder="搜尋題幹"
                  style={{ padding: '3px 8px', border: '1px solid var(--rule)', borderRadius: 'var(--r-sm)',
                           background: 'var(--paper-raised)', fontSize: 12, width: 200 }} />
@@ -75,13 +116,17 @@ export default async function BankPage({
         <div className="yz-colbody">
           {questions.length === 0 ? (
             <p style={{ color: 'var(--ink-2)' }}>
-              {sp.q ? `找不到含「${sp.q}」的題目。` : '題庫是空的。先匯入一份題本。'}
+              {retiredOnly
+                ? '沒有下架的題目。'
+                : sp.q
+                  ? `找不到含「${sp.q}」的題目。`
+                  : '題庫是空的。先匯入一份題本。'}
             </p>
           ) : (
             <table className="yz-table">
               <thead>
                 <tr>
-                  <th>題幹</th><th>科目</th><th>題型</th>
+                  <th>題幹</th><th>科目</th><th>題型</th><th>狀態</th>
                   <th className="yz-table__num">配分</th>
                   <th className="yz-table__num">難度</th>
                   <th className="yz-table__num">作答</th>
@@ -95,11 +140,22 @@ export default async function BankPage({
                     <td style={{ maxWidth: 460, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {/* 這一欄是掃視用的，一列只有一行。排出來的式子在這裡
                           仍然比原始碼好認——`$\ce{H2SO4}$` 佔掉的寬度是
-                          「H₂SO₄」的五倍，題幹會被它擠到看不見。 */}
-                      <MathText>{q.content}</MathText>
+                          「H₂SO₄」的五倍，題幹會被它擠到看不見。
+
+                          整段是連結：在這一頁之前題庫沒有內頁，題目進來
+                          就改不動了。點進去才改得到標準答案。 */}
+                      <Link href={`/bank/${q.id}`}>
+                        <MathText>{q.content}</MathText>
+                      </Link>
                     </td>
                     <td style={{ color: 'var(--ink-2)' }}>{q.subject.name}</td>
                     <td style={{ color: 'var(--ink-2)' }}>{TYPE[q.type] ?? q.type}</td>
+                    <td style={{ color: 'var(--ink-2)' }}>
+                      {STATUS[q.status] ?? q.status}
+                      {/* 送過分的題目在列表上就要看得出來：它在每一份卷子上
+                          都是滿分，而畫面上其他地方完全看不出原因。 */}
+                      {readAward(q.scoringRule) && <span className="yz-warn">　已送分</span>}
+                    </td>
                     <td className="yz-table__num">{q.score}</td>
                     <td className="yz-table__num">{q.difficulty?.toFixed(2) ?? '—'}</td>
                     <td className="yz-table__num">{q.responseCount || '—'}</td>
@@ -122,6 +178,9 @@ export default async function BankPage({
 const TYPE: Record<string, string> = {
   SINGLE_CHOICE: '單選', MULTI_CHOICE: '多選', FILL_SLOT: '選填',
   FILL_TEXT: '填空', SHORT_ANSWER: '簡答', ESSAY: '作文', TRANSLATION: '翻譯', TRUE_FALSE: '是非',
+};
+const STATUS: Record<string, string> = {
+  DRAFT: '未校對', PENDING_REVIEW: '待發布', PUBLISHED: '已發布', RETIRED: '已下架',
 };
 const SRC: Record<string, string> = {
   OFFICIAL_PAST: '歷屆試題', TEACHER_ORIGINAL: '老師自編', SCHOOL_EXAM: '校內考卷',

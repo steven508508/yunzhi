@@ -16,7 +16,30 @@ BACKUP_MIN="$(echo "${BACKUP_SCHEDULE}" | awk '{print $1}')"
 #: 有，而且完全靜默。systemd 版本用 Persistent=true 解決了同一件事。
 STATE_FILE=/backups/.last-backup
 
+#: 最後一次失敗的原因。**這是「三個指示燈全綠」的解藥。**
+#:
+#: 原本備份失敗只寫一行容器日誌，而沒有人會去看容器日誌。三層
+#: 指示燈同時是綠的：healthcheck 只看心跳（迴圈裡無條件寫）、
+#: doctor.sh 的服務清單沒有 backup、backup.age 要超過 48 小時才紅。
+#: 於是「天天失敗的備份」的正常狀態是——全綠。
+#:
+#: 它負責的是**原因**，不是「有沒有事」：doctor.sh 讀它（這個目錄
+#: 就是宿主機的 ${BACKUP_DIR}）才說得出「上一次備份為什麼失敗」。
+#: 「有沒有事」由 healthy() 依「多久沒有成功過」判定——因為備份失敗
+#: 最常見的原因就是這顆磁碟出問題，而那時這個檔可能根本寫不進去。
+#: 成功一次就刪掉。
+FAILURE_FILE=/backups/.last-failure
+
 log() { printf '%s [backup] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+#: 記下失敗，順便把原因留給宿主機上的 doctor.sh。
+record_failure() {
+  local reason="$1"
+  log "備份失敗：${reason}"
+  printf '%s|%s\n' "$(date -Iseconds)" "${reason}" > "${FAILURE_FILE}" 2>/dev/null || true
+}
+
+clear_failure() { rm -f "${FAILURE_FILE}" 2>/dev/null || true; }
 
 # ── 物件儲存 ─────────────────────────────────────────────────
 #
@@ -73,15 +96,59 @@ prune_wal() {
   return 0
 }
 
+# ── 磁碟 ─────────────────────────────────────────────────────
+#
+# 磁碟寫滿是這個容器唯一會遇到、而且會**自己把情況推得更糟**的
+# 故障：滿了 → pg_dump 失敗 → 迴圈每 90 秒重試一次 → 每一次都在
+# 一台滿了的機器上寫暫存檔。同一時間 Postgres 寫不進 WAL，
+# 考試中的每一次存檔都失敗，而前端沒有本機暫存。
+#
+# 所以「快滿了」要在還來得及的時候講出來，而且要講在容器日誌的
+# 最上層，不是埋在 pg_dump 的錯誤訊息裡。
+disk_used_pct() {
+  df -P "$1" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}'
+}
+
+warn_if_tight() {
+  local path="$1" label="$2" used
+  [[ -d "${path}" ]] || return 0
+  used="$(disk_used_pct "${path}")"
+  [[ "${used}" =~ ^[0-9]+$ ]] || return 0
+  if (( used >= 90 )); then
+    log "【磁碟】${label} 已用 ${used}%。備份與 Postgres 的 WAL 都寫在這裡——"
+    log "【磁碟】寫滿的下一步是考試中斷。立刻處理：調低 BACKUP_RETENTION_DAYS"
+    log "【磁碟】與 WAL_ARCHIVE_RETENTION_DAYS，或刪掉最舊的幾份備份。"
+    return 1
+  elif (( used >= 80 )); then
+    log "【磁碟】${label} 已用 ${used}%，剩餘空間開始吃緊。"
+  fi
+  return 0
+}
+
+# 暫存目錄的清理**不用 `trap ... RETURN`**。
+#
+# bash 的 RETURN trap 不是函式範圍的：在 do_backup 裡設一次，
+# 它會一直留著，於是**下一個返回的函式**（backup_cycle 的 return）
+# 也會觸發它，而那時 work 這個 local 已經不在了——配上 set -u
+# 就是 `work: unbound variable`，備份迴圈當場整個死掉。
+# 出口只有兩個，寫明白比留一個全域陷阱安全。
 do_backup() {
+  local work rc=0
+  work="$(mktemp -d)"
+  _do_backup "${work}" || rc=1
+  rm -rf "${work}"
+  return "${rc}"
+}
+
+_do_backup() {
+  local work="$1"
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   local out="/backups/yunzhi-${stamp}.tar.gz"
-  local work; work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' RETURN
 
   log "開始備份"
   if ! pg_dump --format=custom --compress=6 --no-owner --no-privileges > "${work}/database.dump"; then
-    log "pg_dump 失敗"; return 1
+    record_failure "pg_dump 失敗（多半是磁碟空間或資料庫連線）"
+    return 1
   fi
 
   # WAL 歸檔以唯讀掛載進來。**只收最近的**：整個目錄複製進每一份
@@ -92,8 +159,11 @@ do_backup() {
       -exec cp {} "${work}/wal/" \; 2>/dev/null || true
   fi
 
-  local has_objects=false
-  if dump_objects "${work}/objects"; then has_objects=true; fi
+  local has_objects=false object_count=0
+  if dump_objects "${work}/objects"; then
+    has_objects=true
+    object_count="$(find "${work}/objects" -type f 2>/dev/null | wc -l)"
+  fi
 
   # 字形對照快取。重裝之後歸零的話，每一家出版社的自製符號字型
   # 都要重新付費問一次視覺模型——那正是這個快取存在的理由。
@@ -102,9 +172,22 @@ do_backup() {
     cp -r /models/. "${work}/models/" 2>/dev/null || true
   fi
 
+  # schemaHash：**日常還原用的正是這一批備份**，而它原本沒有這個欄位。
+  # restore.sh 讀不到時 b_hash 是 unknown，於是「備份的結構與目前不同」
+  # 那道相容性確認整段被跳過——手動 backup.sh 產的備份有保護，
+  # 每天自動產的那些沒有。
+  local schema_hash
+  schema_hash="$(psql -tAc "SELECT md5(string_agg(table_name || column_name || data_type, ',' ORDER BY table_name, column_name)) FROM information_schema.columns WHERE table_schema='public'" 2>/dev/null | tr -d '\r' | head -1)"
+  [[ -n "${schema_hash}" ]] || schema_hash="unknown"
+
+  # objectCount 讓還原端問得出「這份備份該有幾個物件」。沒有它，
+  # 「objects/ 目錄不在」與「這份備份本來就沒有物件」長得一模一樣，
+  # 而 restore.sh 對兩者都只能靜靜跳過。
   cat > "${work}/manifest.json" <<JSON
 {"name":"yunzhi-${stamp}","createdAt":"$(date -Iseconds)","appVersion":"${APP_VERSION:-unknown}",
- "source":"scheduled","includesObjects":${has_objects},"encrypted":${BACKUP_ENCRYPTION_ENABLED:-true}}
+ "source":"scheduled","schemaHash":"${schema_hash}",
+ "includesObjects":${has_objects},"objectCount":${object_count},
+ "encrypted":${BACKUP_ENCRYPTION_ENABLED:-true}}
 JSON
 
   tar -czf "${out}" -C "${work}" .
@@ -119,8 +202,15 @@ JSON
   sha256sum "${out}" > "${out}.sha256"
   log "完成：$(basename "${out}") ($(du -h "${out}" | cut -f1))$(
        [[ "${has_objects}" == true ]] || printf '　※ 不含物件儲存')"
+  if [[ "${has_objects}" != true ]]; then
+    # 這一份還原出來的樣子是：題目文字都在，每一道「如右圖」的題目
+    # 變成一片空白，題本原檔全部消失。而完成訊息看起來完全正常，
+    # 所以這一句必須自己說出後果。
+    log "【注意】這份備份不含物件儲存。用它還原會缺少題本原檔與題目附圖。"
+  fi
 
   date +%s > "${STATE_FILE}"
+  clear_failure
 
   # 異地副本。**與資料庫同一顆磁碟上的備份，在磁碟故障時會一起
   # 陪葬。** 沒設定就明講，不要讓人以為有。
@@ -138,8 +228,29 @@ JSON
   find /backups -maxdepth 1 -name 'yunzhi-*.tar.gz*' ! -name '*.sha256' \
        ! -name '*pre-upgrade*' ! -name '*pre-uninstall*' ! -name '*pre-restore*' \
        -type f -mtime "+${BACKUP_RETENTION_DAYS:-30}" -delete 2>/dev/null || true
+}
+
+#: 一輪備份週期。**WAL 清理與備份成敗解耦，就是在這裡做的。**
+#:
+#: prune_wal 原本是 do_backup 的最後一行，而 pg_dump 失敗時
+#: do_backup 在第一步就 return 1 —— 於是「備份失敗」等於
+#: 「WAL 永遠不清」，而備份失敗最常見的原因正是磁碟滿。
+#: 磁碟滿 → 備份失敗 → WAL 不清 → 磁碟更滿，一條會自己收緊的迴圈。
+#:
+#: 現在 prune_wal 在 pg_dump **之前**就先跑：那是這個容器唯一能
+#: 主動騰出空間的動作，而磁碟吃緊時它比備份本身更急。備份結束後
+#: 再跑一次，把這次 pg_switch_wal 之後歸檔的舊段一併收掉。
+backup_cycle() {
+  warn_if_tight /backups "備份目錄 /backups" || true
+  warn_if_tight /wal_archive "WAL 歸檔 /wal_archive" || true
 
   prune_wal
+
+  local rc=0
+  do_backup || rc=1
+
+  prune_wal
+  return "${rc}"
 }
 
 #: 超過這麼久沒有成功備份就補跑一次。設成一天多一點，
@@ -153,6 +264,32 @@ overdue() {
   (( $(date +%s) - last > STALE_SECONDS ))
 }
 
+#: healthcheck 要回答的問題是「備份這件事現在正常嗎」，
+#: 不是「這個行程還在嗎」。
+#:
+#: docker-compose.yml 的 healthcheck 看的是 /tmp/backup-daemon-alive
+#: 的新鮮度，而心跳原本在迴圈裡**無條件**寫——所以一個天天失敗的
+#: 備份容器，狀態永遠是綠的。現在心跳只在 healthy() 為真時才寫，
+#: 於是「連續失敗到超過保鮮期」會讓心跳停止更新，300 秒後容器轉成
+#: unhealthy，doctor.sh 的服務檢查也就看得到它。
+#:
+#: 判斷刻意留有餘裕：跑過一輪、而上一份成功的備份還在 26 小時內，
+#: 就算健康（中間失敗一次不要緊，下一輪會重試，RPO 也還守得住）。
+#:
+#: **依據是「有沒有成功過」而不是「有沒有失敗紀錄」。** 失敗紀錄寫在
+#: /backups，而備份失敗最常見的原因就是那顆磁碟出問題——寫不進去的話
+#: 標記不會存在，健康狀態就永遠是綠的。恰好在最需要它變紅的時候失效。
+#: 失敗紀錄留給 doctor.sh 當「原因」用，不當「有沒有事」的依據。
+#:
+#: ATTEMPTED 讓全新安裝在跑完第一輪之前保持綠燈：那段補跑可能好幾分鐘，
+#: 把它標成 unhealthy 只會讓裝機的人以為壞了。
+ATTEMPTED=0
+healthy() {
+  (( ATTEMPTED )) || return 0
+  overdue || return 0
+  return 1
+}
+
 log "備份排程啟動：每日 $(printf '%02d:%02d' "${BACKUP_HOUR}" "${BACKUP_MIN}")"
 # 寫**時間戳**而不是 touch 一個空檔。healthcheck 算的是
 # `$(date +%s) - $(cat /tmp/backup-daemon-alive)`，空檔會讓它變成
@@ -162,21 +299,66 @@ log "備份排程啟動：每日 $(printf '%02d:%02d' "${BACKUP_HOUR}" "${BACKUP
 # 「backup 服務有問題」——實際上它正在正常工作。
 date +%s > /tmp/backup-daemon-alive
 
+# 起來的第一件事就是清 WAL，不等第一份備份。
+# 容器如果是在「磁碟已經滿了」的狀態下被重啟的（很常見：滿了 →
+# 有人重啟服務 → 備份容器又起來），這一步是唯一能立刻騰出空間的
+# 動作，而備份本身在空間不足時根本跑不完。
+prune_wal
+
 # 開機時先確認有沒有漏掉的。關機一晚就少一份備份是不能接受的，
 # 而 RPO 15 分鐘的承諾建立在「每天真的有備份」之上。
 if overdue; then
   log "距離上次成功備份已超過 $((STALE_SECONDS / 3600)) 小時，立即補跑"
-  do_backup || log "補跑失敗"
+  backup_cycle || true
+  ATTEMPTED=1
 fi
 
+#: 連續失敗時的退避。
+#:
+#: 原本失敗之後照樣每約 90 秒重試一次，而失敗最常見的原因是磁碟滿——
+#: 於是每 90 秒就在一台已經滿了的機器上再寫一次 pg_dump 的暫存檔，
+#: 把情況推得更深。退避讓它從 5 分鐘一路退到一小時一次：
+#: 該修的還是要人去修，但機器不會在等人的期間繼續自傷。
+FAIL_STREAK=0
+RETRY_AFTER=0          # 下一次可以重試的時間戳（0 = 隨時）
+MAX_BACKOFF=$(( 3600 ))
+
 while true; do
+  now=$(date +%s)
   now_h=$(date +%-H); now_m=$(date +%-M)
-  if (( now_h == BACKUP_HOUR && now_m == BACKUP_MIN )) || overdue; then
-    do_backup || log "備份失敗，稍後再試"
+
+  # 排程時間到了就一定跑（不受退避影響——每天那一次是承諾）；
+  # 補跑則要等退避結束。
+  scheduled=0
+  (( now_h == BACKUP_HOUR && now_m == BACKUP_MIN )) && scheduled=1
+
+  if (( scheduled )) || { overdue && (( now >= RETRY_AFTER )); }; then
+    ATTEMPTED=1
+    if backup_cycle; then
+      FAIL_STREAK=0
+      RETRY_AFTER=0
+    else
+      FAIL_STREAK=$(( FAIL_STREAK + 1 ))
+      backoff=$(( 300 * (1 << (FAIL_STREAK > 4 ? 4 : FAIL_STREAK - 1)) ))
+      (( backoff > MAX_BACKOFF )) && backoff="${MAX_BACKOFF}"
+      RETRY_AFTER=$(( $(date +%s) + backoff ))
+      log "第 ${FAIL_STREAK} 次連續失敗，$(( backoff / 60 )) 分鐘後再試"
+      if ! healthy; then
+        log "【健康狀態】備份已經超過 $((STALE_SECONDS / 3600)) 小時沒有成功，"
+        log "【健康狀態】這個容器會被標成 unhealthy。原因見上方，或跑"
+        log "【健康狀態】./deploy/scripts/doctor.sh（宿主機）。"
+      fi
+    fi
     sleep 61
   fi
+
   # 存活檔要寫**內容**而不是只 touch：healthcheck 檢查的是新鮮度，
   # 而不是「這個檔存不存在」——存在性檢查在行程卡死時永遠是綠的。
-  date +%s > /tmp/backup-daemon-alive
+  #
+  # 而且**只在備份本身健康時才寫**。心跳無條件寫的話，這個檔回答的
+  # 是「行程還活著嗎」，而那個問題的答案在備份天天失敗時也是「是」。
+  if healthy; then
+    date +%s > /tmp/backup-daemon-alive
+  fi
   sleep 30
 done
