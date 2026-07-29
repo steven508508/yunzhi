@@ -13,6 +13,7 @@ import {
   type ResultQuestion,
   type ResultView,
 } from '@/lib/result';
+import { TutorEntry } from './Tutor';
 
 export const dynamic = 'force-dynamic';
 
@@ -401,6 +402,28 @@ function QuestionBlock({ q, attemptId }: { q: ResultQuestion; attemptId: string 
           {q.scoreNote && <p className="yz-review__note">{q.scoreNote}</p>}
 
           <Explanation q={q} />
+
+          {/* 智慧老師擺在解析**下面**，這個順序是刻意的。
+
+              業主要的是「不只看解析，還要有智慧老師幫助」——順序就是
+              那句話：先讀解析，讀不懂再問。倒過來擺的話，學生會在
+              還沒看解析之前就開始問，而他問的第一句一定是
+              「這題怎麼算」，那正是解析已經回答過的東西。
+
+              它同時是三層設限的第三層：**對話框裡沒有「直接看答案」
+              的捷徑，因為答案就在它上面。** 學生想看隨時看得到，
+              但那是他自己往上看，不是 AI 講給他聽。
+
+              `PENDING`（非選題還沒改）的不給入口：這時候連對錯都還
+              沒定，引導會從一個錯的前提出發。 */}
+          {q.verdict !== 'PENDING' && q.type !== 'UNAVAILABLE' && (
+            <TutorEntry
+              attemptId={attemptId}
+              questionId={q.questionId}
+              order={q.order}
+              wrong={wrong}
+            />
+          )}
         </div>
       </details>
     </li>

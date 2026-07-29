@@ -2344,3 +2344,213 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
      這一條擋的是「列印時剛好開著」。 */
   .yz-dialog { display: none !important; }
 }
+
+/* ── 智慧老師 ────────────────────────────────────────────────
+   引導式教學的對話框（檢討頁）與老師端的逐字稿。
+
+   兩件事貫穿這一整段：
+
+   **一、它是紙上的一塊便條，不是一個聊天 App。** 沒有頭像、沒有
+   氣泡的圓角、沒有動畫。這一頁其餘的部分是一份校樣，對話框做成
+   兩個顏色的聊天氣泡會讓它看起來像從別的產品貼過來的。
+
+   **二、手機優先，而手機上唯一真的會出事的是輸入框被鍵盤蓋住。**
+   所以輸入區**留在正常文件流裡**，一行 `position: fixed` 都沒有——
+   iOS 的鍵盤彈出時不改變 fixed 的定位基準，那一種寫法會讓輸入框
+   停在鍵盤底下而且捲不出來。捲動由 JS 那一側的 visualViewport 處理。 */
+
+.yz-tutor__entry { margin-top: 14px; }
+
+/* 答對的題目的入口：一行灰字，看得到但不佔畫面。
+   每一題都推一次「要不要問問看」，第三題之後就變成背景噪音，
+   而那時候他答錯的那一題也一起變成噪音了。 */
+.yz-tutor__quiet {
+  border: 0; background: none; padding: 0;
+  font-family: var(--font-ui); font-size: 12px; color: var(--ink-2);
+  text-decoration: underline; text-underline-offset: 3px;
+  cursor: pointer;
+}
+.yz-tutor__quiet:hover { color: var(--ink); }
+
+.yz-tutor {
+  margin-top: 16px;
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+  border-radius: var(--r);
+}
+
+.yz-tutor__head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-tutor__title {
+  margin: 0; font-family: var(--font-ui); font-size: 13px; font-weight: 600;
+}
+/* 「它不會直接給答案」這一句要在最上面。沒有它，學生前三則都在試
+   「你就直接跟我說答案嘛」——而那三則都要花錢生成、都會被閘門擋。 */
+.yz-tutor__sub {
+  flex: 1 1 100%; order: 3;
+  margin: 0; font-size: 11.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-tutor__x {
+  margin-left: auto; border: 0; background: none; padding: 2px 4px;
+  font-family: var(--font-ui); font-size: 11.5px; color: var(--ink-2); cursor: pointer;
+}
+
+/* 對話區自己捲，不捲整頁。整頁捲動會把學生正在對照的題目與解析
+   推出畫面外——而他就是為了對照才打開這一塊的。
+   dvh 而不是 vh：手機瀏覽器的網址列會收合，vh 在收合前後不一樣，
+   於是輸入框會在捲動時自己跳一下。 */
+.yz-tutor__log {
+  max-height: 46dvh; overflow-y: auto;
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+.yz-tutor__msg { display: flex; gap: 8px; align-items: baseline; }
+.yz-tutor__who {
+  flex: 0 0 auto; width: 2.4em;
+  font-family: var(--font-ui); font-size: 11px; color: var(--ink-3);
+}
+.yz-tutor__body {
+  flex: 1 1 auto;
+  font-family: var(--font-doc); font-size: 14px; line-height: var(--lh-doc);
+  color: var(--ink);
+}
+/* 學生說的話用介面字型、淡底。與老師的話分開靠的是字型與底色，
+   不是靠左右對齊——左右對齊在窄螢幕上會讓每一行只剩半個版心。 */
+.yz-tutor__msg--student .yz-tutor__body {
+  font-family: var(--font-ui); font-size: 13.5px;
+  background: var(--paper-sunk); padding: 6px 8px; border-radius: var(--r-sm);
+}
+.yz-tutor__msg--pending .yz-tutor__body { opacity: 0.55; }
+.yz-tutor__thinking .yz-tutor__body { color: var(--ink-3); font-family: var(--font-ui); font-size: 12.5px; }
+
+/* 開場的卡點選項。手機上點一下比打字快得多，而第一句打不打得出來，
+   決定了這一段對話會不會發生。 */
+.yz-tutor__chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 0 12px 8px;
+}
+.yz-tutor__chip {
+  border: 1px solid var(--rule); background: var(--paper);
+  border-radius: 999px; padding: 5px 11px;
+  font-family: var(--font-ui); font-size: 12.5px; color: var(--ink); cursor: pointer;
+  /* 手機上的最小點擊區。比這個小的話，捷運上單手點會一直點到旁邊那顆。 */
+  min-height: 32px;
+}
+.yz-tutor__chip:hover { background: var(--select); }
+.yz-tutor__chip:disabled { opacity: 0.5; cursor: default; }
+
+/* 三種教法。**這一排裡面沒有一顆是「直接看答案」**，那是刻意的：
+   答案就在這一塊的上面，學生想看隨時看得到，但那要由他自己往上看。 */
+.yz-tutor__modes {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 0 12px 8px;
+}
+.yz-tutor__mode {
+  border: 1px solid var(--rule); background: var(--paper);
+  border-radius: var(--r-sm); padding: 4px 9px; min-height: 30px;
+  font-family: var(--font-ui); font-size: 12px; color: var(--ink-2); cursor: pointer;
+}
+.yz-tutor__mode--on {
+  border-color: var(--ink); color: var(--ink); background: var(--select);
+  font-weight: 600;
+}
+.yz-tutor__modehint { font-family: var(--font-ui); font-size: 11px; color: var(--ink-3); }
+
+.yz-tutor__composer {
+  border-top: 1px solid var(--rule-2);
+  padding: 10px 12px;
+  /* 全螢幕的手機上，最底下那幾 px 是主畫面指示條的位置。 */
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+.yz-tutor__input {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  background: var(--paper); color: var(--ink);
+  padding: 8px 9px;
+  font-family: var(--font-ui);
+  /* **16px 不能再小。** iOS Safari 對小於 16px 的輸入框會自動放大整頁，
+     而放大之後版面位移——學生打字打到一半畫面自己跳走。 */
+  font-size: 16px; line-height: 1.6;
+}
+.yz-tutor__acts { display: flex; gap: 8px; margin-top: 8px; }
+.yz-tutor__err {
+  margin: 8px 12px 10px;
+  font-family: var(--font-ui); font-size: 12px; color: var(--mark);
+}
+.yz-tutor__done {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 10px 12px;
+  font-family: var(--font-ui); font-size: 12.5px; color: var(--ink-2);
+}
+
+/* ── 老師端的逐字稿 ────────────────────────────────────────── */
+
+.yz-tutor__h3 {
+  margin: 18px 0 6px;
+  font-family: var(--font-ui); font-size: 13px; font-weight: 600;
+}
+
+.yz-tutorlog { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-tutorlog__item { border-bottom: 1px solid var(--rule-2); }
+.yz-tutorlog__sum {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
+  padding: 7px 2px; cursor: pointer;
+  font-family: var(--font-ui); font-size: 12.5px;
+}
+.yz-tutorlog__no { flex: 0 0 auto; width: 5em; color: var(--ink-2); }
+.yz-tutorlog__who { flex: 0 0 auto; min-width: 8em; }
+/* 學生自陳的卡點。這一欄是老師掃這份清單時真正在看的東西——
+   五個人都寫「看不懂題目在問什麼」，那是題目的問題不是學生的問題。 */
+.yz-tutorlog__stuck { flex: 1 1 12em; color: var(--ink-2); }
+.yz-tutorlog__ok { color: var(--confirm); }
+
+.yz-tutorlog__body {
+  padding: 6px 2px 12px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.yz-tutorlog__msg { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; }
+.yz-tutorlog__role {
+  flex: 0 0 auto; width: 5em;
+  font-family: var(--font-ui); font-size: 11px; color: var(--ink-3);
+}
+.yz-tutorlog__text { flex: 1 1 auto; white-space: pre-wrap; }
+/* 系統脈絡：淡一階。它不是對話的一部分，但「它為什麼會這樣講」
+   只有這幾列答得出來。 */
+.yz-tutorlog__msg--context { color: var(--ink-3); font-family: var(--font-ui); font-size: 11.5px; }
+/* 被擋下來的訊息。**這一種一定要看得見**：它是這道閘門真的在做事
+   的唯一證據，而且擋下來的次數突然變多時，通常代表提示詞或模型
+   換了版本。 */
+.yz-tutorlog__msg--blocked {
+  background: var(--mark-soft);
+  padding: 5px 7px; border-left: 2px solid var(--mark);
+}
+.yz-tutorlog__why {
+  flex: 1 1 100%;
+  font-family: var(--font-ui); font-size: 11px; color: var(--mark);
+}
+
+@media screen and (max-width: 620px) {
+  /* 手機上對話區再高一點：這一頁其餘的部分本來就是往下捲的，
+     而對話一次只看得到兩則會讓學生一直往回捲去找上一句。 */
+  .yz-tutor__log { max-height: 52dvh; }
+  .yz-tutor__acts button { flex: 1 1 auto; min-height: 40px; }
+  .yz-tutorlog__sum { gap: 4px 10px; }
+  .yz-tutorlog__no, .yz-tutorlog__who { width: auto; min-width: 0; }
+}
+
+@media print {
+  /* 對話不印。檢討頁印出來是給學生訂正用的，而一段一問一答的對話
+     在紙上佔掉好幾頁，卻沒有任何一句是結論。 */
+  .yz-tutor, .yz-tutor__entry { display: none !important; }
+}
+
+/* 對話本體動態載入時的佔位。一行字而不是骨架動畫：它出現的時間
+   通常不到半秒，而一個閃一下的骨架比一行字更像壞掉。 */
+.yz-tutor__loading {
+  margin: 14px 0 0;
+  font-family: var(--font-ui); font-size: 12px; color: var(--ink-2);
+}

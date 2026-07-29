@@ -33,11 +33,13 @@ import { checkReleaseChange, releaseControl } from '@/lib/release.mjs';
 import { updateAssignment } from '@/lib/assignment';
 import { awardedOnAssignment } from '@/lib/question';
 import { classStats, mayGrade, mayViewGrades, regradeAssignment } from '@/lib/scoring';
+import { assignmentTutorDigest } from '@/lib/tutor';
 import { AwardOne } from './Award';
 import { FinalizeOne } from './Finalize';
 import { Live } from './Live';
 import { RegradeAll, RegradeOne } from './Regrade';
 import { ReleaseControl } from './Release';
+import { TutorReview } from './TutorReview';
 import { UnvoidOne, VoidOne } from './Void';
 
 export const dynamic = 'force-dynamic';
@@ -234,6 +236,11 @@ export default async function AssignmentGradesPage({
     // 答對率停在 3%、平均得分率卻是 100%，而下一個看這一頁的人
     // 只會覺得統計壞掉了。
     const awarded = await awardedOnAssignment(assignmentId);
+    // 智慧老師的對話。**在這裡查而不是在 <TutorReview> 裡查**：
+    // `scopedPage` 建立的租戶脈絡在 render 回傳之後就不在了，
+    // 而 RLS 是 fail closed——寫在子元件裡的查詢會安靜地回空陣列。
+    // 權限已經由上面那一道 `mayViewGrades` 擋過。
+    const tutorDigest = await assignmentTutorDigest(assignmentId);
     type ScoreRow = (typeof stats.scores)[number];
     type QRow = (typeof stats.questions)[number];
     type OpenRow = (typeof stats.unfinished)[number];
@@ -757,6 +764,13 @@ export default async function AssignmentGradesPage({
             />
           </>
         )}
+
+        {/* 智慧老師擺在最後，而且在「還沒有人交卷」那一支之外——
+            檢討要放行之後學生才開得了對話，所以這一塊有內容的時候
+            上面每一塊一定也有內容。放在答對率下面是因為兩者要對著看：
+            答對率最低的那一題與最多人問的那一題不一定是同一題，
+            而那個差本身就是訊息。 */}
+        <TutorReview digest={tutorDigest} />
       </main>
     );
   });

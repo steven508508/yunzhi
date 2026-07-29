@@ -34,6 +34,7 @@ from providers import (
     build_provider,
 )
 from routes_import import build_router
+from routes_tutor import build_tutor_router
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "info").upper(),
@@ -80,6 +81,9 @@ app = FastAPI(
 
 
 app.include_router(build_router(_get_provider))
+# 智慧老師。與匯入同一個 provider 單例——引導式教學的每一輪都是一次
+# 模型呼叫，走同一條路才會被同一份重試、參數協商與用量回報涵蓋。
+app.include_router(build_tutor_router(_get_provider))
 
 
 # ─────────────────────────────────────────────────────────────────
