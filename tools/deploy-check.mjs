@@ -317,28 +317,66 @@ check('建置脈絡有 .dockerignore', () => {
 
 console.log('\n\x1b[1m── Compose\x1b[0m');
 
-const compose = (() => {
+/**
+ * 讀出 compose 展開後的設定。失敗時要說得出**為什麼**失敗。
+ *
+ * 這裡原本 catch 掉一切然後印「這台機器沒有 docker compose」。
+ * 那句話在 docker 真的沒裝時是對的，但在**最常見的失敗情況**下
+ * 是錯的：`.env` 還沒建立、或者 `.env` 裡有一行引號沒收好，
+ * `docker compose config` 會失敗，而使用者看到的訊息會叫他去裝
+ * 一個他早就裝好的東西。
+ *
+ * 下面九項檢查全部依賴這一份設定，所以誤導的訊息代價是九項安靜地
+ * 不執行——而「跳過」與「通過」在畫面上長得一模一樣。
+ */
+const composeConfig = (() => {
+  const args = [
+    // 帶上兩個 profile。不帶的話 caddy 與整組監控服務根本不會出現在
+    // 輸出裡，下面每一項檢查都會安靜地跳過它們。
+    'compose', '--profile', 'caddy', '--profile', 'monitoring',
+    'config', '--format', 'json',
+  ];
   try {
-    return JSON.parse(
-      // 帶上兩個 profile。不帶的話 caddy 與整組監控服務根本不會出現在
-      // 輸出裡，下面每一項檢查都會安靜地跳過它們 —— 而「檢查跳過了」
-      // 與「檢查通過了」在畫面上長得一模一樣。
-      execFileSync('docker', [
-        'compose', '--profile', 'caddy', '--profile', 'monitoring',
-        'config', '--format', 'json',
-      ], {
-        cwd: ROOT,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }),
-    );
-  } catch {
-    return null;
+    return {
+      data: JSON.parse(
+        execFileSync('docker', args, {
+          cwd: ROOT,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }),
+      ),
+    };
+  } catch (e) {
+    if (e.code === 'ENOENT') return { why: '這台機器沒有裝 docker' };
+    const stderr = String(e.stderr ?? '').trim();
+    if (!existsSync(join(ROOT, '.env'))) {
+      return {
+        why:
+          '還沒有 .env（compose 需要它才展開得出設定）。' +
+          '先 `cp .env.example .env` 再跑一次，這一段的九項才會真的執行',
+      };
+    }
+    return {
+      why:
+        'docker compose config 失敗——多半是 .env 裡某一行的引號沒收好。' +
+        (stderr ? `\n     docker 說：${stderr.split('\n')[0]}` : ''),
+    };
   }
 })();
 
+/**
+ * 展開後的設定，或 null。**檔案後段還有三項檢查會用到它**
+ * （bind mount 目錄、Postgres 擴充、映像有沒有釘版本），
+ * 那三項在 null 時只做 Dockerfile 那一半，所以留在 else 外面。
+ */
+const compose = composeConfig.data ?? null;
+
 if (!compose) {
-  console.log('   · 跳過：這台機器沒有 docker compose');
+  // 用 ✗ 而不是 ·：這九項沒有跑過，而使用者需要知道自己拿到的是
+  // 一份不完整的檢查結果，不是一份乾淨的。
+  console.log(`   \x1b[31m✗\x1b[0m 這一段的九項檢查沒有執行`);
+  console.log(`     ${composeConfig.why}`);
+  failed++;
 } else {
   check('發布固定主機埠的服務只有一個副本', () => {
     for (const [name, svc] of Object.entries(compose.services)) {
