@@ -33,6 +33,19 @@ type Result = {
   credentials: Credentials;
   priorTasks: { total: number; answerable: number };
 };
+/**
+ * 家長帳號那一步的結果。**它與學生的初始密碼一樣只回來這一次**，
+ * 所以要跟學生那張表印在同一頁上——分兩次列印的話，第二張的
+ * 觸發條件是「記得還有一步」，而那正是會被忘記的東西。
+ */
+type Guardians = {
+  created: number;
+  linked: number;
+  alreadyLinked: number;
+  withoutEmail: number;
+  skipped: { student: string; email: string; why: string }[];
+  credentials: { username: string; displayName: string; childName: string; password: string }[];
+};
 
 const ENCODING_LABEL: Record<string, string> = {
   'utf-8': 'UTF-8',
@@ -54,6 +67,8 @@ export default function RosterImport({
   const [file, setFile] = useState<File | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [done, setDone] = useState<Result | null>(null);
+  const [guardians, setGuardians] = useState<Guardians | null>(null);
+  const [guardianError, setGuardianError] = useState<string | null>(null);
   // 姓名不同時要不要跟著改。**預設不改**：同名同姓不同人而學號打錯的
   // 那一次，靜靜地跟著改會把另一個人的名字覆蓋掉，而畫面上沒有痕跡。
   const [updateNames, setUpdateNames] = useState(false);
@@ -77,6 +92,8 @@ export default function RosterImport({
       setPlan(data.plan);
       if (apply) {
         setDone(data.result as Result);
+        setGuardians((data.guardians as Guardians | null) ?? null);
+        setGuardianError((data.guardianError as string | null) ?? null);
         router.refresh();
       }
     } catch (e) {
@@ -155,6 +172,75 @@ export default function RosterImport({
             </table>
           </>
         )}
+        {/* 家長帳號。與學生的初始密碼印在同一頁上——它也只回來這一次，
+            分開列印的話第二張永遠會被忘記。 */}
+        {guardianError && (
+          <Note tone="warn">
+            學生的名冊已經匯進去了，但<b>家長帳號沒有建成</b>：{guardianError}
+            　名冊上會出現「建立家長帳號」，按一次就補得回來——那個動作可以
+            重複執行，不會重建已經好的。
+          </Note>
+        )}
+        {guardians && (
+          <>
+            <Note>
+              家長帳號：新開 {guardians.created} 個、接上 {guardians.linked} 條連結
+              {guardians.alreadyLinked > 0 && `、${guardians.alreadyLinked} 條本來就接好了`}
+              {guardians.withoutEmail > 0 &&
+                `。另外有 ${guardians.withoutEmail} 位名冊上沒有填家長信箱`}
+              。
+            </Note>
+            {guardians.skipped.length > 0 && (
+              <>
+                <Note tone="warn">
+                  有 {guardians.skipped.length} 位的家長接不上。改好名冊之後，
+                  用名冊頁上的「建立家長帳號」再跑一次就好。
+                </Note>
+                <ul style={{ marginLeft: 18, fontSize: 12.5, lineHeight: 2 }}>
+                  {guardians.skipped.slice(0, 10).map((s, i) => (
+                    <li key={i}>
+                      {s.student}（{s.email}）：{s.why}
+                    </li>
+                  ))}
+                  {guardians.skipped.length > 10 && (
+                    <li>…還有 {guardians.skipped.length - 10} 位</li>
+                  )}
+                </ul>
+              </>
+            )}
+            {guardians.credentials.length > 0 && (
+              <>
+                <Note tone="warn">
+                  下面是 {guardians.credentials.length} 組<b>家長</b>帳號的初始密碼。
+                  同樣<b>離開這一頁就取不回來了</b>。家長登入後看得到孩子的任務與成績，
+                  <b>看不到逐題作答、檢討與智慧老師的對話</b>。
+                </Note>
+                <table className="yz-table">
+                  <caption className="yz-sr">新開的家長帳號與初始密碼</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">家長帳號（信箱）</th>
+                      <th scope="col">孩子</th>
+                      <th scope="col">初始密碼</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {guardians.credentials.map((c) => (
+                      <tr key={c.username}>
+                        <td>{c.username}</td>
+                        <td>{c.childName}</td>
+                        <td style={{ fontFamily: 'var(--font-doc)', letterSpacing: '.08em' }}>
+                          {c.password}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </>
+        )}
+
         <div className="yz-actions">
           <span className="yz-actions__spacer" />
           <Button onClick={() => window.print()}>列印這一頁</Button>
@@ -162,6 +248,8 @@ export default function RosterImport({
             variant="primary"
             onClick={() => {
               setDone(null);
+              setGuardians(null);
+              setGuardianError(null);
               setPlan(null);
               setFile(null);
               if (fileRef.current) fileRef.current.value = '';

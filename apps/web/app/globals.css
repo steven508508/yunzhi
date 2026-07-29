@@ -2685,3 +2685,118 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   /* 摘要那一串在手機上會折成三四行。讓它自己斷，不要撐開表格。 */
   .yz-proctor__sum { line-height: 1.7; }
 }
+
+/* ── 家長端 ────────────────────────────────────────────────────
+   這一段的約束與別處不同：**它是唯一一塊主要在手機上被讀的畫面。**
+
+   家長一個月看兩次，站著、單手、一分鐘之內，而且他要的答案只有
+   三句：該交的交了沒、有沒有錯過什麼、最近考得怎麼樣。所以
+
+     · 沒有表格。表格在 375px 上不是變窄，是變成一團要橫向捲的東西
+     · 資訊密度刻意壓低，字級比老師的畫面大一級
+     · 每一列只有一個重點，其餘都是它的註腳（小一級、灰一階）
+     · 一樣不用色塊、不用圓角藥丸——校樣的語言在這裡不改
+
+   老師的畫面（班級、成績、能力分析）是資訊密集的工作面板，
+   兩者刻意不共用樣式：共用的那一天，其中一邊會為了另一邊而妥協，
+   而妥協的方向通常是把家長的畫面塞得更滿。 */
+
+/* 多個孩子時的切換。頁籤而不是下拉：兩三個孩子的家長要的是
+   「一眼看到兩個名字」，而下拉把名字藏在一次點擊後面。 */
+.yz-kid__switch {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  margin-bottom: 18px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-kid__tab {
+  font-size: 14px; color: var(--ink-2); text-decoration: none;
+  padding-bottom: 6px; margin-bottom: -9px;
+  border-bottom: 2px solid transparent;
+}
+.yz-kid__tab:hover { color: var(--ink); }
+/* 目前所在不是只有顏色：粗細與線條，色盲的人也讀得到（WCAG 1.4.1）。
+   與導覽列、知識點的科目切換同一個手法。 */
+.yz-kid__tab[aria-current="page"] {
+  color: var(--ink); font-weight: 600; border-bottom-color: var(--ink);
+}
+
+.yz-kid__block { margin-top: 26px; }
+.yz-kid__h {
+  font-family: var(--font-doc); font-size: 14px; font-weight: 600;
+  padding-bottom: 8px; border-bottom: 1px solid var(--ink);
+}
+.yz-kid__none { padding: 14px 0; font-size: 13px; color: var(--ink-2); }
+.yz-kid__note { margin-top: 10px; font-size: 11.5px; color: var(--ink-3); line-height: 1.75; }
+
+/* 沒交的那幾份。兩欄：左邊是哪一份，右邊是還剩多久。 */
+.yz-kid__list { list-style: none; margin: 0; padding: 0; }
+.yz-kid__list > li {
+  display: grid; grid-template-columns: 1fr auto;
+  gap: 10px; align-items: baseline;
+  padding: 12px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-kid__what { display: block; font-size: 14px; line-height: var(--lh-ui); }
+.yz-kid__meta { display: block; font-size: 11.5px; color: var(--ink-3); line-height: 1.7; }
+.yz-kid__when {
+  font-size: 12px; color: var(--ink-2); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 成績。三欄，而分數是唯一放大的東西——家長掃過這一頁時
+   眼睛會停在數字上，那就讓它值得停。 */
+.yz-kid__scores { list-style: none; margin: 0; padding: 0; }
+.yz-kid__score {
+  display: grid; grid-template-columns: 1fr auto 150px;
+  gap: 12px; align-items: baseline;
+  padding: 13px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-kid__num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.yz-kid__num > b { font-size: 20px; font-weight: 600; }
+.yz-kid__full { font-size: 12px; color: var(--ink-3); }
+/* 「高於班級平均」。是一句話而不是一個標籤——標籤會被讀成評價，
+   而這裡要的是一個可以被驗證的比較（下面那行就是它的依據）。 */
+.yz-kid__vs { font-size: 12.5px; color: var(--ink-2); line-height: var(--lh-ui); }
+
+/* 沒有交的那幾份。硃砂只用在這一塊，而且只有這一塊——
+   它是這一頁上唯一一件家長真的需要做點什麼的事。 */
+.yz-kid__alert {
+  margin: 18px 0 0;
+  padding: 13px 14px;
+  border-left: 2px solid var(--mark);
+  background: var(--mark-soft);
+}
+.yz-kid__alert h2 { font-family: var(--font-doc); font-size: 14px; color: var(--mark); }
+.yz-kid__alert p { margin-top: 5px; font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2); }
+.yz-kid__alert ul { list-style: none; margin: 9px 0 0; padding: 0; }
+.yz-kid__alert li {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  font-size: 13px; line-height: 2;
+}
+
+@media (max-width: 620px) {
+  /* 成績那一列在小螢幕上折成兩行：上面是哪一份加分數，
+     下面整行留給「跟班上比起來如何」——那一句是完整的中文句子，
+     擠進 150px 的欄位裡會變成四行各兩個字。 */
+  .yz-kid__score { grid-template-columns: 1fr auto; }
+  .yz-kid__vs { grid-column: 1 / -1; margin-top: 2px; }
+  .yz-kid__num > b { font-size: 18px; }
+  /* 孩子的切換在手機上可能超過一行，讓它自己捲而不是撐破版面。 */
+  .yz-kid__switch { gap: 14px; }
+}
+
+/* ── 家長連結（名冊那一側） ────────────────────────────────────
+   這一塊在對話框裡，只有職員看得到，所以密度回到工作面板的水準。 */
+
+.yz-glink { list-style: none; margin: 0 0 14px; padding: 0; }
+.yz-glink > li {
+  display: flex; flex-wrap: wrap; gap: 8px 12px;
+  align-items: baseline; justify-content: space-between;
+  padding: 9px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-glink__who { display: block; font-size: 13px; }
+.yz-glink__who > b { font-family: var(--font-doc); }
+.yz-glink__add {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+  padding-top: 12px; border-top: 1px solid var(--rule);
+}
+.yz-glink__add .yz-field { flex: 1 1 240px; margin-bottom: 0; }

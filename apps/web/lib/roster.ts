@@ -1540,34 +1540,18 @@ export async function transferStudent(
 }
 
 /**
- * 綁定家長與學生。
+ * 家長與學生的綁定**不在這個檔案裡**，在 `lib/guardian.ts`。
  *
- * `verifiedAt` 預設是 null——**建立連結不等於驗證過**。櫃檯輸入的
- * 家長信箱可能打錯，而一個沒驗證過的連結若直接開始送成績通知，
- * 就是把學生的成績寄給陌生人。驗證流程（寄確認信）屬於 B5 通知模組，
- * 這裡先把關係與「還沒驗證」這件事記下來。
+ * 它原本在這裡，而且沒有任何呼叫端——所以 `guardian_links` 這張表
+ * 從第一份遷移到現在永遠是空的。搬過去的理由不只是「歸類」：
+ * 建立連結要一併處理家長帳號本身（找得到就接、找不到就開一個、
+ * 開的時候要算 bcrypt），而那一整段與名冊 CSV 的解析沒有關係。
+ *
+ * 名冊匯入仍然會建家長帳號，走的是匯入路由在 `applyRoster` 之後
+ * 呼叫的 `provisionGuardiansForClass`——**刻意是第二步而不是同一個
+ * 交易**，理由見那一支的註解（一句話：bcrypt 不進交易，而這裡的
+ * 交易已經只剩下寫入了）。
  */
-export async function linkGuardian(guardianId: string, studentId: string, actorId: string) {
-  const tenantId = requireTenant();
-  const [guardian, student] = await Promise.all([
-    prisma.user.findFirst({ where: { id: guardianId }, select: { id: true, username: true } }),
-    prisma.user.findFirst({ where: { id: studentId }, select: { id: true, username: true } }),
-  ]);
-  if (!guardian) throw new Error('找不到這位家長帳號');
-  if (!student) throw new Error('找不到這位學生');
-  if (guardianId === studentId) throw new Error('不能把自己綁成自己的家長');
-
-  const link = await prisma.guardianLink.upsert({
-    where: { guardianId_studentId: { guardianId, studentId } },
-    create: { guardianId, studentId },
-    update: {},
-  });
-  await audit(tenantId, actorId, 'guardian.link', link.id, {
-    guardian: guardian.username,
-    student: student.username,
-  });
-  return link;
-}
 
 // ─────────────────────────────────────────────────────────────────
 

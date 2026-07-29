@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { isHomeroomOf } from '@/lib/auth';
+import { guardianCountsForClass } from '@/lib/guardian';
 import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
@@ -16,6 +17,8 @@ import { Table } from '@/components/Table';
 import ClassTools from './ClassTools';
 import ConsentButton from './ConsentButton';
 import ConsentBatch from './ConsentBatch';
+import GuardianBatch from './GuardianBatch';
+import Guardians from './Guardians';
 import { LeaveClass, RejoinClass, TransferClass } from './Membership';
 import { ResetClass, ResetOne } from './ResetPassword';
 import RosterImport from './RosterImport';
@@ -125,6 +128,15 @@ export default async function ClassPage({
 
     const waiting = members.filter((m) => !m.user.consentAt);
 
+    // 每位學生接了幾位家長。一次查完再分，不是每一列各問一次——
+    // 200 位逐位問是 200 次往返，而每一次在租戶隔離底下是三句 SQL。
+    const guardianCounts = await guardianCountsForClass(classId);
+    // 名冊上填了家長信箱、卻還沒有任何家長連結的人。這個數字大於 0
+    // 就代表「有人拿不到家長帳號」，而那件事沒有任何其他地方會說。
+    const guardiansPending = members.filter(
+      (m) => m.user.guardianEmail && (guardianCounts.get(m.user.id)?.linked ?? 0) === 0,
+    ).length;
+
     // 轉班的候選：其他還啟用中的班。只在真的可能用到時才查——
     // 科任老師轉不了班，多一次查詢換一個他按不到的下拉沒有意義。
     const transferTargets = mayManage
@@ -210,6 +222,17 @@ export default async function ClassPage({
 
         {mayManage && <RosterImport classId={classId} className={klass.name} />}
 
+        {/* 家長帳號那一塊與批次登錄同意一樣：**只在有事要做的時候出現**，
+            做完就消失。永遠掛在那裡的話，它會變成每天要掃過的一塊
+            而不是一件待辦。 */}
+        {mayManage && guardiansPending > 0 && (
+          <GuardianBatch
+            classId={classId}
+            className={klass.name}
+            candidates={guardiansPending}
+          />
+        )}
+
         <Table
           caption={`${klass.name}的學生名冊`}
           columns={[
@@ -245,8 +268,20 @@ export default async function ClassPage({
             {
               key: 'g',
               head: '家長信箱',
-              cell: (m: Row) =>
-                m.user.guardianEmail ?? <span className="yz-muted">未填</span>,
+              cell: (m: Row) => {
+                const g = guardianCounts.get(m.user.id);
+                return (
+                  <>
+                    {m.user.guardianEmail ?? <span className="yz-muted">未填</span>}
+                    {/* 「信箱填了」與「家長真的有帳號」是兩件事，而在此之前
+                        它們在畫面上長得一模一樣——那正是 guardian_links
+                        永遠是空的卻沒有人發現的原因。 */}
+                    {m.user.guardianEmail && !g && (
+                      <span className="yz-grade__sub yz-warn">還沒有家長帳號</span>
+                    )}
+                  </>
+                );
+              },
             },
             {
               key: 's',
@@ -278,6 +313,20 @@ export default async function ClassPage({
                           studentId={m.user.id}
                           studentName={m.user.displayName}
                           username={m.user.username}
+                        />
+                        {/* 家長的新增／移除給到與重設密碼同一組人
+                            （這個班的授課老師也算）。理由是同一個現實：
+                            家長是在櫃檯跟現場那一位老師講的，要求他去找
+                            導師，等於這個功能在最需要的那一刻不存在。
+                            API 那一側的判定完全相同（`isStaff`）。 */}
+                        <Guardians
+                          studentId={m.user.id}
+                          studentName={m.user.displayName}
+                          linked={guardianCounts.get(m.user.id)?.linked ?? 0}
+                          undelivered={
+                            (guardianCounts.get(m.user.id)?.linked ?? 0) -
+                            (guardianCounts.get(m.user.id)?.delivered ?? 0)
+                          }
                         />
                         {mayManage && (
                           <>

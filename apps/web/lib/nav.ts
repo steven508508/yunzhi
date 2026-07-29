@@ -25,6 +25,18 @@
  */
 const STAFF = ['TEACHER', 'SUBJECT_LEAD', 'SCHOOL_ADMIN', 'SYS_ADMIN'] as const;
 
+/**
+ * 家長。**只有家長**，而且只有一區。
+ *
+ * 老師不在裡面：老師要看一位學生的完整狀況走
+ * `/classes/[classId]/students/[studentId]`，那一頁有帶班的判定，
+ * 而且看得到的東西完全不同（逐份成績、知識點掌握度、作答的連結）。
+ * 家長那一頁是**學生自己那份資料的投影**，欄位只減不加——
+ * 兩頁共用一條路徑的話，遲早會有人在其中一頁加一欄，
+ * 而加錯邊的方向是家長看到了逐題作答。
+ */
+const GUARDIAN = ['GUARDIAN'] as const;
+
 /** 行政決定：開班、學年度結構這類會影響全校資料範圍的事。 */
 const ADMIN = ['SCHOOL_ADMIN', 'SYS_ADMIN'] as const;
 
@@ -49,6 +61,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // 學生只有一項，排最前面。他一天要點它好幾次，老師一週點一次
   // 學年度——導覽列的順序應該照「誰用得最兇」排，不是照系統結構排。
   { href: '/take', label: '我的任務', roles: LEARNER },
+
+  // 家長也只有一項。他一個月看兩次，而且多半在手機上——導覽列上
+  // 多一個字，就是他在小螢幕上要多讀一次才知道該點哪裡。
+  { href: '/guardian', label: '孩子的狀況', roles: GUARDIAN },
 
   // 老師的動線就是這個順序：題目進來（匯入）→ 挑題組卷（考卷）→
   // 派出去（派卷）→ 收回來看（成績）。導覽列照這個順序排，

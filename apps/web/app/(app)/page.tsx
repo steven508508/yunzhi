@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { Empty } from '@/components/Feedback';
 import { listStudentTasks } from '@/lib/attempt';
+import { childrenOf, childView } from '@/lib/guardian';
 import { mayUse, ROLE_LABELS } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
@@ -30,25 +31,88 @@ export default async function HomePage() {
     const admin = mayUse(user.systemRole, '/settings/years');
 
     if (user.systemRole === 'GUARDIAN') {
-      // 家長端**確實還沒做**。誠實地說，不要給一個空畫面——
-      // 空畫面會被讀成「壞了」或「我的資料不見了」，然後變成一通電話。
+      /**
+       * 家長的首頁：一個孩子一行。
+       *
+       * 這一頁**不重畫 `/guardian` 的清單**，與學生那一段同一條規則：
+       * 首頁只回答「有沒有事」，細節在那一頁。兩個畫面列同一份資料時，
+       * 看的人會不確定哪一個是準的。
+       *
+       * 一行的內容是家長真正會問的那一句——「還有幾份沒交」——
+       * 而不是任務總數。總數是背景資訊，沒交的份數才是他要不要
+       * 今天晚上問一句的依據。
+       */
+      const kids = await childrenOf(user.id);
+      const rows = await Promise.all(
+        kids.map(async (k) => ({ kid: k, view: await childView(user.id, k.studentId) })),
+      );
+
       return (
         <main className="yz-panel">
           <div className="yz-panel__head">
-            <h1>{user.displayName}</h1>
-            <p className="yz-panel__sub">{ROLE_LABELS[user.systemRole] ?? user.systemRole}</p>
+            <h1>孩子的近況</h1>
+            <p className="yz-panel__sub">
+              {user.displayName}　·　{ROLE_LABELS[user.systemRole] ?? user.systemRole}
+            </p>
           </div>
-          <Empty
-            title="家長端還在開發中"
-            hint={
-              <>
-                你的帳號已經開好了，登入也正常。查看孩子的作業進度與成績
-                這些功能還沒有上線，所以現在這裡沒有東西可以做。
-                <br />
-                需要了解孩子的狀況時請直接找班級老師。
-              </>
-            }
-          />
+
+          {rows.length === 0 ? (
+            // 空畫面會被讀成「壞了」或「我的資料不見了」，然後變成一通
+            // 電話。說出原因與下一步，那通電話就不必打。
+            <Empty
+              title="這個帳號目前沒有連結到任何一位學生"
+              hint="家長帳號要由補習班接到孩子身上才看得到東西。如果你剛拿到這組帳號密碼，請告訴櫃檯或班級老師，他們在名冊上按一下就好。"
+            />
+          ) : (
+            <ul className="yz-todo">
+              {rows.map(({ kid, view }) => (
+                <li
+                  key={kid.studentId}
+                  className={`yz-todo__item${
+                    view.summary.missed > 0 || view.summary.pending > 0
+                      ? ' yz-todo__item--act'
+                      : ''
+                  }`}
+                >
+                  <span className="yz-todo__n">
+                    {view.summary.missed > 0
+                      ? view.summary.missed
+                      : view.summary.pending > 0
+                        ? view.summary.pending
+                        : '—'}
+                  </span>
+                  <span>
+                    <span className="yz-todo__what">
+                      {kid.displayName}
+                      {kid.className && `　${kid.className}`}
+                    </span>
+                    <span className="yz-todo__why">
+                      {/* 沒編班排在最前面：底下每一種空的狀況都是它的
+                          後果，而它是唯一一種要打電話給櫃檯的。 */}
+                      {!kid.className
+                        ? '還沒有編進任何班級，所以收不到作業，這裡也就沒有東西。請告訴櫃檯或班級老師。'
+                        : view.summary.missed > 0
+                          ? `有 ${view.summary.missed} 份已經過了截止時間而且沒有交。` +
+                            '這幾份系統上不能再作答了，要補交請直接跟班級老師說。'
+                          : view.summary.pending > 0
+                            ? `還有 ${view.summary.pending} 份可以寫。` +
+                              (view.summary.waiting > 0
+                                ? `另外 ${view.summary.waiting} 份交了但老師還沒開放成績。`
+                                : '')
+                            : view.summary.total === 0
+                              ? '老師還沒有派任何作業或考試。派了之後這裡會出現該交的份數。'
+                              : `該交的都交了${
+                                  view.summary.waiting > 0
+                                    ? `，其中 ${view.summary.waiting} 份還在等老師開放成績`
+                                    : ''
+                                }。`}
+                    </span>
+                  </span>
+                  <Link href={`/guardian?child=${kid.studentId}`}>看狀況</Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </main>
       );
     }
