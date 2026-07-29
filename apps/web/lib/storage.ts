@@ -120,6 +120,17 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
  * 刻意不讓 MinIO 直接對外 —— 授權判斷在應用層（誰能看這份題本
  * 取決於他教不教這一科），簽章只是把驗過的結果帶過去。
  * 15 分鐘足夠校對一份題本的一次載入，又短到連結外流的風險有限。
+ *
+ * # 為什麼目前沒有呼叫端
+ *
+ * 這一支現在**在這個部署形態下用不上**，不是忘了接。MinIO 只掛在
+ * compose 的 `internal` 網路，Caddy 也沒有代理它（`docker-compose.yml`、
+ * `deploy/caddy/Caddyfile`）——簽名 URL 在瀏覽器上連不到。
+ * 校對介面的原稿影像因此走 `/api/import/[jobId]/image`，由應用層
+ * 取出位元組再送出去，權限與租戶脈絡都留在應用層。
+ *
+ * 哪一天 MinIO 有了對外的網址（例如另一個 vhost 或 CDN），
+ * 那一支路由改成 302 到這裡產生的連結即可，權限判斷不必動。
  */
 export function signedGetUrl(key: string, expiresIn = 900, downloadName?: string) {
   return getSignedUrl(

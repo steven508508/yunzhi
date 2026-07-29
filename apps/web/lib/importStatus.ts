@@ -61,6 +61,21 @@ export async function loadProgress(jobId: string, tenantId: string) {
   });
   if (!job) return null;
 
+  // 佇列現況。`IMPORT_CONCURRENCY` 預設是 1，所以第二份題本本來就要
+  // 等第一份跑完整條管線（5–20 分鐘）——而進度頁原本只看「排隊超過
+  // 兩分鐘」就跳出「多半是背景工作者沒有在跑」，把正常的排隊誣告成
+  // 故障，還附一顆會把自己排到隊尾的按鈕。
+  //
+  // 這裡用資料庫算而不是問 Redis：查詢跑在租戶脈絡下（RLS），
+  // 所以算到的是本租戶的工作。單校部署下這就是全部；多租戶時它會
+  // 低估，而低估只會讓提示保守一點，不會產生假警報。
+  const [ahead, running] = await Promise.all([
+    prisma.importJob.count({
+      where: { tenantId, status: 'QUEUED', createdAt: { lt: job.createdAt } },
+    }),
+    prisma.importJob.count({ where: { tenantId, status: { in: [...STAGES] } } }),
+  ]);
+
   const detail = (job.stageDetail as Record<string, any> | null) ?? {};
   const done: Record<string, any> = detail.stages ?? {};
   const failedAt: string | null = detail.failedAt ?? null;
@@ -95,6 +110,14 @@ export async function loadProgress(jobId: string, tenantId: string) {
     // 以及輪詢時經過 JSON），而 JSON 那條回來的一定是字串。
     // 兩邊型別不同的話，畫面會在第一次輪詢之後才壞掉。
     createdAt: job.createdAt.toISOString(),
+    // 正在跑的那一階段是什麼時候開始的。**沒有它，進行中的那一列
+    // 永遠是空的**——`elapsedMs` 只有在階段做完之後才寫進 stageDetail，
+    // 而老師盯的正是還沒做完的那一列。資料一直都有（worker 的卡住
+    // 偵測就是靠它算分鐘數），只是沒有被回傳。
+    stageStartedAt: job.stageStartedAt ? job.stageStartedAt.toISOString() : null,
+    /** 佇列裡排在這一份前面的工作數，以及現在有沒有工作正在跑。 */
+    queuedAhead: ahead,
+    othersRunning: running,
     error: job.error,
     permanent,
     lastCompletedStage: job.lastCompletedStage,

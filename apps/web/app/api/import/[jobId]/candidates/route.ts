@@ -50,6 +50,13 @@ const PatchBody = z.object({
     note: z.string().max(2000).optional(),
     patch: z.record(z.string(), z.unknown()).optional(),
   })).min(1).max(500),
+  /**
+   * 這一批涵蓋的校對秒數（增量）。
+   *
+   * **語意是增量而不是累計。** 前端每次成功存檔之後才把回報點往前推，
+   * 所以重送同一批只會多算一次 8 秒以內的量；而累計值在「分兩天校完
+   * 一份題本」時會把前一天的用時整個蓋掉。
+   */
   reviewSeconds: z.number().int().min(0).max(86400).optional(),
 });
 
@@ -67,12 +74,21 @@ export const PATCH = scopedRoute<{ jobId: string }>(async (req: NextRequest, { u
   }
 
   try {
-    const job = await saveReviews(params.jobId, user.tenantId, user.id, parsed.data.changes);
+    const job = await saveReviews(
+      params.jobId,
+      user.tenantId,
+      user.id,
+      parsed.data.changes,
+      parsed.data.reviewSeconds ?? 0,
+    );
     return NextResponse.json({
       ok: true,
       confirmed: job.confirmedCount,
       flagged: job.flaggedCount,
       total: job.totalCandidates,
+      // 回報累計用時，讓校對介面在完成時說得出「這份題本 N 題，
+      // 花了 M 分鐘」——那正是業主驗收要看的那個數字。
+      reviewSeconds: job.reviewSeconds,
     });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });

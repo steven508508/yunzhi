@@ -30,12 +30,26 @@ type Subject = { id: string; name: string };
 
 type FileRole = 'QUESTION_BOOK' | 'ANSWER_KEY' | 'EXPLANATION_BOOK' | 'RUBRIC';
 
+/**
+ * 標籤後面那句「（不會被讀取）」不是客套。
+ *
+ * 答案卷、詳解本、評分原則三種角色在整個系統裡**沒有任何消費端**：
+ * 拆題只吃題本，答案卷對齊、詳解匯入、rubric 三條流程還不存在。
+ * 老師通常會把出版社的「題本 + 解答本」兩份都拖進來，然後以為
+ * 「答案是照解答本進來的，我只要確認題幹」——**實際上所有答案都是
+ * AI 自己算的**，而他在不知情的狀況下替它們背書。
+ *
+ * 選項不拿掉而是講清楚：拿掉的話，手上真的有一份解答本的老師會把它
+ * 標成「題本」，那份 40 頁的解答本就會被當成題目拆進題庫。
+ */
 const ROLE_LABELS: Record<FileRole, string> = {
   QUESTION_BOOK: '題本',
-  ANSWER_KEY: '答案卷',
-  EXPLANATION_BOOK: '詳解本',
-  RUBRIC: '評分原則',
+  ANSWER_KEY: '答案卷（不會被讀取）',
+  EXPLANATION_BOOK: '詳解本（不會被讀取）',
+  RUBRIC: '評分原則（不會被讀取）',
 };
+
+const READ_ROLES: FileRole[] = ['QUESTION_BOOK'];
 
 const SCOPE_LABELS: Record<LicenseScope, string> = {
   PUBLIC: '公開（可自由散布）',
@@ -46,9 +60,20 @@ const SCOPE_LABELS: Record<LicenseScope, string> = {
 
 type Picked = { file: File; role: FileRole };
 
-/** 從檔名猜角色。與後端 guessRole 同一套規則。 */
+/**
+ * 從檔名猜角色。與後端 guessRole 同一套規則。
+ *
+ * **題本的判斷排在最前面。** 老師自己出的段考卷檔名九成長這樣：
+ * 「115上第三次段考_數學A_含詳解.docx」「數A第3章_解析版.docx」——
+ * 舊版先命中「詳解」，整份匯入變成詳解本，然後在第二階段永久失敗，
+ * 而兩顆重試按鈕都改不了角色。題本裡夾詳解是常態，純詳解本很少
+ * 單獨存在，所以兩種都命中時猜題本。
+ */
 function guessRole(name: string): FileRole {
   const n = name.toLowerCase();
+  if (/題本|試題|考卷|考題|段考|小考|週考|月考|模擬|講義|習題|練習|exam|paper|quiz/.test(n)) {
+    return 'QUESTION_BOOK';
+  }
   if (/答案|解答|answer|key|ans/.test(n)) return 'ANSWER_KEY';
   if (/詳解|解析|explanation|solution/.test(n)) return 'EXPLANATION_BOOK';
   if (/評分|原則|rubric|級分/.test(n)) return 'RUBRIC';
@@ -115,8 +140,20 @@ export default function Upload({ subjects }: { subjects: Subject[] }) {
   });
 
   const totalBytes = files.reduce((n, f) => n + f.file.size, 0);
+
+  /**
+   * 一份題本都沒有 → 在上傳前就擋下來。
+   *
+   * 這是三秒就能做完的檢查，而不做的代價是：檔案上傳、排隊、第一階段
+   * 把 36 頁全部渲染完（錢付了），然後在拆題階段丟出「沒有可切分的
+   * 頁面」——老師等了五分鐘才知道，而重試按鈕改不了角色。
+   */
+  const noQuestionBook = files.length > 0 && !files.some((f) => READ_ROLES.includes(f.role));
+  const ignoredCount = files.filter((f) => !READ_ROLES.includes(f.role)).length;
+
   const canSubmit =
-    files.length > 0 && title.trim() && subjectId && confirmed && !declarationError && !busy;
+    files.length > 0 && title.trim() && subjectId && confirmed && !declarationError
+    && !noQuestionBook && !busy;
 
   async function submit(allowDuplicate = false) {
     setBusy(true);
@@ -231,7 +268,14 @@ export default function Upload({ subjects }: { subjects: Subject[] }) {
             <tbody>
               {files.map((f, i) => (
                 <tr key={f.file.name}>
-                  <td style={{ wordBreak: 'break-all' }}>{f.file.name}</td>
+                  <td style={{ wordBreak: 'break-all' }}>
+                    {f.file.name}
+                    {!READ_ROLES.includes(f.role) && (
+                      <div className="yz-field__err" style={{ marginTop: 2 }}>
+                        這一份不會被拆成題目，也不會計費。如果它裡面有題目，請改成「題本」。
+                      </div>
+                    )}
+                  </td>
                   <td>
                     <select
                       className="yz-in"
@@ -267,6 +311,7 @@ export default function Upload({ subjects }: { subjects: Subject[] }) {
               <tr>
                 <td colSpan={2} style={{ color: 'var(--ink-3)' }}>
                   共 {files.length} 個檔案
+                  {ignoredCount > 0 && `（其中 ${ignoredCount} 份不會被讀取）`}
                 </td>
                 <td className="yz-table__num" style={{ color: 'var(--ink-3)' }}>
                   {mb(totalBytes)}
@@ -275,6 +320,23 @@ export default function Upload({ subjects }: { subjects: Subject[] }) {
               </tr>
             </tbody>
           </table>
+        )}
+
+        {noQuestionBook && (
+          <p className="yz-field__err" role="alert" style={{ marginTop: 10, lineHeight: 1.75 }}>
+            這批檔案裡沒有一份標成「題本」，所以拆不出任何題目。
+            請把有題目的那一份改成「題本」再送出。
+          </p>
+        )}
+
+        {ignoredCount > 0 && !noQuestionBook && (
+          <p className="yz-hint" style={{ marginTop: 10, lineHeight: 1.75 }}>
+            <strong>這一版只讀題本。</strong>
+            答案卷、詳解本、評分原則上傳之後不會被解析（也不會產生費用）——
+            答案卷對齊還沒有做，所以<strong>答案會由 AI 自己推導</strong>，校對時要逐題驗算。
+            如果你的解答本與題本是同一份檔案（教用版），那就沒問題：
+            題目旁邊印的答案讀得到，校對介面會標成「題本印的」。
+          </p>
         )}
       </section>
 

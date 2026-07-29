@@ -44,8 +44,9 @@ import { randomInt } from 'node:crypto';
 
 import type { Prisma } from '@prisma/client';
 
-import { resolveRecipients } from '@/lib/assignment';
+import { isNamedTarget, resolveRecipients } from '@/lib/assignment';
 import { attemptWritable, checkFinalizeOnBehalf } from '@/lib/attemptClock.mjs';
+import { hasAnswer } from '@/lib/examOps.mjs';
 import { prisma } from '@/lib/prisma';
 import { maySeeResult, type ResultLevel } from '@/lib/release.mjs';
 import { gradeAttemptById } from '@/lib/scoring';
@@ -267,7 +268,11 @@ export function readLayout(raw: Prisma.JsonValue | null): LayoutItem[] {
  */
 async function mayAttempt(assignmentId: string, userId: string): Promise<boolean> {
   const recipients = await resolveRecipients(assignmentId);
-  return recipients.some((r) => r.userId === userId);
+  if (recipients.some((r) => r.userId === userId)) return true;
+  // 老師把自己個別指定進去試考。名單只認學生帳號（應交人數不可以
+  // 把老師算進去），所以他不會出現在上面那一份裡——而不放行的話，
+  // **第一個從頭到尾看過那份卷子的人就是考試當天的學生**。
+  return isNamedTarget(assignmentId, userId);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -604,6 +609,14 @@ export async function saveAnswer(
   const attempt = await loadOwnAttempt(attemptId, userId);
   const now = new Date();
 
+  // 作廢要與交卷分開說。`attemptVoid.mjs` 的檔頭一直斷言這兩支都會回
+  // 「這份作答已經被作廢」，而實際上只有 `submitAttempt` 會——被抓到
+  // 作弊的學生正在寫，不會去按交卷，所以他看到的是「已經交出去了」。
+  // 他會以為自己不小心按到交卷，然後舉手說系統壞了，而老師這時
+  // 正打算不動聲色。前端已經照 `code` 分流，不必跟著改。
+  if (attempt.status === 'VOIDED') {
+    throw err.conflict('VOIDED', '這份作答已經被作廢，請找老師處理');
+  }
   if (attempt.status !== 'IN_PROGRESS') {
     throw err.conflict('SUBMITTED', '這份考卷已經交出去了，不能再修改答案');
   }
@@ -896,26 +909,10 @@ async function countAnswered(attemptId: string): Promise<number> {
     where: { attemptId },
     select: { answerKeys: true, answerText: true, answerSlots: true },
   });
+  // 判斷本身在 `lib/examOps.mjs`（純函式、有測試）。老師的成績頁問的是
+  // 同一件事，而兩份實作的症狀是：老師看到「已作答 18/25」，學生自己
+  // 畫面上是 11，兩個都是系統算的。
   return rows.filter((r) => hasAnswer(r)).length;
-}
-
-function hasAnswer(r: {
-  answerKeys: number[];
-  answerText: string | null;
-  answerSlots: Prisma.JsonValue | null;
-}): boolean {
-  if (r.answerKeys.length > 0) return true;
-  if (r.answerText && r.answerText.trim() !== '') return true;
-  if (Array.isArray(r.answerSlots)) {
-    return r.answerSlots.some(
-      (s) =>
-        s != null &&
-        typeof s === 'object' &&
-        !Array.isArray(s) &&
-        String((s as Record<string, unknown>).value ?? '').trim() !== '',
-    );
-  }
-  return false;
 }
 
 function countLayout(raw: Prisma.JsonValue | null): number {
@@ -1239,19 +1236,26 @@ export async function listStudentTasks(userId: string): Promise<StudentTask[]> {
   const now = new Date();
 
   // 與 `resolveRecipients` 對齊：它只認 `systemRole = STUDENT` 且沒有被
-  // 軟刪除的帳號。這裡不跟著擋的話，被個別指定的老師會在清單上看到
-  // 一份任務、按下去卻被告知「沒有派給你」——**兩份判定不一致的
-  // 症狀就長這樣**，而且看起來像是權限壞了。
+  // 軟刪除的帳號。這裡不跟著擋的話，班上被派成作答對象的老師會在
+  // 清單上看到一份任務、按下去卻被告知「沒有派給你」——**兩份判定
+  // 不一致的症狀就長這樣**，而且看起來像是權限壞了。
+  //
+  // 唯一的例外與 `mayAttempt` 同一條：**個別指定給自己的試考**。
+  // 非學生帳號只看得到「有人明確寫了他的 userId」的那幾份，班級成員
+  // 的那一路完全不走——所以他不會因為在某個班的名冊裡而收到考卷。
   const me = await prisma.user.findFirst({
-    where: { id: userId, systemRole: 'STUDENT', deletedAt: null },
-    select: { id: true },
+    where: { id: userId, deletedAt: null },
+    select: { id: true, systemRole: true },
   });
   if (!me) return [];
+  const trialOnly = me.systemRole !== 'STUDENT';
 
-  const memberships = await prisma.classMembership.findMany({
-    where: { userId, leftAt: null, role: 'STUDENT' },
-    select: { classId: true },
-  });
+  const memberships = trialOnly
+    ? []
+    : await prisma.classMembership.findMany({
+        where: { userId, leftAt: null, role: 'STUDENT' },
+        select: { classId: true },
+      });
   const classIds = memberships.map((m) => m.classId);
 
   const rows = await prisma.assignment.findMany({

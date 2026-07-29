@@ -19,6 +19,7 @@ import { test } from 'node:test';
 
 import {
   checkReleaseChange,
+  cohortGate,
   fmtTaipei,
   maySeeResult,
   pickExplanation,
@@ -488,4 +489,119 @@ test('放行時刻在未來時，再按一次放行仍然算重複', () => {
   const future = new Date('2026-08-10T00:00:00Z');
   const r = checkReleaseChange({ releasePolicy: 'MANUAL', dueAt: DUE, releasedAt: future }, true);
   assert.equal(r.ok, false);
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 六、同一份卷子派給好幾個班
+//
+// 忠孝仁三個班考同一份卷子，忠班週五 15:00 截止、孝仁週六早上才考。
+// 只看自己的 `dueAt` 的話，週五 15:00:01 起忠班 32 個人拿得到整份
+// 題目、標準答案與詳解，而另外 58 個人隔天才要寫同一份。
+//
+// 這與 ON_DUE 本來要防的事是同一件事，只是時間軸從一節課拉長到一天。
+// 而它與上面每一格一樣：**寫錯不會有任何錯誤訊息**，發現的方式是
+// 那兩班的平均特別高，而那時候已經沒有人記得改過什麼。
+// ─────────────────────────────────────────────────────────────────
+
+/** 忠班：週五 15:00 截止。 */
+const ZHONG_DUE = new Date('2026-07-31T07:00:00Z');
+/** 孝班與仁班：週六 11:00 截止。 */
+const XIAO_DUE = new Date('2026-08-01T03:00:00Z');
+/** 忠班考完了，孝仁還沒考。 */
+const SATURDAY_MORNING = new Date('2026-08-01T01:00:00Z');
+/** 三個班都考完了。 */
+const SATURDAY_NOON = new Date('2026-08-01T04:00:00Z');
+
+const zhong = {
+  releasePolicy: 'ON_DUE',
+  dueAt: ZHONG_DUE,
+  paperCohort: [
+    { id: 'a_xiao', title: '第一次段考模擬（孝）', dueAt: XIAO_DUE },
+    { id: 'a_ren', title: '第一次段考模擬（仁）', dueAt: XIAO_DUE },
+  ],
+};
+
+test('沒帶同卷任務時，判定與只看自己的截止時間完全一樣', () => {
+  // 呼叫端沒查這份資料時不可以推論出「沒有別的班」——一份空陣列
+  // 與「還沒查」在程式裡長得一模一樣，而猜錯的方向是洩題。
+  const g = cohortGate({ releasePolicy: 'ON_DUE', dueAt: ZHONG_DUE }, SATURDAY_MORNING);
+  assert.equal(+g.dueAt, +ZHONG_DUE);
+  assert.equal(g.blockedBy.length, 0);
+  assert.equal(g.unbounded, false);
+});
+
+test('忠班考完的隔天早上，孝仁還沒考，忠班仍然看不到答案', () => {
+  const v = maySeeResult(zhong, handedIn, SATURDAY_MORNING);
+  assert.equal(v.level, 'SCORE_ONLY', '這一格通不過就是跨班洩題');
+  assert.equal(+v.availableAt, +XIAO_DUE, '要說得出真正的開放時刻，不是自己的截止時間');
+  assert.ok(v.reason.includes('別的班'), `理由要說得出為什麼還要等（現在是：${v.reason}）`);
+});
+
+test('最後一班也考完之後，三個班一起開放', () => {
+  const v = maySeeResult(zhong, handedIn, SATURDAY_NOON);
+  assert.equal(v.level, 'FULL');
+});
+
+test('已經考完的同卷任務擋不住任何東西', () => {
+  // 上禮拜就截止的那一份算進來的話，這一份的檢討會永遠開不了。
+  const g = cohortGate(
+    {
+      releasePolicy: 'ON_DUE',
+      dueAt: XIAO_DUE,
+      paperCohort: [{ id: 'a_zhong', title: '（忠）', dueAt: ZHONG_DUE }],
+    },
+    SATURDAY_NOON,
+  );
+  assert.equal(+g.dueAt, +XIAO_DUE);
+  assert.equal(g.blockedBy.length, 0);
+});
+
+test('同卷任務沒設截止時間時，擋住而且說得出是設定問題', () => {
+  // 一份沒有截止時間的任務隨時可能有人在寫。忽略它等於在那條路上
+  // 放行洩題，而洩題不會被回報。
+  const v = maySeeResult(
+    {
+      releasePolicy: 'ON_DUE',
+      dueAt: ZHONG_DUE,
+      paperCohort: [{ id: 'a_open', title: '自主練習（同一份卷子）', dueAt: null }],
+    },
+    handedIn,
+    SATURDAY_NOON,
+  );
+  assert.equal(v.level, 'SCORE_ONLY');
+  assert.equal(v.availableAt, null);
+  assert.ok(v.reason.includes('老師'), '要告訴學生去找誰');
+});
+
+test('自己沒設截止但同卷任務有：仍然是設定問題，不放行', () => {
+  const v = maySeeResult(
+    {
+      releasePolicy: 'ON_DUE',
+      dueAt: null,
+      paperCohort: [{ id: 'a_xiao', title: '（孝）', dueAt: XIAO_DUE }],
+    },
+    handedIn,
+    SATURDAY_NOON,
+  );
+  // 自己沒有截止時間 → 這一份的「截止後」永遠不會到。同卷那一份
+  // 已經考完了，所以擋住的理由回到原本那一個。
+  assert.equal(v.level, 'SCORE_ONLY');
+});
+
+test('同卷任務不影響 ON_SUBMIT 與 MANUAL', () => {
+  // 老師明確選了「交卷後開放」就是他要的設定，系統不該自作主張
+  // 把它改成 ON_DUE。跨班洩題的警告在派卷那一頁上說，不在這裡擋。
+  const cohort = [{ id: 'a_xiao', title: '（孝）', dueAt: XIAO_DUE }];
+  assert.equal(
+    maySeeResult({ releasePolicy: 'ON_SUBMIT', dueAt: ZHONG_DUE, paperCohort: cohort }, handedIn, SATURDAY_MORNING).level,
+    'FULL',
+  );
+  assert.equal(
+    maySeeResult(
+      { releasePolicy: 'MANUAL', dueAt: ZHONG_DUE, releasedAt: RELEASED, paperCohort: cohort },
+      handedIn,
+      SATURDAY_MORNING,
+    ).level,
+    'FULL',
+  );
 });

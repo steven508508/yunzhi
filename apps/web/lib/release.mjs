@@ -42,10 +42,21 @@
  */
 
 /**
+ * @typedef {object} CohortAssignment 同一份卷子上的另一個任務。
+ * @property {string} [id]
+ * @property {string} [title]
+ * @property {Date|null} [dueAt]
+ */
+
+/**
  * @typedef {object} ReleaseAssignment
  * @property {string} releasePolicy IMMEDIATE / ON_SUBMIT / ON_DUE / MANUAL / NEVER
  * @property {Date|null} [dueAt]
  * @property {Date|null} [releasedAt] 老師手動放行的時刻。MANUAL 時才看它。
+ * @property {CohortAssignment[]} [paperCohort] **同一份卷子的其他任務。**
+ *   給了才會被 ON_DUE 考慮，見 `cohortGate`。沒給就是舊行為（只看自己的
+ *   `dueAt`），因為呼叫端沒查這份資料時，寧可照舊也不要用一份空陣列
+ *   推論出「沒有別的班了」。
  */
 
 /**
@@ -53,6 +64,84 @@
  * @property {string} status IN_PROGRESS / SUBMITTED / GRADED / VOIDED
  * @property {Date|null} [submittedAt]
  */
+
+// ─────────────────────────────────────────────────────────────────
+// 同一份卷子的其他任務
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {object} CohortGate
+ * @property {Date|null} dueAt 這一份的檢討實際上要等到什麼時候。
+ *   自己的截止時間，與**同一份卷子上還沒考完的任務**裡最晚的那一個，
+ *   取比較晚的。`null` 代表沒有一個確定的時刻（見 `unbounded`）。
+ * @property {boolean} unbounded 有一個同卷任務**沒有設截止時間**，
+ *   所以「最後一班考完」那一刻永遠不會到。
+ * @property {CohortAssignment[]} blockedBy 擋住這一份的那幾個任務。
+ *   訊息與老師端的警告都要說得出是哪幾個班還沒考。
+ */
+
+/**
+ * 這一份的檢討要等到什麼時候，**把同一份卷子的其他任務算進去**。
+ *
+ * # 為什麼非算不可
+ *
+ * 忠孝仁三個班考同一份卷子，忠班週五 15:00 截止、孝仁週六早上才考。
+ * 只看自己的 `dueAt` 的話，週五 15:00:01 起忠班 32 個人拿得到整份
+ * 題目、標準答案與詳解，而另外 58 個人隔天才要寫同一份。傳一張截圖
+ * 只要三秒，事後完全查不出來——成績單上只會看到那兩班的平均特別高。
+ *
+ * 這與 ON_DUE 本來要防的事**是同一件事**（先寫完的人不能拿到答案），
+ * 只是把時間軸從一節課拉長到 24 小時。而派卷表單那句「正式考試選
+ * 『截止後』，全班同時看到，先寫完的人不會洩題」在單一班級內是對的，
+ * 跨班是錯的，偏偏它是唯一在場的指引。
+ *
+ * # 已經考完的任務不算
+ *
+ * 判斷「還沒考完」用的是 `dueAt > now`。一個上禮拜就截止的同卷任務
+ * 擋不住任何東西，把它算進來只會讓這一份的檢討永遠開不了。
+ *
+ * # 沒設截止時間的同卷任務算「擋住」而不是「不算」
+ *
+ * 一份沒有截止時間的任務隨時都可能有人在寫。忽略它等於在那條路上
+ * 放行洩題，而洩題不會被回報。所以標成 `unbounded`，由呼叫端說出
+ * 「同一份卷子還有一個沒設截止時間的任務」——那是一個設定問題，
+ * 要有人去改，不是靜靜地放行。
+ *
+ * @param {ReleaseAssignment} assignment
+ * @param {Date} [now]
+ * @returns {CohortGate}
+ */
+export function cohortGate(assignment, now = new Date()) {
+  const own = assignment.dueAt ?? null;
+  const cohort = assignment.paperCohort ?? [];
+  /** @type {CohortAssignment[]} */
+  const blockedBy = [];
+  let gate = own;
+  let unbounded = false;
+
+  for (const other of cohort) {
+    if (!other) continue;
+    const due = other.dueAt ?? null;
+    if (due == null) {
+      unbounded = true;
+      blockedBy.push(other);
+      continue;
+    }
+    if (due <= now) continue; // 已經考完了，擋不住任何東西
+    blockedBy.push(other);
+    if (gate == null || due > gate) gate = due;
+  }
+
+  return { dueAt: unbounded ? null : gate, unbounded, blockedBy };
+}
+
+/** 「還有 2 個任務（高三孝、高三仁）」。訊息裡最多列三個，其餘用數字帶過。 */
+function nameCohort(list) {
+  const names = list.map((a) => a.title).filter((t) => typeof t === 'string' && t !== '');
+  if (names.length === 0) return `${list.length} 個任務`;
+  const head = names.slice(0, 3).join('、');
+  return names.length > 3 ? `${head} 等 ${names.length} 個任務` : head;
+}
 
 /** @type {(reason: string, availableAt?: Date|null) => ResultVisibility} */
 const none = (reason, availableAt = null) => ({ level: 'NONE', reason, availableAt });
@@ -127,7 +216,17 @@ export function maySeeResult(assignment, attempt, now = new Date()) {
       return full('這份任務在交卷後開放檢討。');
 
     case 'ON_DUE': {
-      const dueAt = assignment.dueAt ?? null;
+      // 同一份卷子還被別的任務用著時，「截止」指的是**最後一班考完**，
+      // 不是這一班考完。理由見 `cohortGate`。
+      const gate = cohortGate(assignment, now);
+      if (gate.unbounded) {
+        return scoreOnly(
+          `同一份卷子還有一個沒有設截止時間的任務（${nameCohort(gate.blockedBy)}），` +
+            '在它結束之前開放檢討等於把答案交給還沒考的班級。' +
+            '想看逐題檢討與解析，請告訴老師。',
+        );
+      }
+      const dueAt = gate.dueAt;
       if (!dueAt) {
         // 設了「截止後開放」卻沒有截止時間。那個時刻永遠不會到，
         // 所以逐題檢討不能開——但分數沒有理由跟著扣住，而且要
@@ -145,9 +244,12 @@ export function maySeeResult(assignment, attempt, now = new Date()) {
       // 判成 FULL 的話，先交卷的人在截止前就拿得到整份答案，
       // 而他的同學還在寫。傳一張截圖只要三秒，而事後完全查不出來
       // ——成績單上只會看到那個班的平均特別高。
+      const held = gate.blockedBy.length > 0;
       return scoreOnly(
-        `逐題檢討與解析要等 ${fmtTaipei(dueAt)} 截止之後才會開放，全班同時。` +
-          '這是為了避免先交卷的人把答案傳出去。',
+        `逐題檢討與解析要等 ${fmtTaipei(dueAt)} 之後才會開放，全班同時。` +
+          (held
+            ? '這份卷子還有別的班級沒有考完，提早開放等於把答案交給他們。'
+            : '這是為了避免先交卷的人把答案傳出去。'),
         dueAt,
       );
     }

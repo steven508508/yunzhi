@@ -1589,3 +1589,205 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-qedit__row { flex-wrap: wrap; }
   .yz-qedit__label { flex: 0 0 44px; }
 }
+
+/* ═══ 校對介面 ═══════════════════════════════════════════════
+   匯入校對頁（app/(app)/import/[jobId]）。驗收標準是 50 題 20 分鐘，
+   所以這一段的每一條都要對得起「每題 24 秒」：能省一次捲動、
+   省一次翻紙、省一次「我剛剛存到了嗎」的猶豫，就寫在這裡。 */
+
+/* ── 原稿頁面影像 ──────────────────────────────────────────
+   左欄以前畫的是右欄的同一份 AI 輸出。現在放真正的頁面影像，
+   並用候選題的 sourceBbox 在上面框出這一題。 */
+/* overflow: hidden 是必要的而不是防禦性的：底下那個框用 9999px 的
+   外擴陰影把框以外的部分壓暗，不裁掉的話那片暗色會蓋到整欄。 */
+.yz-page { position: relative; margin: 0 auto; overflow: hidden; }
+.yz-page img { display: block; width: 100%; height: auto; }
+
+/* 框線用硃砂而不是半透明色塊：色塊會蓋住底下的字，而老師要看的
+   正是那幾個字。左側加粗一道，與 .yz-q--current 是同一套語彙。 */
+.yz-page__box {
+  position: absolute;
+  border: 1px solid var(--mark);
+  box-shadow: inset 2px 0 0 var(--mark), 0 0 0 9999px rgba(251, 250, 247, 0.35);
+  pointer-events: none;
+}
+
+.yz-srcnav { display: inline-flex; align-items: center; gap: 2px; margin-left: 8px; }
+.yz-srcnav > span { font-family: var(--font-doc); font-size: 11.5px; min-width: 44px; text-align: center; }
+.yz-srcnav .yz-btn { padding: 0 6px; min-height: 20px; line-height: 1.4; }
+
+/* 本題附圖。幾何題沒有圖就是不能校的題目。 */
+.yz-figs { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+.yz-figs img {
+  max-width: 240px; max-height: 200px;
+  border: 1px solid var(--rule-2); background: var(--paper-raised);
+}
+
+/* ── 存檔狀態 ──────────────────────────────────────────────
+   「已儲存」在失敗之後仍然掛著，是這一頁最貴的一句假話：
+   老師會照著它決定要不要關掉分頁。所以失敗要占畫面。 */
+.yz-save { color: var(--ink-3); min-width: 52px; }
+.yz-save--failing { color: var(--mark); font-weight: 600; }
+
+.yz-savebar {
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--mark);
+  background: var(--mark-soft);
+  color: var(--mark);
+  font-size: 12.5px; line-height: 1.75;
+}
+
+/* ── 記號欄 ────────────────────────────────────────────────
+   已入庫用實心方點，與「校畢」的 ✓ 分開——那是兩件事：
+   校畢是「我看過了」，入庫是「它已經在題庫裡，改這裡沒有用」。 */
+.yz-mark--committed { color: var(--ink-3); }
+.yz-mark--committed .yz-mark__glyph::after { content: "■"; color: var(--confirm); font-size: 9px; }
+
+/* 答案是 AI 自己算的：左緣一道硃砂細線。那一批是老師唯一需要
+   花時間驗算的，先讓他看得出是哪幾題。 */
+.yz-mark--solved { box-shadow: inset -2px 0 0 var(--mark-soft); }
+
+/* ── 選項編輯 ──────────────────────────────────────────────
+   選項要能增、刪、改內容、改順序。改不掉的話那些題目只能標「存疑」，
+   而存疑進不了題庫也沒有第二條路。 */
+.yz-opt { align-items: flex-start; }
+.yz-opt__pick {
+  font-family: var(--font-doc); color: var(--ink-2);
+  flex: 0 0 auto; padding: 0 2px; cursor: pointer;
+}
+.yz-opt__pick:disabled { cursor: default; }
+.yz-opt--answer .yz-opt__pick { color: var(--ink); font-weight: 700; }
+
+/* 移動與刪除只在滑鼠移到那一列時才顯出來，平時淡出——
+   五十題乘四個選項等於兩百組按鈕，全部畫滿會蓋掉題目本身。 */
+.yz-opt__tools { display: flex; gap: 1px; opacity: 0; transition: opacity .12s; }
+.yz-opt:hover .yz-opt__tools,
+.yz-opt:focus-within .yz-opt__tools { opacity: 1; }
+.yz-opt__tools button {
+  font-family: var(--font-ui); font-size: 12px; color: var(--ink-3);
+  padding: 0 5px; cursor: pointer; line-height: 1.6;
+}
+.yz-opt__tools button:hover { color: var(--ink); background: var(--select); }
+.yz-opt__tools button:disabled { opacity: .3; cursor: default; }
+
+/* 行內的下拉與數字框：中繼資料那一列本來就是一行小字，
+   換成表單控制項之後不可以把那一行撐成一塊表單。 */
+.yz-in--inline {
+  display: inline-block; width: auto; min-height: 22px;
+  padding: 1px 4px; font-size: 11.5px; vertical-align: baseline;
+}
+
+/* 已入庫的欄位：看得到、改不動。點線底線收起來，免得看起來像可以改。 */
+.yz-edit--locked { color: var(--ink-2); }
+.yz-edit--locked:hover { border-bottom-color: transparent; }
+
+/* 空欄位的提示字。contentEditable 沒有 placeholder。 */
+.yz-edit:empty::before {
+  content: attr(data-placeholder);
+  color: var(--ink-3);
+}
+
+/* ── 答案來源 ──────────────────────────────────────────────
+   題本印的掃一眼就好，AI 推導的要自己驗算——差 30 到 120 秒。
+   這一欄以前完全沒有畫出來。 */
+.yz-origin--ai { color: var(--mark); }
+.yz-origin--ai b { color: var(--mark); font-weight: 600; }
+
+/* ── 知識點 ────────────────────────────────────────────────
+   標錯的話那一題以後永遠算在錯的章節底下，所以要改得掉。 */
+.yz-kp {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 8px; font-family: var(--font-ui); font-size: 11.5px; color: var(--ink-2);
+}
+.yz-kp__label { color: var(--ink-3); }
+.yz-kp__chip {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  padding: 1px 6px; border: 1px solid var(--rule); border-radius: var(--r-sm);
+  background: var(--paper-raised);
+}
+.yz-kp__chip em { font-style: normal; color: var(--ink-3); font-size: 10.5px; }
+.yz-kp__chip button { color: var(--ink-3); cursor: pointer; padding: 0 1px; }
+.yz-kp__chip button:hover { color: var(--mark); }
+
+/* ── 出版社專屬題型 ────────────────────────────────────────
+   後端與端到端測試都齊全，只有畫面上沒有入口——模型問了，
+   老師永遠不知道有人在問他。 */
+.yz-typebar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-sunk);
+  font-size: 12.5px; color: var(--ink-2);
+}
+.yz-typebar__sample {
+  display: block; max-width: 100%; max-height: 220px;
+  margin-bottom: 10px; border: 1px solid var(--rule-2);
+}
+
+/* 入庫結果裡指回某一題的按鈕。它是導覽而不是動作，所以長得像連結。 */
+.yz-linkish {
+  color: var(--ink); text-decoration: underline; text-underline-offset: 2px;
+  cursor: pointer; font-family: var(--font-doc);
+}
+.yz-linkish:disabled { color: var(--ink-3); text-decoration: none; cursor: default; }
+
+/* ── 進度頁 ────────────────────────────────────────────────
+   正在跑的那一階段要顯示已經跑了多久。沒有它，老師三分鐘後
+   會想「它在動嗎」，五分鐘後想「當掉了吧」。 */
+.yz-step__time--live { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* ── 考試營運 ──────────────────────────────────────────────────
+   派卷之後到成績出來之間的那幾個現場動作：延長作答時間、立刻結束、
+   逐題人工給分、以及考試進行中的自動更新。
+
+   共同點是它們都出現在**老師只有三分鐘、而且全班在等**的時候，
+   所以版面上一律是一整列橫排、目標區夠大、不需要捲動去找按鈕。 */
+
+/* 延長時間與立刻結束。兩顆按鈕與輸入框同一列，因為它們是同一個
+   決定的兩個方向——分開放的話，老師在最忙的那三分鐘裡會漏看其中一顆。 */
+.yz-clock {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule-2);
+  border-left: 2px solid var(--ink);
+  border-radius: var(--r-sm);
+  background: var(--select);
+}
+.yz-clock__row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+/* 分鐘數只有兩三位數，給它一個窄而固定的寬度，按鈕才不會被推到下一行。 */
+.yz-clock__row .yz-field { flex: 0 0 auto; max-width: 200px; }
+.yz-clock .yz-group__note { margin-top: 8px; }
+
+/* 逐題人工給分。整列排在那一題的解析下方，而不是彈出一個對話框——
+   老師改一份作文卷是連續打十次分數，十次開關對話框沒有人受得了。 */
+.yz-score {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px dashed var(--rule-2);
+}
+.yz-score__lab { font-size: 11.5px; color: var(--ink-2); }
+/* 分數欄固定窄寬：它旁邊的評語欄才是要吃掉剩餘寬度的那一個。 */
+.yz-score__in { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
+.yz-score__max { font-size: 11.5px; color: var(--ink-3); }
+.yz-score__note { flex: 1 1 220px; min-width: 0; }
+
+/* 考試進行中的自動更新。刻意做得小而不搶眼——它是一個開關，
+   不是一個狀態指示器；監考老師的注意力要留給下面的名單。 */
+.yz-live {
+  display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin: 0 0 14px;
+  font-size: 11.5px; color: var(--ink-2);
+}
+.yz-live input { margin: 0; }
+.yz-live__now {
+  border: none; background: none; padding: 0;
+  font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.yz-live__now:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+@media (max-width: 620px) {
+  /* 手機上輸入框各佔一整行。並排時分數欄會被壓到看不出是輸入框。 */
+  .yz-clock__row .yz-field { max-width: none; flex: 1 1 100%; }
+  .yz-score__note { flex: 1 1 100%; }
+}

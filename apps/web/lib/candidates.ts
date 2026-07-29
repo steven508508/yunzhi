@@ -29,7 +29,43 @@ export type CandidateView = {
   solveTrace: unknown;
   kpSuggestions: { id: string; name: string; weight: number; evidence?: string }[];
   sourcePage: number | null;
+  /**
+   * 這一題在原稿頁面上的位置（頁寬高的 0–1 比例）。
+   * 校對介面靠它在原稿影像上框出這一題——沒有它，老師要自己在
+   * 一整頁裡找第幾題，那是每題 2–8 秒的翻頁稅。
+   */
+  sourceBbox: { page?: number; x0: number; y0: number; x1: number; y1: number } | null;
+  /** 這一題的附圖。幾何題沒有圖就是不能校的題目。 */
+  assets: { key: string; page: number | null; labels?: string[]; kind?: string }[];
+  /** 入庫時被退回的原因。寫得很好，而在這之前沒有任何畫面讀得到。 */
+  reviewNote: string | null;
+  /**
+   * 已經入庫的話是題目 id。
+   *
+   * 少了這一欄，校對介面在結構上就分不出「已入庫」與「還沒入庫」——
+   * 於是已入庫的題目仍然可以改，改了寫進一張沒有人會再讀的暫存表，
+   * 而畫面亮著「已儲存」。
+   */
+  questionId: string | null;
+  /** 出版社專屬題型：模型提議、還沒確認。 */
+  customTypeName: string | null;
   state: string;
+};
+
+/**
+ * 原稿頁面。校對介面左欄要顯示的就是它。
+ *
+ * 影像本身不放進這裡（一份 36 頁的題本是幾十 MB），只帶尺寸與品質；
+ * 位元組走 `/api/import/[jobId]/image`，那一支才有權限檢查。
+ */
+export type PageView = {
+  fileId: string;
+  fileName: string;
+  index: number;
+  width: number;
+  height: number;
+  quality: number;
+  qualityNotes: string[];
 };
 
 export async function loadJob(jobId: string, tenantId: string) {
@@ -48,6 +84,46 @@ export async function loadJob(jobId: string, tenantId: string) {
   });
 
   return { job, candidates: candidates.map(toView) };
+}
+
+/**
+ * 這份工作的原稿頁面清單。
+ *
+ * 只取題本與未知角色的檔案：候選題的 `sourcePage` 是切分階段給的，
+ * 而切分階段只看這兩種角色（`import-pipeline.mjs`）。把答案卷的頁面
+ * 也列進來的話，頁碼會對到另一份檔案的第 12 頁——**那比沒有影像更糟**，
+ * 因為老師會拿一張不相干的頁面當成原稿去比對。
+ */
+export async function loadPages(jobId: string, tenantId: string): Promise<PageView[]> {
+  const job = await prisma.importJob.findFirst({
+    where: { id: jobId, tenantId },
+    select: { id: true },
+  });
+  if (!job) return [];
+
+  const pages = await prisma.importPage.findMany({
+    where: { jobId, file: { role: { in: ['QUESTION_BOOK', 'UNKNOWN'] } } },
+    orderBy: [{ fileId: 'asc' }, { index: 'asc' }],
+    select: {
+      fileId: true,
+      index: true,
+      width: true,
+      height: true,
+      quality: true,
+      qualityNotes: true,
+      file: { select: { fileName: true } },
+    },
+  });
+
+  return pages.map((p) => ({
+    fileId: p.fileId,
+    fileName: p.file.fileName,
+    index: p.index,
+    width: p.width,
+    height: p.height,
+    quality: p.quality ?? 1,
+    qualityNotes: Array.isArray(p.qualityNotes) ? (p.qualityNotes as string[]) : [],
+  }));
 }
 
 function toView(c: Record<string, any>): CandidateView {
@@ -72,6 +148,11 @@ function toView(c: Record<string, any>): CandidateView {
     solveTrace: c.solveTrace,
     kpSuggestions: Array.isArray(c.kpSuggestions) ? c.kpSuggestions : [],
     sourcePage: c.sourcePage,
+    sourceBbox: c.sourceBbox ?? null,
+    assets: Array.isArray(c.assets) ? c.assets.filter((a: any) => a?.key) : [],
+    reviewNote: c.reviewNote ?? null,
+    questionId: c.questionId ?? null,
+    customTypeName: c.customTypeId ? null : (c.customTypeName ?? null),
     state: c.state,
   };
 }
@@ -133,9 +214,25 @@ export async function saveReviews(
   tenantId: string,
   userId: string,
   changes: { id: string; state?: string; patch?: Record<string, unknown>; note?: string }[],
+  /**
+   * 這一批涵蓋的校對秒數（**增量**，不是累計）。
+   *
+   * 業主的驗收標準是「50 題 20 分鐘」，而在這之前這個數字送上來被
+   * zod 收下就丟掉了——`schema.prisma` 為它留的兩欄零寫入端。
+   * 驗收時沒有任何一份資料能回答「我們實際上校一份題本要多久」。
+   *
+   * 收增量而不是「本次開頁到現在」，是因為老師會分好幾次校完一份
+   * 題本；增量在這裡直接累加，跨場次自然接得起來。
+   */
+  reviewSeconds = 0,
 ) {
   const job = await prisma.importJob.findFirst({ where: { id: jobId, tenantId } });
   if (!job) throw new Error('找不到匯入工作，或不屬於此租戶');
+
+  // 上限是防線而不是禮貌：一個掛在背景整晚的分頁會把八小時算進校對
+  // 用時，而那正好是驗收要看的那個數字。前端也夾一次（reviewState.mjs），
+  // 但那一層是可以被繞過的。
+  const seconds = Math.max(0, Math.min(Math.floor(reviewSeconds) || 0, 3600));
 
   // 單一交易。部分成功會讓校對進度與實際狀態不一致，
   // 而老師無從得知哪幾題沒存到。
@@ -203,7 +300,17 @@ export async function saveReviews(
 
     return tx.importJob.update({
       where: { id: jobId },
-      data: { confirmedCount: confirmed, flaggedCount: flagged },
+      data: {
+        confirmedCount: confirmed,
+        flaggedCount: flagged,
+        // increment 而不是覆寫：同一份題本會分好幾次校完，而且
+        // sendBeacon 那條路不保證只送一次——用累計值覆寫的話，
+        // 第二場次一開頁就會把第一場次的用時抹掉。
+        ...(seconds > 0 ? { reviewSeconds: { increment: seconds } } : {}),
+        // 第一次有人動這份題本的時刻。之後不再改寫，否則「從什麼時候
+        // 開始校的」會一路被推到最後一次存檔。
+        ...(job.reviewStartedAt ? {} : { reviewStartedAt: new Date() }),
+      },
     });
   });
 }

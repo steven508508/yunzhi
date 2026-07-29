@@ -23,6 +23,11 @@ import {
   withoutTenantScope,
 } from '../apps/web/lib/tenantContext.mjs';
 import { gradeAttempt } from '../apps/web/lib/grading.mjs';
+import {
+  attemptWritable,
+  checkEndNow,
+  checkExtend,
+} from '../apps/web/lib/attemptClock.mjs';
 
 // 用 pg-shim 而非 PrismaClient。理由見 tools/pg-shim.mjs 的檔頭：
 // Prisma 的查詢引擎要從外部網域下載，而這套系統要部署的補習班機房
@@ -748,6 +753,186 @@ async function mainScoped({ mine, other }) {
       data: { assignmentId: a.id, userId: student.id, attemptNo: 2 },
     });
     assert.equal(retry.attemptNo, 2);
+    await prisma.assignment.deleteMany({ where: { id: a.id } });
+  });
+
+  // ── 考試當天的時鐘 ─────────────────────────────────────────
+  //
+  // 延長作答時間與立刻結束，兩者都只有一種實作方式：**直接改
+  // attempts.expiresAt**。改任務的 `timeLimitMin` 沒有用（凍結，而且
+  // 不會回頭重算已經開始的那幾份），改 `dueAt` 也停不掉正在寫的人
+  // （`attemptWritable` 只看 expiresAt）。
+  //
+  // 判斷本身在 lib/attemptClock.mjs，已經有單元測試。這一段驗的是
+  // **跨越資料庫邊界之後還對不對**：時刻寫進 timestamp(3) 再讀回來
+  // 還是同一毫秒嗎、批次更新有沒有動到不該動的那幾份、以及交卷時間
+  // 的 CHECK 會不會被延長撞到。
+  //
+  // 這幾件事在單元測試裡看不到，而它們錯的症狀是：老師按下「全部
+  // 延長 10 分鐘」，畫面說成功，而學生的倒數一秒都沒有變。
+
+  section('考試當天的時鐘');
+
+  await test('延長 10 分鐘：過期的重新可寫，已交卷的一動也不動', async () => {
+    const a = await newAssignment('延長時間測試', { timeLimitMin: 60 });
+    const now = new Date();
+    const startedAt = new Date(now.getTime() - 70 * 60 * 1000);
+
+    // 三份作答，各自代表現場的一種人：
+    //   · 斷線的那一個——時間到了、還掛在進行中
+    //   · 還在寫的那一個——時間還沒到
+    //   · 已經交卷的那一個——**延長絕對不能動到他**
+    const stranded = await prisma.attempt.create({
+      data: {
+        assignmentId: a.id,
+        userId: student.id,
+        attemptNo: 1,
+        status: 'IN_PROGRESS',
+        startedAt,
+        expiresAt: new Date(now.getTime() - 5 * 60 * 1000),
+      },
+    });
+    const writing = await prisma.attempt.create({
+      data: {
+        assignmentId: a.id,
+        userId: classmate.id,
+        attemptNo: 1,
+        status: 'IN_PROGRESS',
+        startedAt,
+        expiresAt: new Date(now.getTime() + 3 * 60 * 1000),
+      },
+    });
+    const submittedExpiry = new Date(now.getTime() - 20 * 60 * 1000);
+    const handedIn = await prisma.attempt.create({
+      data: {
+        assignmentId: a.id,
+        userId: teacher.id,
+        attemptNo: 1,
+        status: 'SUBMITTED',
+        startedAt,
+        expiresAt: submittedExpiry,
+        submittedAt: new Date(now.getTime() - 25 * 60 * 1000),
+        totalScore: 88,
+      },
+    });
+
+    assert.equal(
+      attemptWritable(await prisma.attempt.findFirst({ where: { id: stranded.id } }), now),
+      false,
+      '前提不成立：這一份本來就該是寫不進去的',
+    );
+
+    // ── 老師按下「全部延長 10 分鐘」──────────────────────────
+    //
+    // 這裡走的路徑與 lib/assignment.ts 的 `extendAttempts` 完全相同：
+    // 只撈進行中的、逐份算新的到期時刻、逐份寫回。
+    // **逐份**而不是一句 `expiresAt = 某個固定值`：每個人開始作答的
+    // 時刻不同，拉到同一個時刻的話晚開始的人反而被縮短。
+    const open = await prisma.attempt.findMany({
+      where: { assignmentId: a.id, status: 'IN_PROGRESS' },
+    });
+    assert.equal(open.length, 2, '進行中的應該只有兩份——已交卷的不該被撈進來');
+
+    for (const row of open) {
+      const plan = checkExtend(row, 10, now);
+      assert.equal(plan.ok, true, `${row.id} 應該延長得了`);
+      await prisma.attempt.updateMany({
+        where: { id: row.id },
+        data: { expiresAt: plan.expiresAt },
+      });
+    }
+
+    // ── 斷線的那一位：回到寫得進去 ─────────────────────────
+    const afterStranded = await prisma.attempt.findFirst({ where: { id: stranded.id } });
+    assert.equal(
+      afterStranded.expiresAt.getTime(),
+      new Date(now.getTime() + 5 * 60 * 1000).getTime(),
+      // 差一毫秒也算錯：timestamp(3) 存得下毫秒，而 `remainingSeconds`
+      // 是用它現算的。寫進去再讀出來變成別的值的話，學生的倒數會與
+      // 老師以為的不一樣，而兩邊都不覺得自己壞了。
+      `寫回去再讀出來變成 ${afterStranded.expiresAt.toISOString()}`,
+    );
+    assert.equal(
+      attemptWritable(afterStranded, now),
+      true,
+      '延長之後還是寫不進去的話，這個功能等於沒有',
+    );
+
+    // ── 還在寫的那一位：各自往後推 10 分鐘 ─────────────────
+    const afterWriting = await prisma.attempt.findFirst({ where: { id: writing.id } });
+    assert.equal(
+      afterWriting.expiresAt.getTime(),
+      new Date(now.getTime() + 13 * 60 * 1000).getTime(),
+      '兩個人被拉到同一個到期時刻了——晚開始的那一位等於被縮短',
+    );
+
+    // ── 已交卷的那一位：一個位元都不能變 ───────────────────
+    //
+    // **這是延長這個功能能不能被信任的前提。** 動到已交卷的那一份，
+    // 症狀是一場考完的考試在老師按下延長之後分數變了，而沒有人
+    // 會想到那是延長造成的。
+    const afterHandedIn = await prisma.attempt.findFirst({ where: { id: handedIn.id } });
+    assert.equal(afterHandedIn.status, 'SUBMITTED');
+    assert.equal(afterHandedIn.expiresAt.getTime(), submittedExpiry.getTime());
+    assert.equal(afterHandedIn.totalScore, 88);
+    assert.equal(
+      checkExtend(afterHandedIn, 10, now).ok,
+      false,
+      '已交卷的那一份居然延長得了',
+    );
+
+    await prisma.assignment.deleteMany({ where: { id: a.id } });
+  });
+
+  await test('立刻結束：正在寫的下一秒就收不到答案，已交卷的不受影響', async () => {
+    // 把任務的截止時間改成現在**停不掉正在寫的人**——`attemptWritable`
+    // 只看 `expiresAt`。這一格驗的是那條唯一有效的路徑。
+    const a = await newAssignment('立刻結束測試', { timeLimitMin: 60 });
+    const now = new Date();
+    const startedAt = new Date(now.getTime() - 10 * 60 * 1000);
+
+    const writing = await prisma.attempt.create({
+      data: {
+        assignmentId: a.id,
+        userId: student.id,
+        attemptNo: 1,
+        status: 'IN_PROGRESS',
+        startedAt,
+        expiresAt: new Date(now.getTime() + 50 * 60 * 1000),
+      },
+    });
+    // 不限時也沒有截止時間的那一種。以前它是死路：成績頁不算它卡住，
+    // 代為結算又回「請把任務的截止時間改成現在」——而那正是老師剛做過的事。
+    const untimed = await prisma.attempt.create({
+      data: {
+        assignmentId: a.id,
+        userId: classmate.id,
+        attemptNo: 1,
+        status: 'IN_PROGRESS',
+        startedAt,
+        expiresAt: null,
+      },
+    });
+
+    const open = await prisma.attempt.findMany({
+      where: { assignmentId: a.id, status: 'IN_PROGRESS' },
+    });
+    const ids = open.filter((r) => checkEndNow(r, now).ok).map((r) => r.id);
+    assert.equal(ids.length, 2, '不限時的那一份也該結束得掉，否則它永遠出不來');
+    await prisma.attempt.updateMany({ where: { id: { in: ids } }, data: { expiresAt: now } });
+
+    const oneSecondLater = new Date(now.getTime() + 1000);
+    for (const id of [writing.id, untimed.id]) {
+      const after = await prisma.attempt.findFirst({ where: { id } });
+      assert.equal(after.expiresAt.getTime(), now.getTime());
+      assert.equal(attemptWritable(after, now), true, '結束的那一秒還收得到答案');
+      assert.equal(
+        attemptWritable(after, oneSecondLater),
+        false,
+        '設成現在之後下一秒就該收不到答案',
+      );
+    }
+
     await prisma.assignment.deleteMany({ where: { id: a.id } });
   });
 

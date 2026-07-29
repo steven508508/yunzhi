@@ -345,13 +345,21 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
 /**
  * 從檔名猜角色。猜錯不要緊 —— 上傳介面會把猜測結果顯示出來讓老師改，
  * 猜對的那幾次省下的是他點選的力氣。
+ *
+ * **題本的判斷排在最前面**，與 `Upload.tsx` 的 `guessRole` 一致。
+ * 老師自己出的段考卷叫「115上第三次段考_數學A_含詳解.docx」，
+ * 而題本裡夾詳解是常態、純詳解本很少單獨存在——兩種都命中時猜題本。
+ * 猜成詳解本的後果是整份匯入在拆題階段永久失敗，而畫面上沒有任何
+ * 地方能改角色。
  */
 function guessRole(name: string): (typeof FILE_ROLES)[number] {
   const n = name.toLowerCase();
+  if (/題本|試題|考卷|考題|段考|小考|週考|月考|模擬|講義|習題|練習|exam|paper|quiz/.test(n)) {
+    return 'QUESTION_BOOK';
+  }
   if (/答案|解答|answer|key|ans/.test(n)) return 'ANSWER_KEY';
   if (/詳解|解析|explanation|solution/.test(n)) return 'EXPLANATION_BOOK';
   if (/評分|原則|rubric|級分/.test(n)) return 'RUBRIC';
-  if (/題本|試題|考卷|講義|paper|exam/.test(n)) return 'QUESTION_BOOK';
   return 'QUESTION_BOOK';
 }
 

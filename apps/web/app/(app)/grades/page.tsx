@@ -9,6 +9,7 @@ import Link from 'next/link';
 
 import { Denied, Empty, Note } from '@/components/Feedback';
 import { Table } from '@/components/Table';
+import { attemptStranded } from '@/lib/attemptClock.mjs';
 import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
@@ -65,6 +66,9 @@ export default async function GradesPage() {
         title: true,
         mode: true,
         dueAt: true,
+        // 「卡住了沒」要看它：一份沒設時限的作答，在任務截止而且不收
+        // 遲交之後就再也不會有人來交它。判定與 `attemptStranded` 共用。
+        allowLate: true,
         // 放行狀態。列表上要看得到，否則老師得一份一份點進去才知道
         // 哪幾份的學生還看不到成績——而那正是不會有人回報的那種事。
         releasePolicy: true,
@@ -78,7 +82,37 @@ export default async function GradesPage() {
     });
 
     const truncated = assignments.length > PAGE;
-    const rows = assignments.slice(0, PAGE).map((a) => {
+    const shown = assignments.slice(0, PAGE);
+
+    // 卡在「進行中」的份數。**首頁的待辦連到這一頁，而這張表以前
+    // 沒有任何一欄說得出是哪一份**——一場 32 人的考試裡有 3 個人
+    // 斷線，那一列的「交卷」顯示 29，跟正常的任務長得一模一樣。
+    // 週一早上翻上週三個班的任務時，那等於逐份點開。
+    //
+    // 一次查完再分組，不是每一列各查一次：後者是一頁 60 次往返。
+    const now = new Date();
+    const openRows = shown.length
+      ? await prisma.attempt.findMany({
+          where: {
+            assignmentId: { in: shown.map((a) => a.id) },
+            status: 'IN_PROGRESS',
+            // 不濾掉老師自己的試考。首頁的待辦沒有濾，濾了的話
+            // 那個數字點過來會落在一張說「0」的表上。
+          },
+          select: { assignmentId: true, status: true, expiresAt: true },
+        })
+      : [];
+    const strandedBy = new Map<string, number>();
+    const clockOf = new Map(shown.map((a) => [a.id, { dueAt: a.dueAt, allowLate: a.allowLate }]));
+    for (const r of openRows) {
+      // 判定與成績內頁、首頁待辦共用同一支純函式。三份各寫一個 if 的話，
+      // 最可能不一致的是邊界那一秒，而症狀是「首頁說有 3 份卡住，
+      // 點進去每一份都說還在作答時間內」。
+      if (!attemptStranded({ ...r, assignment: clockOf.get(r.assignmentId) }, now)) continue;
+      strandedBy.set(r.assignmentId, (strandedBy.get(r.assignmentId) ?? 0) + 1);
+    }
+
+    const rows = shown.map((a) => {
       const scored = a.attempts.filter((t) => t.totalScore !== null);
       const mean = scored.length
         ? Math.round(
@@ -95,6 +129,7 @@ export default async function GradesPage() {
         dueAt: a.dueAt,
         submitted: a.attempts.length,
         ungraded: a.attempts.filter((t) => t.totalScore === null).length,
+        stranded: strandedBy.get(a.id) ?? 0,
         mean,
         // 只有手動放行的任務才有「放行了沒」可言。其餘政策的開放時機
         // 由設定決定，硬要在這一欄寫個東西反而會讓老師以為那幾份也
@@ -105,6 +140,7 @@ export default async function GradesPage() {
     });
     type Row = (typeof rows)[number];
     const awaitingRelease = rows.filter((r) => r.needsRelease && r.submitted > 0).length;
+    const strandedTotal = rows.reduce((n, r) => n + r.stranded, 0);
 
     // 「這位老師一科都沒被指定」與「有科目但還沒有人交卷」在畫面上
     // 都是一張空表，但要做的事完全不同：前者要找管理員，後者要等
@@ -125,6 +161,16 @@ export default async function GradesPage() {
             選了什麼不會被改掉。
           </p>
         </div>
+
+        {/* 首頁的待辦「N 份作答卡在進行中」連到這一頁。它以前落在
+            一張沒有這個資訊的表上，所以老師要逐份點開才知道是哪一份。 */}
+        {strandedTotal > 0 && (
+          <Note tone="warn">
+            有 {strandedTotal} 份作答卡在「進行中」——時間已經到了，但沒有人按下交卷
+            （多半是斷線或關掉分頁）。在他們被收掉之前，成績列表上看不到這些人，
+            班級統計也把他們當成缺考。下面的「卡住」那一欄標出是哪幾份。
+          </Note>
+        )}
 
         {awaitingRelease > 0 && (
           <Note tone="warn">
@@ -160,6 +206,22 @@ export default async function GradesPage() {
               cell: (r: Row) => (r.mode === 'EXAM' ? '測驗' : '練習'),
             },
             { key: 'n', head: '交卷', numeric: true, cell: (r: Row) => r.submitted },
+            {
+              key: 'k',
+              head: '卡住',
+              numeric: true,
+              cell: (r: Row) =>
+                r.stranded ? (
+                  // 連到任務內頁而不是成績頁：那一頁上有「代為結算」，
+                  // 也有「延長時間」與「立刻結束」——現場要做的三件事
+                  // 都在同一個地方。
+                  <Link href={`/assignments/${r.id}`} className="yz-warn">
+                    {r.stranded}
+                  </Link>
+                ) : (
+                  ''
+                ),
+            },
             {
               key: 'u',
               head: '未計分',

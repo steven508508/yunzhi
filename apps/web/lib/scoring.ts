@@ -27,9 +27,16 @@
  */
 import type { Prisma } from '@prisma/client';
 
+import { resolveRecipients, type Recipient } from '@/lib/assignment';
 import type { SessionUser } from '@/lib/auth';
 import { attemptStranded } from '@/lib/attemptClock.mjs';
 import { checkReason, checkUnvoid, checkVoid } from '@/lib/attemptVoid.mjs';
+import {
+  checkManualScore,
+  countAnswered,
+  isManualScore,
+  manualScoreNote,
+} from '@/lib/examOps.mjs';
 import { prisma } from '@/lib/prisma';
 import { requireTenant } from '@/lib/tenant';
 import { gradeAttempt, roundScore } from '@/lib/grading.mjs';
@@ -231,6 +238,20 @@ export async function gradeAttemptById(
     const row = rowByQuestion.get(r.questionId);
     if (!row) continue; // 沒作答就沒有列可以更新，見檔頭
 
+    // **老師手動給過分的題目，重算一律不碰。**
+    //
+    // 下面那一段只擋得住「這次算不出分數」的情況（非選題）。客觀題
+    // 不一樣：自動計分每次都算得出一個分數，於是老師為了申訴手動改成
+    // 4 分的那一題，會在下一次「全班重新計分」時無聲地變回 0 分——
+    // 而重新計分是老師改完標準答案後一定會按的那顆按鈕。
+    //
+    // 記號在 `scoreNote` 的開頭（沒有欄位可以記，見 lib/examOps.mjs）。
+    // 要回到自動計分，把人工分數收回去就好。
+    if (isManualScore(row.scoreNote) && row.earnedScore !== null) {
+      keptScore += row.earnedScore;
+      continue;
+    }
+
     if (r.earnedScore === null) {
       // 這次算不出分數：非選題，或客觀題但資料有問題。
       //
@@ -401,6 +422,142 @@ export async function regradeAssignment(
     needsReview,
     pendingManual,
     failures,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 逐題人工給分
+// ─────────────────────────────────────────────────────────────
+
+export type ManualScoreResult = {
+  attemptId: string;
+  questionId: string;
+  earnedScore: number | null;
+  totalScore: number | null;
+  status: string;
+};
+
+/**
+ * 老師手動給一題的分數。
+ *
+ * # 這一支補的是一個資料層早就準備好、但沒有入口的功能
+ *
+ * `gradeAttemptById` 一直保留著「有人手動給過分就不覆蓋」的路徑，
+ * 而**全系統沒有任何 API 或畫面寫得進那個值**。所以一份含作文的卷子
+ * 永遠停在 SUBMITTED、「未計分」那一欄永遠是一個數字；而客觀題的
+ * 個案（申訴成立、答案有爭議）也只能整題送分或不處理。
+ *
+ * # 三件刻意的事
+ *
+ * **一、只動 `earnedScore` / `isCorrect` / `scoreNote`。** 學生選了什麼
+ * 永遠不變——那是申訴時唯一能拿出來的東西。
+ *
+ * **二、記號寫在 `scoreNote` 的開頭。** 沒有欄位可以記「這個分數是人
+ * 給的」（不加遷移），而少了這個記號，下一次「全班重新計分」會把它
+ * 蓋回自動計分的結果。見 `lib/examOps.mjs`。
+ *
+ * **三、給完之後整份重算一次。** 總分要跟著動，狀態也要（非選題改完
+ * 之後那一份才從「待評分」變成「已評分」）。重算會讀到剛寫進去的記號，
+ * 所以不會把這一題洗掉。
+ *
+ * @param score `null` 代表收回人工分數，讓這一題回到自動計分。
+ */
+export async function setManualScore(
+  attemptId: string,
+  questionId: string,
+  opts: { score: number | null; note?: string | null; actorId: string },
+): Promise<ManualScoreResult> {
+  const tenantId = requireTenant();
+
+  const attempt = await prisma.attempt.findFirst({
+    where: { id: attemptId },
+    select: {
+      id: true,
+      status: true,
+      layout: true,
+      assignmentId: true,
+      assignment: {
+        select: {
+          paper: { select: { items: { select: { questionId: true, score: true } } } },
+        },
+      },
+    },
+  });
+  if (!attempt) throw new Error('找不到這一份作答');
+  if (attempt.status === 'IN_PROGRESS') {
+    throw new Error('這一份還在作答中。學生還在寫的時候給分，他之後寫的答案會與分數對不起來。');
+  }
+  if (attempt.status === 'VOIDED') {
+    throw new Error('這一份已經作廢，不計分。要給分請先撤銷作廢。');
+  }
+
+  // 配分**以版面快照為準**，與計分同一個口徑：老師在考試之後改了
+  // 卷子上的配分，這位學生當時看到的仍然是舊的那個數字。
+  const layout = readLayout(attempt.layout);
+  const fromPaper = new Map(
+    attempt.assignment.paper.items.map((i) => [i.questionId, i.score] as const),
+  );
+  const max =
+    layout?.find((i) => i.questionId === questionId)?.score ?? fromPaper.get(questionId) ?? null;
+  if (max === null) throw new Error('這一題不在這份考卷上');
+
+  const valid = checkManualScore(opts.score, max);
+  if (!valid.ok) throw new Error(valid.error);
+
+  const row = await prisma.attemptAnswer.findFirst({
+    where: { attemptId, questionId },
+    select: { id: true, earnedScore: true, scoreNote: true },
+  });
+  if (!row) {
+    // 沒有作答記錄就沒有列可以掛分數。**不憑空補一列**——那等於在
+    // 稽核上宣稱他在交卷之後作答過。空白卷要給分請用「全班送分」。
+    throw new Error(
+      '這位學生這一題沒有作答記錄，給不了分數。' +
+        '整題都要給分（含空白）請用各題答對率那張表上的「送分」。',
+    );
+  }
+
+  await prisma.attemptAnswer.update({
+    where: { id: row.id },
+    data:
+      valid.score === null
+        ? { earnedScore: null, isCorrect: null, scoreNote: null }
+        : {
+            earnedScore: valid.score,
+            // 滿分才算「答對」。部分給分的那幾題在答對率上就該算沒答對，
+            // 否則各題答對率會被人工分數灌水。
+            isCorrect: valid.score >= max,
+            scoreNote: manualScoreNote(opts.note ?? null),
+          },
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      tenantId,
+      category: 'GRADE',
+      action: 'grade.manual_score',
+      actorId: opts.actorId,
+      targetType: 'Attempt',
+      targetId: attemptId,
+      before: { questionId, earnedScore: row.earnedScore, scoreNote: row.scoreNote },
+      after: { questionId, earnedScore: valid.score },
+      metadata: { note: opts.note ?? null, maxScore: max } as Prisma.InputJsonValue,
+    },
+  });
+
+  // 重算總分與狀態。人工分數自己帶著記號，所以這一次重算不會把它洗掉。
+  const re = await gradeAttemptById(attemptId, {
+    actorId: opts.actorId,
+    reason: '人工給分後重算總分',
+    audit: false,
+  });
+
+  return {
+    attemptId,
+    questionId,
+    earnedScore: valid.score,
+    totalScore: re.totalScore,
+    status: re.status,
   };
 }
 
@@ -584,9 +741,21 @@ export type ClassStats = {
   median: number | null;
   max: number | null;
   min: number | null;
+  /**
+   * 應交人數。**來自 `resolveRecipients`，不是從作答記錄反推的。**
+   *
+   * 沒有它的話，一位從來沒有按下「開始作答」的學生在這一頁的每一塊裡
+   * 都不存在——不在全班表、不在未完成、不在已作廢——而老師唯一
+   * 察覺得到的是交卷人數少一個。少的那一個是誰，畫面上一個字都沒有。
+   */
+  expected: number;
+  /** 名單上但連考卷都沒打開的人。**那是老師當下要打電話的名單。** */
+  missing: Recipient[];
   scores: { attemptId: string; userId: string; displayName: string; username: string;
     status: string; totalScore: number | null; autoScore: number | null;
-    needsReview: number; percentile: number | null; level: number | null; late: boolean }[];
+    needsReview: number; percentile: number | null; level: number | null; late: boolean;
+    /** 交卷時刻。家長問「我孩子說他寫了」時，這是第一個要拿出來的東西。 */
+    submittedAt: Date | null }[];
   questions: QuestionStat[];
   /** 級分換算（含小樣本的三種策略） */
   gsat: ReturnType<typeof gsatLevels>;
@@ -649,6 +818,12 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
     select: {
       id: true,
       title: true,
+      // 「卡住了沒」不能只看 `expiresAt`：一份沒設時限的作答，在任務
+      // 截止而且不收遲交之後就再也不會有人來交它。首頁的待辦本來就是
+      // 這樣算的，這一頁不跟著算的話，同一份作答在兩個畫面上一個算
+      // 卡住、一個顯示「還在作答時間內」而且沒有代為結算鈕。
+      dueAt: true,
+      allowLate: true,
       paper: {
         select: {
           title: true,
@@ -669,8 +844,19 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
   });
   if (!assignment) throw new Error('找不到這份任務');
 
+  // 「這份任務派給了誰」與「誰動過」是兩份完全不同的資料，而這一頁
+  // 一直只有後者。應交人數要從名單來——見 `ClassStats.expected`。
+  const recipients = await resolveRecipients(assignmentId);
+
   const attempts = await prisma.attempt.findMany({
-    where: { assignmentId, status: { in: ['SUBMITTED', 'GRADED'] } },
+    // 老師派給自己試考的那一份不算成績（`systemRole` 不是 STUDENT）。
+    // 混進來的話全班平均會被一份老師的滿分卷拉高，而那個數字看起來
+    // 完全正常。試考的那幾份在任務內頁上單獨列出來。
+    where: {
+      assignmentId,
+      status: { in: ['SUBMITTED', 'GRADED'] },
+      user: { systemRole: 'STUDENT' },
+    },
     select: {
       id: true,
       userId: true,
@@ -678,6 +864,7 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
       totalScore: true,
       autoScore: true,
       late: true,
+      submittedAt: true,
       user: { select: { displayName: true, username: true } },
       answers: {
         select: { questionId: true, isCorrect: true, earnedScore: true, scoreNote: true },
@@ -690,6 +877,13 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
   // 混進沒交的那幾份，全班平均會被一份空白卷拉下來，而那個數字看起來
   // 完全正常。
   const openAttempts = await prisma.attempt.findMany({
+    // **這一塊不濾掉老師的試考，上面那一句濾掉。**
+    //
+    // 差別在於它們是兩種東西：上面是統計（平均、答對率、級分），
+    // 一份老師的滿分卷混進去會把數字拉高；這一塊是**待辦**——
+    // 「還有誰掛在進行中」。老師自己開了考卷看一眼就關掉的那一份
+    // 也會卡住，而首頁的待辦本來就把它算進去。這裡濾掉的話，
+    // 首頁說「1 份卡在進行中」而點進來一份都沒有，那是一條死路。
     where: { assignmentId, status: 'IN_PROGRESS' },
     select: {
       id: true,
@@ -698,7 +892,12 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
       startedAt: true,
       expiresAt: true,
       user: { select: { displayName: true, username: true } },
-      _count: { select: { answers: true } },
+      // **不是 `_count.answers`。** 那是 `attempt_answers` 的列數，而
+      // 有列不代表有答案：按了「標記待複查」會 upsert 一列空的，
+      // 點了選項又點一次取消也會把 answerKeys 覆蓋成空。25 題的卷子
+      // 標了 5 題、清掉 2 題，老師看到「已作答 18/25」而學生自己畫面上
+      // 是 11——而老師會照著那個數字決定要不要讓他繼續寫。
+      answers: { select: { answerKeys: true, answerText: true, answerSlots: true } },
     },
     orderBy: { startedAt: 'asc' },
   });
@@ -726,6 +925,7 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
   }));
 
   const now = new Date();
+  const clockCtx = { dueAt: assignment.dueAt, allowLate: assignment.allowLate };
   const unfinished: UnfinishedAttempt[] = openAttempts.map((a) => ({
     attemptId: a.id,
     userId: a.userId,
@@ -733,8 +933,8 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
     username: a.user.username,
     startedAt: a.startedAt,
     expiresAt: a.expiresAt,
-    stranded: attemptStranded(a, now),
-    answered: a._count.answers,
+    stranded: attemptStranded({ ...a, assignment: clockCtx }, now),
+    answered: countAnswered(a.answers),
   }));
 
   const items = assignment.paper.items;
@@ -807,6 +1007,7 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
       totalScore: a.totalScore,
       autoScore: a.autoScore,
       late: a.late,
+      submittedAt: a.submittedAt,
       needsReview: a.answers.filter((x) => x.isCorrect === null && x.earnedScore === null).length,
       percentile: a.totalScore === null ? null : percentileOfScore.get(a.totalScore) ?? null,
       level: a.totalScore === null ? null : levelOf.get(a.totalScore) ?? null,
@@ -824,6 +1025,17 @@ export async function classStats(assignmentId: string): Promise<ClassStats> {
       gsatFullScore: fullScoreFor(assignment.paper.subject),
     },
     maxScore,
+    expected: recipients.length,
+    // 「沒有開始作答」＝ 名單上有他，但一份 attempt 都沒有（含作廢的：
+    // 作廢過的人動過這份考卷，把他列進催繳名單是錯的）。
+    missing: (() => {
+      const touched = new Set([
+        ...attempts.map((a) => a.userId),
+        ...openAttempts.map((a) => a.userId),
+        ...voidedRows.map((a) => a.userId),
+      ]);
+      return recipients.filter((r) => !touched.has(r.userId));
+    })(),
     submitted: attempts.length,
     graded: attempts.filter((a) => a.status === 'GRADED').length,
     ungraded: attempts.filter((a) => a.totalScore === null).length,

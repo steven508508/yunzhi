@@ -4,6 +4,7 @@ import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import { STATUS_LABELS } from '@/lib/importStatus';
+import { fmtDuration } from '@/lib/reviewState.mjs';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,6 +27,15 @@ export default async function ImportListPage() {
     take: 50,
     include: { subject: { select: { name: true } } },
   });
+
+  // 「待校」不能用「題數 − 校畢 − 存疑」算：`DISCARDED` 沒有被計數，
+  // 所以那個減法算出來的是「待校 + 已刪除」。直接數 PENDING 才是對的。
+  const pendingRows = await prisma.importCandidate.groupBy({
+    by: ['jobId'],
+    where: { jobId: { in: jobs.map((j) => j.id) }, state: 'PENDING' },
+    _count: { _all: true },
+  });
+  const pending = new Map(pendingRows.map((r) => [r.jobId, r._count._all]));
 
   return (
     <div className="yz-app">
@@ -52,6 +62,12 @@ export default async function ImportListPage() {
                   <th className="yz-table__num">題數</th>
                   <th className="yz-table__num">校畢</th>
                   <th className="yz-table__num">存疑</th>
+                  {/* 「還有幾題沒校完」是六份題本同時在跑時老師唯一想問的
+                      問題（先做哪一份），而三個數字算不出第四個。 */}
+                  <th className="yz-table__num">待校</th>
+                  {/* 驗收標準是 50 題 20 分鐘。這一欄是那個數字唯一
+                      看得見的地方。 */}
+                  <th className="yz-table__num">校對用時</th>
                   <th>建立</th>
                 </tr>
               </thead>
@@ -69,6 +85,12 @@ export default async function ImportListPage() {
                     <td className="yz-table__num">{j.confirmedCount}</td>
                     <td className="yz-table__num" style={{ color: j.flaggedCount ? 'var(--mark)' : undefined }}>
                       {j.flaggedCount || ''}
+                    </td>
+                    <td className="yz-table__num">
+                      {j.totalCandidates ? (pending.get(j.id) ?? 0) || '' : ''}
+                    </td>
+                    <td className="yz-table__num" style={{ color: 'var(--ink-3)' }}>
+                      {j.reviewSeconds ? fmtDuration(j.reviewSeconds) : ''}
                     </td>
                     <td style={{ color: 'var(--ink-3)', fontSize: 11.5 }}>
                       {j.createdAt.toLocaleDateString('zh-TW')}

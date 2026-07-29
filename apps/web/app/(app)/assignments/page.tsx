@@ -74,6 +74,19 @@ export default async function AssignmentsPage() {
           totalScore: true,
           subject: { select: { name: true } },
           _count: { select: { items: true } },
+          // **同一份卷子上還沒結束的任務。**
+          //
+          // 這是跨班洩題那個洞的偵測方式：忠班週五 15:00 截止，
+          // `releasePolicy = ON_DUE` 的預設值會在那一刻對忠班開放整份
+          // 答案與詳解，而孝仁兩班週六早上才考同一份卷子。派卷表單
+          // 那句「正式考試選『截止後』，先寫完的人不會洩題」在一個班
+          // 之內是對的，跨班是錯的，而它是唯一在場的指引。
+          assignments: {
+            where: { OR: [{ dueAt: null }, { dueAt: { gt: new Date() } }] },
+            orderBy: { dueAt: 'asc' },
+            take: 8,
+            select: { id: true, title: true, dueAt: true },
+          },
         },
       }),
     ]);
@@ -101,6 +114,23 @@ export default async function AssignmentsPage() {
     // 「派給了一個還沒匯入名冊的空班」這種錯。一次查完再分組，
     // 不是每一份各查一次：後者是 4 次查詢乘上任務數。
     const recipientCount = await countRecipients(rows.map((a) => a.id));
+
+    // 派給哪幾個班。同一份卷子分三個班考時，這一欄是老師唯一分得出
+    // 「這一列是忠班還是孝班」的東西——在此之前他只能靠自己取的任務
+    // 名稱，而改錯一份不會有任何提示。一次查完再分組。
+    const targetRows = rows.length
+      ? await prisma.assignmentTarget.findMany({
+          where: { assignmentId: { in: rows.map((a) => a.id) } },
+          select: { assignmentId: true, userId: true, class: { select: { name: true } } },
+        })
+      : [];
+    const targetsOf = new Map<string, { classes: string[]; individuals: number }>();
+    for (const t of targetRows) {
+      const bucket = targetsOf.get(t.assignmentId) ?? { classes: [], individuals: 0 };
+      if (t.class?.name) bucket.classes.push(t.class.name);
+      else if (t.userId) bucket.individuals++;
+      targetsOf.set(t.assignmentId, bucket);
+    }
 
     // 這一頁列出全機構的任務（老師要看得到別人派了什麼，才不會撞課），
     // 但**改得動的只有自己教的那幾科**。一次算完再逐列判斷，不是逐列
@@ -174,6 +204,10 @@ export default async function AssignmentsPage() {
               subject: p.subject.name,
               items: p._count.items,
               totalScore: p.totalScore,
+              openTasks: p.assignments.map((a) => ({
+                title: a.title,
+                dueAt: a.dueAt?.toISOString() ?? null,
+              })),
             }))}
             classes={classes.map((c) => ({
               id: c.id,
@@ -181,6 +215,7 @@ export default async function AssignmentsPage() {
               members: c._count.memberships,
             }))}
             students={students}
+            me={{ id: user.id, displayName: user.displayName }}
           />
         )}
 
@@ -200,7 +235,13 @@ export default async function AssignmentsPage() {
         <Table
           caption="任務一覽"
           columns={[
-            { key: 't', head: '任務', cell: (a: Row) => a.title },
+            {
+              key: 't',
+              head: '任務',
+              // 任務名稱是連結。這一頁以前完全沒有內頁，所以「這份任務
+              // 派給了哪幾個人、誰還沒動」在系統裡沒有任何出口。
+              cell: (a: Row) => <Link href={`/assignments/${a.id}`}>{a.title}</Link>,
+            },
             {
               key: 'p',
               head: '試卷',
@@ -210,10 +251,19 @@ export default async function AssignmentsPage() {
             {
               key: 'r',
               head: '派給',
-              numeric: true,
               cell: (a: Row) => {
                 const n = recipientCount.get(a.id) ?? 0;
-                return n === 0 ? <span className="yz-warn">0 人</span> : `${n} 人`;
+                const t = targetsOf.get(a.id);
+                const who = [
+                  ...(t?.classes ?? []),
+                  ...(t && t.individuals > 0 ? [`個別 ${t.individuals} 位`] : []),
+                ].join('、');
+                return (
+                  <>
+                    {n === 0 ? <span className="yz-warn">0 人</span> : `${n} 人`}
+                    {who && <span className="yz-grade__sub">{who}</span>}
+                  </>
+                );
               },
             },
             {

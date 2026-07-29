@@ -4,7 +4,7 @@ import {canEditSubject} from '@/lib/auth';
 import { MathText } from '@/components/MathText';
 import { Note } from '@/components/Feedback';
 import { scopedPage } from '@/lib/page';
-import { loadJob } from '@/lib/candidates';
+import { loadJob, loadPages } from '@/lib/candidates';
 import { loadProgress } from '@/lib/importStatus';
 import { prisma } from '@/lib/prisma';
 import Review from './Review';
@@ -133,6 +133,21 @@ export default async function Page({ params }: { params: Promise<{ jobId: string
     ? `${scanned.fileName}（掃描品質偏低，建議逐題確認）`
     : (job.job.files[0]?.fileName ?? null);
 
+  // 原稿頁面與這一科的知識點。兩個都在伺服器端一次查完——校對介面
+  // 的原則是「一次把整份工作載完」，每切一題打一次 API 會讓體感卡頓，
+  // 而卡頓直接吃掉每題 24 秒的預算。
+  //
+  // 頁面清單只有尺寸與品質，影像本身走 `/api/import/[jobId]/image`。
+  const [pages, knowledgePoints] = await Promise.all([
+    loadPages(jobId, user.tenantId),
+    prisma.knowledgePoint.findMany({
+      where: { subjectId: job.job.subjectId },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+      take: 500,
+    }),
+  ]);
+
   return (
     <Review
       jobId={jobId}
@@ -140,6 +155,9 @@ export default async function Page({ params }: { params: Promise<{ jobId: string
       subjectName={job.job.subject.name}
       candidates={job.candidates}
       fileNote={fileNote}
+      pages={pages}
+      knowledgePoints={knowledgePoints}
+      reviewSeconds={job.job.reviewSeconds ?? 0}
     />
   );
   });

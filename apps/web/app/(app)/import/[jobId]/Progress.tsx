@@ -30,6 +30,11 @@ export type ProgressData = {
   status: string;
   /** 建立時刻（ISO）。用來判斷「排隊排太久了」，見下面的 `stuckInQueue`。 */
   createdAt: string;
+  /** 目前這一階段的開始時刻（ISO）。進行中的那一列靠它算「已經幾分幾秒」。 */
+  stageStartedAt: string | null;
+  /** 佇列裡排在前面的份數，以及現在有沒有別的工作在跑。 */
+  queuedAhead: number;
+  othersRunning: number;
   error: string | null;
   permanent: boolean;
   lastCompletedStage: string | null;
@@ -55,13 +60,45 @@ const GLYPH: Record<StageInfo['state'], string> = {
   failed: '×',
 };
 
+/**
+ * 這種規模大概要跑多久。
+ *
+ * 沒有任何一句「還要多久」的畫面，等待就沒有盡頭：36 頁的題本在
+ * 版面切分那一階段會**包成一個請求**送出去，那一列可能單獨停十分鐘
+ * 不動，而它正好是沒有時間可以顯示的那一列。
+ *
+ * 一個粗估好過沒有。數字取自管線的實際批次大小（`import-pipeline.mjs`：
+ * 版面切分整份一次、自答每 20 題一次、標註每 25 題一次）。
+ */
+function eta(pages: number | null, candidates: number) {
+  if (!pages && !candidates) return null;
+  const p = pages ?? 0;
+  const q = candidates || Math.round(p * 1.4);
+  const lo = Math.max(3, Math.round(p * 0.15 + q * 0.06));
+  const hi = Math.max(lo + 4, Math.round(p * 0.4 + q * 0.2));
+  return `這種規模的題本通常要 ${lo}–${hi} 分鐘`;
+}
+
 export default function Progress({ initial }: { initial: ProgressData }) {
   const router = useRouter();
   const [data, setData] = useState(initial);
   const [acting, setActing] = useState(false);
   const [actError, setActError] = useState<string | null>(null);
+  // 每秒跳一次，讓進行中的那一列的計時器會動。**會動本身就是訊息**
+  // ——一個不動的畫面看起來就是當掉了。
+  const [now, setNow] = useState(() => Date.now());
 
   const finished = ['READY_FOR_REVIEW', 'COMMITTED', 'FAILED'].includes(data.status);
+
+  useEffect(() => {
+    if (finished) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [finished]);
+
+  const runningMs = data.stageStartedAt
+    ? Math.max(0, now - new Date(data.stageStartedAt).getTime())
+    : 0;
 
   /**
    * 排隊排太久了。
@@ -79,8 +116,16 @@ export default function Progress({ initial }: { initial: ProgressData }) {
    * NORMALIZING，兩分鐘還在排隊已經不正常了。而重新排隊這個動作
    * 不花任何 AI 費用（一個階段都還沒跑），所以門檻不必訂得很高。
    */
+  //
+  // **前面有人在排隊或在跑就不算卡住。** 舊版只看「QUEUED 超過兩分鐘」，
+  // 完全沒看佇列裡前面有沒有人——而 `IMPORT_CONCURRENCY` 預設是 1，
+  // 第二份題本本來就要等第一份跑完整條管線。第六次匯入時最痛：
+  // 前面五份排著，第六份從第一分鐘起就被告知系統壞了。
+  const waiting = data.queuedAhead > 0 || data.othersRunning > 0;
   const stuckInQueue =
-    data.status === 'QUEUED' && Date.now() - new Date(data.createdAt).getTime() > 120_000;
+    data.status === 'QUEUED' &&
+    !waiting &&
+    Date.now() - new Date(data.createdAt).getTime() > 120_000;
 
   // 輪詢而非 SSE。
   //
@@ -159,10 +204,26 @@ export default function Progress({ initial }: { initial: ProgressData }) {
                 )}
                 {s.note && <div className="yz-step__note">{s.note}</div>}
               </span>
-              <span className="yz-step__time">{duration(s.elapsedMs)}</span>
+              {/* 進行中的那一列顯示「已經跑了多久」。舊版這一格永遠是空的
+                  ——elapsedMs 只有階段做完之後才寫進去，而老師盯的正是
+                  還沒做完的那一列。 */}
+              <span className={`yz-step__time${s.state === 'running' ? ' yz-step__time--live' : ''}`}>
+                {s.state === 'running' && runningMs
+                  ? `已經 ${duration(runningMs)}`
+                  : duration(s.elapsedMs)}
+              </span>
             </li>
           ))}
         </ol>
+
+        {!finished && (
+          <p style={{ marginTop: 12, fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.75 }}>
+            {data.status === 'QUEUED' && waiting
+              ? `前面還有 ${data.queuedAhead + data.othersRunning} 份題本在處理，` +
+                '這一份會排在它們後面。一次只跑一份，是為了不讓 AI 費用與記憶體同時爆掉。'
+              : eta(data.totalPages, data.totalCandidates)}
+          </p>
+        )}
 
         {data.aiCostTwd > 0 && (
           <p style={{ marginTop: 12, fontSize: 12, color: 'var(--ink-3)' }}>
@@ -175,37 +236,52 @@ export default function Progress({ initial }: { initial: ProgressData }) {
         <section className="yz-fieldset yz-fieldset--warn">
           <p style={{ color: 'var(--mark)', fontSize: 13, lineHeight: 1.7 }}>{data.error}</p>
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-            {data.lastCompletedStage && (
-              <button
-                type="button"
-                className="yz-btn yz-btn--primary"
-                disabled={acting}
-                onClick={() => act(true)}
-              >
-                從「{data.stages.find((s) => s.key === data.lastCompletedStage)?.label}」之後繼續
-              </button>
-            )}
-            <button
-              type="button"
-              className="yz-btn"
-              disabled={acting}
-              onClick={() => act(false)}
-            >
-              從頭重跑
-            </button>
-          </div>
+          {/* **不可重試的錯誤不給重試按鈕。** `permanent` 一直都算好也
+              傳過來了，只是沒有人讀它——於是老師照著兩顆比文字大聲的
+              按鈕點下去，失敗，再點另一顆，再失敗。 */}
+          {data.permanent ? (
+            <p className="yz-hint" style={{ marginTop: 10, lineHeight: 1.8 }}>
+              這一類問題重跑沒有幫助，要先把上面說的東西改掉。
+              最常見的是<strong>檔案角色猜錯</strong>：檔名裡有「詳解」「答案」的檔案會被
+              猜成詳解本或答案卷，而拆題只吃「題本」。
+              請回<a href="/import/new">匯入題本</a>重傳一次，並在檔案表格的
+              「這是什麼」欄手動改成<strong>題本</strong>。
+            </p>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                {data.lastCompletedStage && (
+                  <button
+                    type="button"
+                    className="yz-btn yz-btn--primary"
+                    disabled={acting}
+                    onClick={() => act(true)}
+                  >
+                    從「{data.stages.find((s) => s.key === data.lastCompletedStage)?.label}」之後繼續
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="yz-btn"
+                  disabled={acting}
+                  onClick={() => act(false)}
+                >
+                  從頭重跑
+                </button>
+              </div>
+
+              {data.lastCompletedStage && (
+                <p className="yz-hint" style={{ marginTop: 9 }}>
+                  「繼續」只會重跑失敗的那一階段，不會重複付前面幾階段的 AI 費用。
+                  除非你懷疑前面的階段也有問題，否則選它。
+                </p>
+              )}
+            </>
+          )}
 
           {actError && (
             <p className="yz-field__err" style={{ marginTop: 9 }}>
               {actError}
-            </p>
-          )}
-
-          {data.lastCompletedStage && (
-            <p className="yz-hint" style={{ marginTop: 9 }}>
-              「繼續」只會重跑失敗的那一階段，不會重複付前面幾階段的 AI 費用。
-              除非你懷疑前面的階段也有問題，否則選它。
             </p>
           )}
         </section>

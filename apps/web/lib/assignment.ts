@@ -35,6 +35,13 @@
  * 有兩份實作，兩邊的人數就會對不起來，而沒有人知道哪一份是對的。
  */
 import type { SessionUser } from '@/lib/auth';
+import {
+  attemptStranded,
+  checkEndNow,
+  checkExtend,
+  checkExtendMinutes,
+} from '@/lib/attemptClock.mjs';
+import { countAnswered, rosterTally } from '@/lib/examOps.mjs';
 import { prisma } from '@/lib/prisma';
 import { countByAssignment } from '@/lib/scope.mjs';
 import { requireTenant } from '@/lib/tenant';
@@ -529,6 +536,25 @@ async function expandRecipients(targets: TargetRow[]): Promise<Recipient[]> {
 }
 
 /**
+ * 這個人是不是被**個別指定**進這份任務的（不管他是不是學生）。
+ *
+ * 用途只有一個：老師把自己加進去試考。`resolveRecipients` 只認學生
+ * 帳號（應交人數不可以把老師算進去），所以試考的那一位不會出現在
+ * 名單裡——於是「他開不開得了這份考卷」需要另外一句，就是這一句。
+ *
+ * **它不放寬任何班級權限**：`assignment_targets` 裡有他的 userId 這件事
+ * 本身就是一次明確的指定，而寫進去的那一刻已經過了 `resolveTargetInput`。
+ */
+export async function isNamedTarget(assignmentId: string, userId: string): Promise<boolean> {
+  requireTenant();
+  const hit = await prisma.assignmentTarget.findFirst({
+    where: { assignmentId, userId },
+    select: { id: true },
+  });
+  return hit != null;
+}
+
+/**
  * 一次算出好幾份任務各自的實際人數。**查詢次數與任務數無關。**
  *
  * 列表頁對每一份呼叫 `resolveRecipients` 是 4 次查詢乘上任務數：
@@ -585,6 +611,457 @@ export async function countRecipients(assignmentIds: string[]): Promise<Map<stri
   // 測試。這一支只負責把三份資料查出來。
   for (const [id, n] of countByAssignment(targets, membersOfClass, valid)) counts.set(id, n);
   return counts;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 一份任務的收件名單與現在的狀態
+// ─────────────────────────────────────────────────────────────────
+
+/** 名單上一位學生現在走到哪裡。四種狀態互斥，加起來就是應交人數。 */
+export type RosterState = 'UNTOUCHED' | 'IN_PROGRESS' | 'SUBMITTED' | 'VOIDED';
+
+export type RosterEntry = Recipient & {
+  state: RosterState;
+  /** 進行中那一份的 id。要延長時間或代為結算時用它。 */
+  attemptId: string | null;
+  startedAt: Date | null;
+  expiresAt: Date | null;
+  submittedAt: Date | null;
+  totalScore: number | null;
+  /** 進行中而且已經寫不進去了——老師要處理的就是這幾份。 */
+  stranded: boolean;
+  /** 真的寫了幾題。與學生自己畫面上的計數同一個口徑（見 lib/examOps.mjs）。 */
+  answered: number;
+  /** 開過幾次（含作廢的）。可作答多次的任務上才有意義。 */
+  attempts: number;
+};
+
+export type AssignmentRoster = {
+  assignmentId: string;
+  title: string;
+  paperId: string;
+  paperTitle: string;
+  subjectId: string;
+  subjectName: string;
+  mode: string;
+  openAt: Date | null;
+  dueAt: Date | null;
+  timeLimitMin: number | null;
+  allowLate: boolean;
+  maxAttempts: number;
+  shuffleQuestions: boolean;
+  shuffleOptions: boolean;
+  releasePolicy: string;
+  releasedAt: Date | null;
+  createdBy: string | null;
+  questionCount: number;
+  /** 應交 = 名單人數。**以名單為準，不是以作答為準。** */
+  expected: number;
+  started: number;
+  submitted: number;
+  inProgress: number;
+  untouched: number;
+  entries: RosterEntry[];
+  /** 有作答記錄但不在名單上的（老師自己試考的那一份）。 */
+  trials: { attemptId: string; displayName: string; status: string; totalScore: number | null }[];
+};
+
+/**
+ * 這份任務派給了誰、誰開了、誰交了、誰還沒動。
+ *
+ * # 為什麼要有這一支
+ *
+ * `resolveRecipients` 回的形狀**正好就是這一頁需要的**（姓名、學號、
+ * 帳號狀態、透過哪幾個班收到、是不是個別指定），而它的兩個呼叫端
+ * 一個是「這位學生開不開得了考卷」，另一個把整份名單算出來之後
+ * `return { recipients: recipients.length }` ——**名單當場丟掉，只留一個數字**。
+ *
+ * 結果是「有人說沒收到」時無路可走：`classStats` 只查 `Attempt`，
+ * 所以連考卷都沒打開的那一位在成績頁的每一塊裡都不存在（不在全班表、
+ * 不在未完成、不在已作廢），而少的那一個是誰、為什麼少，畫面上
+ * 一個字都沒有。
+ *
+ * # 為什麼「未動作」要點得出名字而不只是一個數字
+ *
+ * 因為那是老師當下要打電話的名單。而且四種原因（不在班級名冊、
+ * 已離班、帳號還沒有家長同意所以登不進來、派錯班）裡，第三種的答案
+ * 就在 `Recipient.status` 裡——那一欄的註解本來就寫著「畫面上要標出來」。
+ */
+export async function assignmentRoster(assignmentId: string): Promise<AssignmentRoster | null> {
+  requireTenant();
+
+  const assignment = await prisma.assignment.findFirst({
+    where: { id: assignmentId },
+    select: {
+      id: true,
+      title: true,
+      mode: true,
+      openAt: true,
+      dueAt: true,
+      timeLimitMin: true,
+      allowLate: true,
+      maxAttempts: true,
+      shuffleQuestions: true,
+      shuffleOptions: true,
+      releasePolicy: true,
+      releasedAt: true,
+      createdBy: true,
+      paper: {
+        select: {
+          id: true,
+          title: true,
+          subjectId: true,
+          subject: { select: { name: true } },
+          _count: { select: { items: true } },
+        },
+      },
+    },
+  });
+  if (!assignment) return null;
+
+  const [recipients, attempts] = await Promise.all([
+    resolveRecipients(assignmentId),
+    prisma.attempt.findMany({
+      where: { assignmentId },
+      select: {
+        id: true,
+        userId: true,
+        status: true,
+        startedAt: true,
+        expiresAt: true,
+        submittedAt: true,
+        totalScore: true,
+        user: { select: { displayName: true, systemRole: true } },
+        // 「已作答 N 題」要與學生自己畫面上的計數一致，所以查的是
+        // 作答內容而不是 `_count.answers`——後者把只按了「標記待複查」
+        // 與點了又取消的題目都算進去，而老師會照著那個偏高的數字
+        // 決定要不要讓他繼續寫。
+        answers: { select: { answerKeys: true, answerText: true, answerSlots: true } },
+      },
+      orderBy: { startedAt: 'asc' },
+    }),
+  ]);
+
+  const now = new Date();
+  const clockCtx = { dueAt: assignment.dueAt, allowLate: assignment.allowLate };
+  const byUser = new Map<string, typeof attempts>();
+  for (const a of attempts) {
+    const bucket = byUser.get(a.userId);
+    if (bucket) bucket.push(a);
+    else byUser.set(a.userId, [a]);
+  }
+
+  const entries: RosterEntry[] = recipients.map((r) => {
+    const mine = byUser.get(r.userId) ?? [];
+    // 顯示哪一份：進行中的優先（那是現在要處理的），其次最後交的一份。
+    const open = mine.find((a) => a.status === 'IN_PROGRESS');
+    const done = [...mine].reverse().find((a) => a.status === 'SUBMITTED' || a.status === 'GRADED');
+    const pick = open ?? done ?? mine[mine.length - 1] ?? null;
+
+    let state: RosterState = 'UNTOUCHED';
+    if (open) state = 'IN_PROGRESS';
+    else if (done) state = 'SUBMITTED';
+    else if (mine.length > 0) state = 'VOIDED';
+
+    return {
+      ...r,
+      state,
+      attemptId: pick?.id ?? null,
+      startedAt: pick?.startedAt ?? null,
+      expiresAt: open?.expiresAt ?? pick?.expiresAt ?? null,
+      submittedAt: done?.submittedAt ?? null,
+      totalScore: done?.totalScore ?? null,
+      stranded: open ? attemptStranded({ ...open, assignment: clockCtx }, now) : false,
+      answered: pick ? countAnswered(pick.answers) : 0,
+      attempts: mine.length,
+    };
+  });
+
+  const known = new Set(recipients.map((r) => r.userId));
+  const trials = attempts
+    .filter((a) => !known.has(a.userId) && a.user.systemRole !== 'STUDENT')
+    .map((a) => ({
+      attemptId: a.id,
+      displayName: a.user.displayName,
+      status: a.status as string,
+      totalScore: a.totalScore,
+    }));
+
+  const tally = rosterTally(recipients, attempts);
+
+  return {
+    assignmentId: assignment.id,
+    title: assignment.title,
+    paperId: assignment.paper.id,
+    paperTitle: assignment.paper.title,
+    subjectId: assignment.paper.subjectId,
+    subjectName: assignment.paper.subject.name,
+    mode: assignment.mode as string,
+    openAt: assignment.openAt,
+    dueAt: assignment.dueAt,
+    timeLimitMin: assignment.timeLimitMin,
+    allowLate: assignment.allowLate,
+    maxAttempts: assignment.maxAttempts,
+    shuffleQuestions: assignment.shuffleQuestions,
+    shuffleOptions: assignment.shuffleOptions,
+    releasePolicy: assignment.releasePolicy as string,
+    releasedAt: assignment.releasedAt,
+    createdBy: assignment.createdBy,
+    questionCount: assignment.paper._count.items,
+    expected: tally.expected,
+    started: tally.started,
+    submitted: tally.submitted,
+    inProgress: tally.inProgress,
+    untouched: tally.untouched,
+    entries,
+    trials,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 同一份卷子還被誰用著
+// ─────────────────────────────────────────────────────────────────
+
+export type CohortAssignment = {
+  id: string;
+  title: string;
+  dueAt: Date | null;
+  releasePolicy: string;
+  /** 這一份有沒有人交過卷。派卷時的警語要說得出「已經考完了沒」。 */
+  submitted: number;
+};
+
+/**
+ * 同一份卷子上的其他任務。
+ *
+ * # 為什麼這一句以前不存在
+ *
+ * 三個班考同一份卷子是補習班的常態（教室不夠、班別不同），而系統
+ * 從頭到尾沒有問過「這份卷子還被哪些任務用著」——`prisma.assignment
+ * .findMany({ where: { paperId } })` 全 repo 只出現在 `attemptsOnPaper`
+ * 裡，而它只被拿來擋編輯。
+ *
+ * 於是忠班週五 15:00 截止那一刻，`maySeeResult` 依 ON_DUE 對忠班開放
+ * 整份題目、標準答案與詳解，而孝仁兩班週六早上才考同一份。
+ * **那一刻是自動發生的：沒有通知、沒有待辦、沒有紅字。**
+ *
+ * 這一支是那個判斷的資料來源，三個地方用它：學生端的放行判斷
+ * （`lib/result.ts` → `cohortGate`）、派卷表單的警告、任務內頁的提醒。
+ *
+ * @param paperId 卷子
+ * @param exceptAssignmentId 排除自己。建立新任務時傳 null。
+ */
+export async function paperCohort(
+  paperId: string,
+  exceptAssignmentId: string | null,
+): Promise<CohortAssignment[]> {
+  requireTenant();
+  const rows = await prisma.assignment.findMany({
+    where: {
+      paperId,
+      ...(exceptAssignmentId ? { id: { not: exceptAssignmentId } } : {}),
+    },
+    orderBy: [{ dueAt: 'asc' }, { createdAt: 'asc' }],
+    select: {
+      id: true,
+      title: true,
+      dueAt: true,
+      releasePolicy: true,
+      _count: { select: { attempts: true } },
+    },
+  });
+  return rows.map((a) => ({
+    id: a.id,
+    title: a.title,
+    dueAt: a.dueAt,
+    releasePolicy: a.releasePolicy as string,
+    submitted: a._count.attempts,
+  }));
+}
+
+/**
+ * 同卷任務裡**還沒考完的**那幾個。派卷與成績頁的警告用這一份。
+ *
+ * 「還沒考完」＝ 沒設截止時間，或截止時間還在未來。已經截止的那些
+ * 擋不住任何東西，列出來只會讓警告變成一句每次都出現的雜訊。
+ */
+export function unfinishedCohort(
+  cohort: CohortAssignment[],
+  now = new Date(),
+): CohortAssignment[] {
+  return cohort.filter((a) => a.dueAt == null || a.dueAt > now);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 考試當天：改進行中作答的到期時刻
+//
+// 這一段補的是一個兩層都堵死的洞。全班斷網十分鐘之後老師要補回來：
+//
+//   · 改任務的 `timeLimitMin` —— 在有人開始作答之後就凍結了
+//   · 就算解凍也沒有用 —— `expiresAt` 是開始作答那一刻算好寫死的，
+//     任務設定改了不會回頭重算已經開始的那幾份
+//
+// 反方向也一樣：`AssignmentTools` 教老師「要立刻結束這場考試，把截止
+// 時間改成現在」，而那停不掉正在寫的人——`attemptWritable` 只看
+// `expiresAt`，不看 `assignment.dueAt`。
+//
+// 所以這兩支直接改 `attempts.expiresAt`。合不合法的判斷在
+// `lib/attemptClock.mjs`（純函式、有測試），這裡只負責查、寫、記稽核。
+//
+// **學生端不必做任何事就會跟上**：作答頁每 30 秒打一次
+// `GET /api/attempts/:id` 校時，那一支回的 `remainingSeconds` 是拿
+// 資料庫裡的 `expiresAt` 現算的。
+// ─────────────────────────────────────────────────────────────────
+
+export type ClockChange = {
+  /** 真的改了幾份。 */
+  changed: number;
+  /** 本來已經寫不進去、改完之後又寫得進去的份數。延長時老師最在意這個。 */
+  reopened: number;
+  /** 沒有動到的份數（已交卷、已作廢、或本來就結束了）。 */
+  skipped: number;
+  /** 新的到期時刻，逐份。畫面上要說得出「延長到幾點」。 */
+  expiresAt: Date | null;
+};
+
+type ClockRow = {
+  id: string;
+  status: string;
+  expiresAt: Date | null;
+  userId: string;
+};
+
+/** 這份任務裡還掛在進行中的作答。兩支時鐘動作共用同一個查詢。 */
+async function inProgressAttempts(
+  assignmentId: string,
+  attemptId: string | null,
+): Promise<ClockRow[]> {
+  return prisma.attempt.findMany({
+    where: {
+      assignmentId,
+      status: 'IN_PROGRESS',
+      ...(attemptId ? { id: attemptId } : {}),
+    },
+    select: { id: true, status: true, expiresAt: true, userId: true },
+    orderBy: { startedAt: 'asc' },
+  });
+}
+
+/**
+ * 延長作答時間。整份任務一次，或只延長某一位（遲到、特殊需求的學生）。
+ *
+ * **已交卷的一份都不動**——那是這個功能能不能被信任的前提。
+ *
+ * @param opts.attemptId 只延長這一份。不給就是整份任務的進行中作答。
+ */
+export async function extendAttempts(
+  assignmentId: string,
+  opts: { minutes: number; attemptId?: string | null; actorId: string; reason?: string },
+): Promise<ClockChange> {
+  const tenantId = requireTenant();
+  const valid = checkExtendMinutes(opts.minutes);
+  if (!valid.ok) throw new Error(valid.error);
+
+  const now = new Date();
+  const rows = await inProgressAttempts(assignmentId, opts.attemptId ?? null);
+  if (rows.length === 0) {
+    throw new Error(
+      opts.attemptId
+        ? '這一份已經不在進行中了，延長時間對它沒有作用。'
+        : '這份任務現在沒有進行中的作答。已經交卷的人不會因為延長而改變。',
+    );
+  }
+
+  const writes: { id: string; expiresAt: Date }[] = [];
+  let reopened = 0;
+  /** 只延長一位時，被擋下來的理由要原樣回給老師，不能吞掉。 */
+  let firstError: string | null = null;
+
+  for (const row of rows) {
+    const r = checkExtend(row, valid.minutes, now);
+    if (!r.ok) {
+      firstError ??= r.error;
+      continue;
+    }
+    writes.push({ id: row.id, expiresAt: r.expiresAt });
+    if (r.reopened) reopened++;
+  }
+
+  if (writes.length === 0) {
+    throw new Error(
+      firstError ??
+        '沒有一份作答延長得了。沒有設作答時限也沒有設截止時間的任務本來就沒有時間壓力。',
+    );
+  }
+
+  // 逐份寫而不是一句 updateMany：每個人的 `expiresAt` 不同（開始作答的
+  // 時刻不同），而「全班一起多 N 分鐘」的意思正是各自往後推 N 分鐘。
+  // 一句 `expiresAt = 某個固定值` 會把所有人拉到同一個時刻，於是晚開始
+  // 的人反而被縮短。
+  await prisma.$transaction(
+    writes.map((w) =>
+      prisma.attempt.update({ where: { id: w.id }, data: { expiresAt: w.expiresAt } }),
+    ),
+  );
+
+  await audit(tenantId, opts.actorId, 'assignment.extend_attempts', assignmentId, {
+    minutes: valid.minutes,
+    attempts: writes.length,
+    reopened,
+    scope: opts.attemptId ? 'one' : 'all',
+    reason: opts.reason ?? null,
+    students: rows.filter((r) => writes.some((w) => w.id === r.id)).map((r) => r.userId),
+  });
+
+  return {
+    changed: writes.length,
+    reopened,
+    skipped: rows.length - writes.length,
+    expiresAt: writes.length === 1 ? writes[0].expiresAt : null,
+  };
+}
+
+/**
+ * 立刻結束這場考試：把所有進行中作答的到期時刻設成現在。
+ *
+ * **這是唯一停得掉正在作答的人的動作。** 把任務的截止時間改成現在
+ * 只擋得住還沒開始的人，而畫面上那句提示一直在教老師走那條路。
+ *
+ * 結束之後那幾份會變成「卡住」，成績頁上就會出現「代為結算」——
+ * 那是刻意的：收卷不可逆，該由人再按一次。
+ */
+export async function endAttemptsNow(
+  assignmentId: string,
+  opts: { actorId: string; reason?: string },
+): Promise<ClockChange> {
+  const tenantId = requireTenant();
+  const now = new Date();
+  const rows = await inProgressAttempts(assignmentId, null);
+
+  const ids: string[] = [];
+  for (const row of rows) {
+    if (checkEndNow(row, now).ok) ids.push(row.id);
+  }
+  if (ids.length === 0) {
+    throw new Error(
+      rows.length === 0
+        ? '這份任務現在沒有進行中的作答，不需要結束。'
+        : '進行中的那幾份作答時間都已經結束了，不需要再結束一次。',
+    );
+  }
+
+  await prisma.attempt.updateMany({
+    where: { id: { in: ids } },
+    data: { expiresAt: now },
+  });
+
+  await audit(tenantId, opts.actorId, 'assignment.end_now', assignmentId, {
+    attempts: ids.length,
+    at: now.toISOString(),
+    reason: opts.reason ?? null,
+  });
+
+  return { changed: ids.length, reopened: 0, skipped: rows.length - ids.length, expiresAt: now };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -716,18 +1193,31 @@ async function resolveTargetInput(
   if (users.length !== userIds.length) {
     throw new Error('有一位學生找不到。請重新整理再選一次。');
   }
-  const notStudent = users.filter((u) => u.systemRole !== 'STUDENT');
+  // **唯一的例外是「派給自己試考」。**
+  //
+  // 出卷的老師到現在都沒有辦法從頭到尾看過自己出的卷子：沒有整卷
+  // 預覽、印不出來，而唯一一條看得到學生畫面的路徑（開始作答）被
+  // 這一道擋著。結果是**第一個從頭到尾看過那份卷子的人是考試當天的
+  // 學生**，而「第 12 題印錯了」正是這樣來的。
+  //
+  // 擋住其他人的理由沒有變（把任務派給同事會讓應交人數永遠多幾個），
+  // 而自己這一份不會進應交名單——`expandRecipients` 只認
+  // `systemRole = STUDENT`，所以試考的那一份在名單與統計裡都不存在。
+  const notStudent = users.filter((u) => u.systemRole !== 'STUDENT' && u.id !== actor.id);
   if (notStudent.length > 0) {
     throw new Error(
-      `${notStudent.map((u) => u.displayName).join('、')}不是學生帳號，不能當作派發對象。`,
+      `${notStudent.map((u) => u.displayName).join('、')}不是學生帳號，不能當作派發對象。` +
+        `要自己先試考一份，把自己加進來就可以——試考不會算進應交人數，也不進成績統計。`,
     );
   }
 
   // 個別指定不可以是繞過班級限制的後門。用的是「可派發的班」而不是
   // 「這次選到的班」——補考的那一位常常不在這次勾選的班裡。
-  if (allowedClasses !== null && users.length > 0) {
+  // 自己（試考）不必在名冊裡，班級權限上面已經擋過一次了。
+  const students = users.filter((u) => u.id !== actor.id);
+  if (allowedClasses !== null && students.length > 0) {
     const reachable = await assignableStudentIds(allowedClasses);
-    const outside = users.filter((u) => !reachable.has(u.id));
+    const outside = students.filter((u) => !reachable.has(u.id));
     if (outside.length > 0) {
       throw new Error(
         `${outside.map((u) => u.displayName).join('、')}不在你帶的班裡，不能個別指定。` +

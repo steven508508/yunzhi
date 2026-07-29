@@ -35,6 +35,7 @@ import { awardedOnAssignment } from '@/lib/question';
 import { classStats, mayGrade, mayViewGrades, regradeAssignment } from '@/lib/scoring';
 import { AwardOne } from './Award';
 import { FinalizeOne } from './Finalize';
+import { Live } from './Live';
 import { RegradeAll, RegradeOne } from './Regrade';
 import { ReleaseControl } from './Release';
 import { UnvoidOne, VoidOne } from './Void';
@@ -237,6 +238,7 @@ export default async function AssignmentGradesPage({
     type QRow = (typeof stats.questions)[number];
     type OpenRow = (typeof stats.unfinished)[number];
     type VoidRow = (typeof stats.voided)[number];
+    type MissRow = (typeof stats.missing)[number];
 
     const pct = (v: number | null) =>
       v === null || stats.maxScore === 0 ? null : Math.round((v / stats.maxScore) * 1000) / 10;
@@ -262,9 +264,17 @@ export default async function AssignmentGradesPage({
             {stats.paperTitle}　·　{stats.subject.name}　·　卷面總分 {stats.maxScore} 分
             {stats.subject.gsatFullScore !== null &&
               `（學測滿分 ${stats.subject.gsatFullScore}）`}
-            　·　<Link href="/grades">回到成績列表</Link>
+            <br />
+            <Link href="/grades">回到成績列表</Link>
+            {/* 「這份任務派給了誰」在另一頁上，而這一頁只查得到動過的人。
+                「有人說沒收到」時要從那一頁查起，所以連結一定要在。 */}
+            　·　<Link href={`/assignments/${assignmentId}`}>收件名單與進行中的作答</Link>
           </p>
         </div>
+
+        {/* 考試進行中老師就是盯著這一頁看。沒有這一顆，數字一動也不動，
+            而他唯一的辦法是一直按 F5——按下去捲軸還會跳回最上面。 */}
+        <Live defaultOn={stats.unfinished.length > 0} />
 
         {/* 放行擺在最前面，而且在「還沒有人交卷」那一支之前——
             它是這一頁唯一一個「不按下去學生就永遠看不到東西」的動作，
@@ -302,6 +312,14 @@ export default async function AssignmentGradesPage({
                   ，系統不會再收他們的答案，但也沒有人按下交卷，
                   所以那幾份會一直停在這裡：學生看不到分數，你也看不到他考了幾分。
                   {mayEdit ? '按「代為結算」把它收掉並計分。' : '請該科老師或管理員代為結算。'}
+                </>
+              )}
+              {mayEdit && (
+                <>
+                  　要<strong>延長全班的作答時間</strong>（例如剛剛斷網），或者
+                  <strong>立刻結束這場考試</strong>，到
+                  <Link href={`/assignments/${assignmentId}`}>這份任務的收件名單頁</Link>
+                  ——改任務的「作答時限」對已經開始的人沒有作用。
                 </>
               )}
             </p>
@@ -353,7 +371,16 @@ export default async function AssignmentGradesPage({
                             ) : (
                               // 還在考的不給結算鈕。把它畫出來然後按下去回一個
                               // 錯誤，等於讓老師去試——而他會以為是系統壞了。
-                              <span className="yz-muted">還在作答時間內</span>
+                              //
+                              // 但灰字不能只寫「還在作答時間內」：學生說
+                              // 「我按交卷沒反應」的時候，老師要說得出下一步。
+                              // 而下一步是等——那一份到期之後就收得掉，
+                              // 分數也是對的（答案早就在伺服器上了）。
+                              <span className="yz-muted">
+                                {r.expiresAt
+                                  ? `還在作答時間內，${when(r.expiresAt)} 之後可以代為結算`
+                                  : '還在作答時間內。這份任務沒有時限也沒有截止時間，要收掉請先「立刻結束這場考試」'}
+                              </span>
                             )}
                             {/* 作廢在這一列上不分卡住與否，因為它要處理的正是
                                 「代為結算會給出一個不合理的分數」那一種：
@@ -373,6 +400,66 @@ export default async function AssignmentGradesPage({
               rows={stats.unfinished}
               rowKey={(r) => r.attemptId}
               empty={<Empty title="沒有未完成的作答" />}
+            />
+          </section>
+        )}
+
+        {/* 連考卷都沒打開的那幾位。
+
+            他們在上面每一塊裡都不存在：不在全班表（沒有交卷）、
+            不在「未完成的作答」（那一塊查的是 IN_PROGRESS 的 Attempt，
+            他連 Attempt 都沒有）、不在「已作廢」。老師唯一察覺得到的
+            是交卷人數少一個，而少的那一個是誰，畫面上一個字都沒有。
+
+            擺在統計之前，理由與已作廢那一塊相同：「全班 32 人只有
+            29 份成績」的疑問要在看到數字的當下就有答案。 */}
+        {stats.missing.length > 0 && (
+          <section style={{ marginBottom: 22 }}>
+            <h2 className="yz-grade-h">還沒有開始作答（{stats.missing.length}）</h2>
+            <p className="yz-grade-hint">
+              這幾位在<strong>應交名單</strong>上，但連考卷都沒有打開過——所以
+              <strong>不在下面任何一個統計裡</strong>。名單來自這份任務的派發對象，
+              不是從作答記錄反推的。
+              {stats.missing.some((m) => m.status !== 'ACTIVE') && (
+                <>
+                  　其中有人的<strong>帳號現在登不進來</strong>，那不是他沒考，
+                  是他進不來。
+                </>
+              )}
+
+              <Link href={`/assignments/${assignmentId}`}>看完整的收件名單</Link>
+            </p>
+            <Table
+              caption="還沒有開始作答的人"
+              columns={[
+                { key: 'n', head: '姓名', cell: (r: MissRow) => r.displayName },
+                { key: 'u', head: '學號', cell: (r: MissRow) => r.username },
+                {
+                  key: 'c',
+                  head: '從哪裡收到',
+                  cell: (r: MissRow) =>
+                    r.classNames.length > 0 ? (
+                      r.classNames.join('、')
+                    ) : (
+                      <span className="yz-muted">個別指定</span>
+                    ),
+                },
+                {
+                  key: 's',
+                  head: '帳號',
+                  cell: (r: MissRow) =>
+                    r.status === 'PENDING_CONSENT' ? (
+                      <span className="yz-warn">還沒有家長同意，登不進來</span>
+                    ) : r.status !== 'ACTIVE' ? (
+                      <span className="yz-warn">帳號已停用，登不進來</span>
+                    ) : (
+                      <span className="yz-muted">可登入</span>
+                    ),
+                },
+              ]}
+              rows={stats.missing}
+              rowKey={(r) => r.userId}
+              empty={<Empty title="每一位都動過了" />}
             />
           </section>
         )}
@@ -465,6 +552,12 @@ export default async function AssignmentGradesPage({
             )}
 
             <dl className="yz-summary">
+              {/* 應交擺在交卷前面。沒有分母的話，「交卷 29」看起來
+                  永遠是對的——而班上有 32 個人。 */}
+              <div>
+                <dt>應交</dt>
+                <dd>{stats.expected}</dd>
+              </div>
               <div>
                 <dt>交卷</dt>
                 <dd>{stats.submitted}</dd>
@@ -506,7 +599,16 @@ export default async function AssignmentGradesPage({
               caption={`${stats.title}的全班成績`}
               columns={[
                 { key: 'r', head: '#', numeric: true, cell: (_r: ScoreRow, i: number) => i + 1 },
-                { key: 'n', head: '姓名', cell: (r: ScoreRow) => r.displayName },
+                {
+                  key: 'n',
+                  head: '姓名',
+                  // 姓名是連結。家長打電話說「我孩子說他寫了」時，老師要
+                  // 拿得出他逐題寫了什麼——而那份資料一直都在，只是沒有
+                  // 任何一個畫面把它拿出來。
+                  cell: (r: ScoreRow) => (
+                    <Link href={`/grades/${assignmentId}/${r.attemptId}`}>{r.displayName}</Link>
+                  ),
+                },
                 { key: 'u', head: '學號', cell: (r: ScoreRow) => r.username },
                 {
                   key: 's',
@@ -544,6 +646,15 @@ export default async function AssignmentGradesPage({
                   numeric: true,
                   cell: (r: ScoreRow) =>
                     r.needsReview ? <span className="yz-warn">{r.needsReview}</span> : '',
+                },
+                {
+                  // **家長打電話時第一個被問到的東西。** `submittedAt`
+                  // 一直都查回來了，只是沒有放進 `scores` 的 map，
+                  // 所以這一欄以前不存在——老師說得出「他有交、68 分」，
+                  // 說不出「他 14:58 交的」。
+                  key: 'w',
+                  head: '交卷',
+                  cell: (r: ScoreRow) => when(r.submittedAt),
                 },
                 {
                   key: 'x',

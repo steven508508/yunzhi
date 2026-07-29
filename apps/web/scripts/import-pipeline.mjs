@@ -195,17 +195,63 @@ async function recordUsage(prisma, job, stage, usage, ok, errorCode) {
 // 各階段
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * 這一版真正會被讀的檔案角色。
+ *
+ * `ANSWER_KEY`／`EXPLANATION_BOOK`／`RUBRIC` 在整個 repo 裡**沒有任何
+ * 消費端**——切分階段只吃這兩種，答案卷對齊、詳解匯入、rubric 三條
+ * 流程都還不存在。所以在它們被實作之前，那三種檔案不可以進第一階段：
+ * 一份 40 頁的解答本會被完整渲染、評估品質、存進物件儲存，**付了錢，
+ * 然後被丟掉**，而老師以為他在「對照解答本校對」。
+ */
+const CONSUMED_ROLES = ['QUESTION_BOOK', 'UNKNOWN'];
+
 /** 第一階段：原稿 → 頁面影像（＋原生 PDF 的文字區塊）。 */
 async function stageNormalize(ctx) {
   const { prisma, job } = ctx;
-  const files = await prisma.importFile.findMany({
+  const all = await prisma.importFile.findMany({
     where: { jobId: job.id },
     orderBy: { uploadedAt: 'asc' },
   });
-  if (files.length === 0) throw new PermanentError('這個匯入工作沒有檔案', 'NORMALIZING');
+  if (all.length === 0) throw new PermanentError('這個匯入工作沒有檔案', 'NORMALIZING');
+
+  const files = all.filter((f) => CONSUMED_ROLES.includes(f.role));
+  const ignored = all.filter((f) => !CONSUMED_ROLES.includes(f.role));
+
+  // 一份題本都沒有 → 在**花任何一毛錢之前**就停下來，而且說得出怎麼修。
+  // 舊版是把全部檔案渲染完（36 頁的錢已經付了）才在第二階段丟出
+  // 「沒有可切分的頁面」，而那個錯誤的兩顆重試按鈕都改不了角色。
+  if (files.length === 0) {
+    throw new PermanentError(
+      '這份匯入裡沒有標記為「題本」的檔案，所以沒有東西可以拆成題目。' +
+        `目前的標記是：${all.map((f) => `${f.fileName} → ${roleLabel(f.role)}`).join('、')}。` +
+        '檔名裡有「詳解」「解析」「答案」的檔案會被自動猜成詳解本或答案卷——' +
+        '如果那份檔案裡有題目，請回「匯入題本」重傳一次，並把「這是什麼」改成「題本」。',
+      'NORMALIZING',
+    );
+  }
 
   let totalPages = 0;
-  const notes = [];
+  const notes = ignored.map(
+    (f) =>
+      `${f.fileName}：標記為${roleLabel(f.role)}，這一版還不會讀它（已跳過，不計費）。` +
+      `如果裡面有題目，請重傳並改標成題本。`,
+  );
+
+  // 把同一句話寫進檔案本身，進度頁的「檔案品質」那一區就會逐檔說出來。
+  // 只寫在工作層級的話，老師看到的是一份「上傳成功」的解答本，
+  // 然後在校對介面以為答案是照它進來的。
+  for (const f of ignored) {
+    await prisma.importFile.update({
+      where: { id: f.id },
+      data: {
+        pageCount: 0,
+        qualityNote:
+          `標記為${roleLabel(f.role)}。這一版只讀題本，這份檔案沒有被解析（也沒有產生費用）。` +
+          `如果它裡面有題目，請重新匯入並把「這是什麼」改成題本。`,
+      },
+    });
+  }
 
   for (const f of files) {
     const out = await callAI(
@@ -255,12 +301,33 @@ async function stageNormalize(ctx) {
   return { totalPages, notes, usage: null };
 }
 
+/** 檔案角色的中文。與上傳頁的下拉用同一組字。 */
+function roleLabel(role) {
+  return (
+    {
+      QUESTION_BOOK: '題本',
+      ANSWER_KEY: '答案卷',
+      EXPLANATION_BOOK: '詳解本',
+      RUBRIC: '評分原則',
+      UNKNOWN: '未指定',
+    }[role] ?? role
+  );
+}
+
 /** 第二階段：版面切分。原生 PDF 走純程式，掃描件走視覺模型。 */
 async function stageSegment(ctx) {
   const { prisma, job } = ctx;
 
-  // 只切題本。答案卷另走對齊流程，詳解本另走解析匯入，
-  // 評分原則另走 rubric —— 它們的著作權地位與處理方式都不同。
+  // 只切題本。
+  //
+  // 這裡原本的註解寫著「答案卷另走對齊流程，詳解本另走解析匯入，
+  // 評分原則另走 rubric」——**那三條流程在這個 repo 裡都不存在**。
+  // 現在第一階段就會把那三種角色的檔案跳過（見 CONSUMED_ROLES），
+  // 所以走到這裡的頁面本來就只有題本；這個過濾是第二道防線，
+  // 而且讓續跑（跳過第一階段）時也成立。
+  //
+  // 詳解的唯一來源仍然是題本自己（`extractWorksheet` 的 `src.explanation`），
+  // 也就是講義裡題目旁邊那一段。獨立的詳解本進不來。
   //
   // 先查檔案再查頁面，而不是用關聯過濾一次查完：兩段式查詢
   // 直接吃 import_pages(jobId) 索引，而關聯過濾會產生一個

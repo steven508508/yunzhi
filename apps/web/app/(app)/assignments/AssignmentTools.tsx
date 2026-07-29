@@ -178,9 +178,27 @@ export default function AssignmentTools({ assignment }: { assignment: EditableAs
             type="datetime-local"
             value={dueAt}
             onChange={(e) => setDueAt(e.currentTarget.value)}
-            hint="要立刻結束這場考試，把它改成現在。留白代表不設截止。"
+            // 舊的提示寫「要立刻結束這場考試，把它改成現在」——**那不會
+            // 停止正在寫的人**：每一份作答的到期時刻是開始那一刻算好
+            // 寫死的，`attemptWritable` 只看它，不看任務的截止時間。
+            // 改截止只擋得住還沒開始的人。真的要停現在這一場，用任務
+            // 內頁的「立刻結束這場考試」。
+            hint="只影響還沒開始作答的人。留白代表不設截止。"
           />
         </div>
+        {started && (
+          <Note tone="warn">
+            已經開始作答的人<strong>不受截止時間影響</strong>——他們的到期時刻在按下
+            「開始作答」的那一刻就算好了。要延長或立刻結束<strong>現在這一場</strong>，
+            請到這份任務的內頁（任務名稱是連結）。
+            {releasePolicy === 'ON_DUE' && (
+              <>
+                　另外，這一份設定為「截止後開放」，所以往後延截止時間會讓
+                <strong>已經看得到檢討的學生再次看不到</strong>，直到新的截止時間。
+              </>
+            )}
+          </Note>
+        )}
         <div className="yz-row">
           <TextField
             label="可作答次數"

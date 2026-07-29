@@ -37,6 +37,7 @@
  */
 import type { Prisma } from '@prisma/client';
 
+import { paperCohort } from '@/lib/assignment';
 import { AttemptError, orderOptions, readLayout, type TakeOption } from '@/lib/attempt';
 import { slotList, splitAlternatives } from '@/lib/grading.mjs';
 import { prisma } from '@/lib/prisma';
@@ -158,11 +159,18 @@ export async function listOwnAttempts(
   requireTenant();
   const now = new Date();
 
-  const assignment = await prisma.assignment.findFirst({
+  const found = await prisma.assignment.findFirst({
     where: { id: assignmentId },
-    select: { id: true, releasePolicy: true, dueAt: true, releasedAt: true },
+    select: { id: true, paperId: true, releasePolicy: true, dueAt: true, releasedAt: true },
   });
-  if (!assignment) return [];
+  if (!found) return [];
+  // 同一份卷子的其他任務。清單上的「看得到多少」與檢討頁必須是同一個
+  // 答案，所以兩邊都要問這一句——只在其中一邊算的話，清單顯示分數而
+  // 點進去說還沒開放（或反過來），而兩個畫面都不覺得自己壞了。
+  const assignment = {
+    ...found,
+    paperCohort: await paperCohort(found.paperId, found.id),
+  };
 
   const rows = await prisma.attempt.findMany({
     // **一定要限定 userId。** 不限的話這裡會帶回全班每個人的作答，
@@ -201,6 +209,34 @@ export async function loadAttemptResult(
   attemptId: string,
   userId: string,
 ): Promise<ResultView> {
+  return loadResult(attemptId, { asUserId: userId });
+}
+
+/**
+ * 同一份作答，**老師看的那一版**。
+ *
+ * # 為什麼要另外一支，而不是把 `userId` 比對拿掉
+ *
+ * 因為兩件事必須同時成立：**不比對 userId**（老師本來就不是作答的人），
+ * 以及**不套 `maySeeResult`**（放行時機管的是學生看不看得到，老師
+ * 隨時都該看得見——ON_DUE 還沒到期就看不到自己班的答案卷，等於這一頁
+ * 在最需要它的那幾天不存在）。
+ *
+ * 把這兩件事做成 `loadAttemptResult` 的參數，遲早會有一支呼叫端傳錯，
+ * 而傳錯的方向是學生看得到別人的卷子。做成兩支獨立的函式，名字本身
+ * 就說得出誰可以呼叫它。
+ *
+ * **呼叫端一定要先問過 `mayGrade` / `mayViewGrades`。** 這一支不做任何
+ * 權限判斷——它連 `userId` 都沒有收。
+ */
+export async function loadAttemptForGrading(attemptId: string): Promise<ResultView> {
+  return loadResult(attemptId, { forGrading: true });
+}
+
+async function loadResult(
+  attemptId: string,
+  opts: { asUserId?: string; forGrading?: boolean },
+): Promise<ResultView> {
   requireTenant();
   const now = new Date();
 
@@ -224,6 +260,7 @@ export async function loadAttemptResult(
           id: true,
           title: true,
           mode: true,
+          paperId: true,
           dueAt: true,
           releasePolicy: true,
           releasedAt: true,
@@ -233,10 +270,27 @@ export async function loadAttemptResult(
     },
   });
   if (!attempt) throw new AttemptError('NOT_FOUND', '找不到這份作答', 404);
-  if (attempt.userId !== userId) throw notYours();
+  if (!opts.forGrading && attempt.userId !== opts.asUserId) throw notYours();
 
   const layout = readLayout(attempt.layout);
-  const visibility = maySeeResult(attempt.assignment, attempt, now);
+  const visibility = opts.forGrading
+    ? {
+        level: 'FULL' as const,
+        reason: '這是老師看的畫面：不論放行設定，逐題作答與標準答案都看得到。',
+        availableAt: null,
+      }
+    : maySeeResult(
+        {
+          ...attempt.assignment,
+          // 同一份卷子還被別的任務用著時，「截止後開放」指的是
+          // **最後一班考完**——見 lib/release.mjs 的 `cohortGate`。
+          // 少了這一句，忠班截止那一刻整份答案就對忠班全開，而孝仁
+          // 兩班隔天早上才考同一份卷子。
+          paperCohort: await paperCohort(attempt.assignment.paperId, attempt.assignment.id),
+        },
+        attempt,
+        now,
+      );
 
   const base: ResultView = {
     assignmentId: attempt.assignment.id,
