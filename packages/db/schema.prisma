@@ -54,6 +54,7 @@ model Tenant {
   admissionProfiles AdmissionProfile[]
   academicRanks     AcademicRank[]
   wishes            Wish[]
+  admissionReferences AdmissionReference[]
 }
 
 model AcademicYear {
@@ -167,6 +168,7 @@ model User {
   admissionProfile  AdmissionProfile[] @relation("AdmissionUser")
   academicRanks     AcademicRank[]     @relation("RankUser")
   wishes            Wish[]             @relation("WishUser")
+  admissionReferences AdmissionReference[] @relation("ReferenceStudent")
 }
 
 model GuardianLink {
@@ -1861,4 +1863,105 @@ model Wish {
   @@unique([userId, year, channel, rank])
   @@index([tenantId, year, channel])
   @@map("wishes")
+}
+
+// ── 學生自己查來的升學參考資料 ──────────────────────────────
+
+/// 這一筆資料是怎麼來的。**決定它值多少信任,以及能不能餵給模擬。**
+enum SourceKind {
+  /// 官方文件：簡章 PDF、委員會的查詢頁、大考中心的統計表
+  OFFICIAL_DOC
+  /// 學校教務處提供（校內百分比、校內推薦辦法）
+  SCHOOL_OFFICE
+  /// 補習班老師提供
+  CRAM_TEACHER
+  /// 學生自己從別處抄來、或記憶所及
+  STUDENT_NOTE
+  /// 聽同學說的、網路論壇、坊間工具
+  HEARSAY
+}
+
+/// 學生（或輔導老師）自己查來並輸入的升學參考資料。
+///
+/// # 為什麼要有這張表,而不是直接建一個校系資料庫
+///
+/// 規格書文件 06 與 07 查證的結論是:招聯會全站 robots.txt 禁止爬取、
+/// 個申二階錄取分數沒有全國統一表、ColleGo! 沒有 API。所以「系統自動
+/// 取得全國校系資料」這條路走不得。
+///
+/// 但**禁止的是機器,不是人**。學生自己打開官方網頁查一個校系的錄取
+/// 標準完全沒有問題,而且那本來就是輔導老師會叫他做的事。所以系統的
+/// 角色從「幫你查」變成三件它真的做得到的事:**告訴你去哪裡查**、
+/// **把你查到的東西記下來（含來源與日期）**、**在上面給建議**。
+///
+/// # 三個貫穿的決定
+///
+/// **一、來源與查詢日期是必填,不是選填。** 一個沒有來源的數字在三個
+/// 月後與一個有來源的長得一模一樣,而學生會照著它決定要不要填志願。
+/// `sourceKind` 與 `lookedUpAt` 因此是 NOT NULL。
+///
+/// **二、學生自己輸入的在校百分比不進入校內賽局模擬。**
+/// 模擬會影響**其他學生**看到的位置——甲同學把自己的百分比打錯成 5%,
+/// 乙同學看到的序位就跟著錯,而乙完全不知道。所以模擬只吃教務處匯入
+/// 的 `AcademicRank`;學生自己輸入的只用於他自己的建議。
+/// 這一條寫在 `forSelfOnly` 的註解裡,而且有測試。
+///
+/// **三、`staleAfterYear` 讓資料自己過期。** 學年度換了,去年的錄取標準
+/// 仍然有參考價值（規格書說歷年趨勢是唯一可用的東西）,但它必須被標成
+/// 「這是 115 學年度的資料,你現在看的是 116」。不標的話,一份三年前
+/// 的數字會被當成今年的門檻。
+model AdmissionReference {
+  id       String @id @default(cuid())
+  tenantId String
+  /// 誰輸入的。學生自己,或輔導老師代為輸入。
+  enteredBy String
+  /// 這筆資料是關於誰的。自己查校系資料時等於 enteredBy;
+  /// 輔導老師幫某位學生記錄時是那位學生。
+  userId    String
+
+  /// 這筆資料屬於哪一個學年度（民國）。
+  year    Int
+  channel AdmissionChannel
+
+  /// 大學名稱。與 Wish 一樣先收自由輸入的文字。
+  institutionName String
+  programName     String?
+  starGroup       Int?
+
+  /// 查到的是什麼。`kind` 決定 `value` 的形狀,兩者一起解讀。
+  /// STAR_ROUND1 → { percentile: 15.2 }（最後一名錄取者的在校百分比）
+  /// STAR_ROUND2 → 同上
+  /// STAR_VACANCY → { count: 3 }
+  /// SIEVE_THRESHOLD → { subjects: [...], grades: [...] }
+  /// QUALIFY → { rules: "數A均標、英文前標" }
+  /// MY_PERCENTILE → { percentile: 12.4 }（自己的校內百分比）
+  /// NOTE → { text: "..." }（沒有結構的補充,例如校內推薦辦法的重點）
+  kind  String
+  value Json
+
+  /// 來源。必填,理由見檔頭決定一。
+  sourceKind SourceKind
+  /// 從哪裡查到的。官方文件填網址或文件名稱;教務處填「教務處 X 老師」。
+  sourceRef  String
+  /// 查到的日期。必填。
+  lookedUpAt DateTime
+
+  /// 超過這個學年度之後這筆資料要被標成過期。預設等於 year。
+  staleAfterYear Int
+
+  /// **只用於這位學生自己的建議,不進入任何跨學生的計算。**
+  /// 學生自己輸入的一律為 true;輔導老師輸入的校系資料可以是 false。
+  /// 理由見檔頭決定二——打錯的數字會讓別人看到錯的序位而不自知。
+  forSelfOnly Boolean @default(true)
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  student User   @relation("ReferenceStudent", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, year, channel])
+  @@index([userId, year])
+  @@map("admission_references")
 }

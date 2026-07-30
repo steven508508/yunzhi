@@ -104,6 +104,22 @@ export default async function AdmissionPage() {
 
         <StatusEditor year={year} profile={status.profile} />
 
+        {/* ── 去哪裡查 ─────────────────────────────────────── */}
+        {/*
+          擺在最前面，而不是收在頁尾的「本系統不做的幾件事」旁邊。
+          理由是這一頁下面每一個「本系統判定不了」都有同一個出口：
+          **你自己去官方網頁查，然後把它記下來。** 出口放在讀者遇到
+          第一個限制之前，他才不會讀完整頁之後以為這裡什麼都做不到。
+        */}
+        <Note tone="info">
+          這一頁判的是<strong>管道層級</strong>的資格。各校系自己的門檻（繁星的在校百分比、
+          學測檢定標準、歷年錄取標準）本系統<strong>查不到也不會去抓</strong>——
+          招聯會全站禁止爬取。但<strong>禁止的是機器，不是人</strong>：
+          <Link href="/admission/refs">升學資料查詢</Link>
+          那一頁照繁星的時序列出了要查什麼、去哪裡查，你查到之後輸入進去，
+          AI 老師就會在你自己的資料上給建議。
+        </Note>
+
         {/* ── 管道資格 ─────────────────────────────────────── */}
         <h2 className="yz-card__title">我現在能報什麼</h2>
         <ul className="yz-adm__rules">
@@ -174,6 +190,12 @@ export default async function AdmissionPage() {
         <h2 className="yz-card__title" style={{ marginTop: 30 }}>
           繁星：我在校內的位置
         </h2>
+        <p className="yz-hint">
+          這是<strong>第一層</strong>的競爭（校內誰被推薦），而這一層的資料只有學校自己有。
+          <strong>第二層</strong>是全國比序，也就是該校系去年最後一名錄取者的在校百分比——
+          那一份要你自己去官方網頁查。兩層擺在同一個畫面上比較看得懂，
+          在<Link href="/admission/refs">升學資料查詢</Link>那一頁。
+        </p>
         {star.noGroup && (
           <Note tone="warn">
             你有繁星志願沒有選學群，所以排不出位置。繁星的競爭是「大學 × 學群」——
@@ -321,6 +343,20 @@ export default async function AdmissionPage() {
             </div>
           ))}
         </dl>
+        {/*
+          這一句必須跟在上面那份「不做」清單後面。上面每一條的理由都是
+          「系統取不到那份資料」，而讀者會把它讀成「這件事沒有辦法做」。
+          那是兩件不同的事：**系統不能自動抓，但你可以自己查。**
+          少了這一句，這一段就是一份道歉；有了它，它是一份分工說明。
+        */}
+        <p className="yz-hint">
+          上面每一條的理由都是<strong>系統取不到那份資料</strong>，不是那份資料不存在。
+          你自己去官方網頁查是完全沒問題的——
+          <Link href="/admission/refs">升學資料查詢</Link>
+          那一頁告訴你去哪裡查、把你查到的記下來（含來源與查詢日期），
+          然後 AI 老師在<strong>你自己的資料</strong>上給建議。它同樣不會給你機率，
+          但它會告訴你你手上的資料能說到什麼程度、還缺哪一年。
+        </p>
       </main>
     );
   });

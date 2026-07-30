@@ -3024,3 +3024,257 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-adm__order > b { font-size: 18px; }
   .yz-adm__editbar { align-items: flex-start; }
 }
+
+/* ── 升學資料查詢 ────────────────────────────────────────────
+   這一頁的資訊層級與別的頁面不同：它是一份**要被照著做的清單**，
+   不是一份要被瀏覽的報表。所以段落之間的距離比密度重要，
+   而每一項的「時序 → 查什麼 → 去哪裡 → 填哪裡」四段要能一眼分開。
+
+   兩種網址的視覺差異是這一段最重要的東西：推導出來的網址與查證過的
+   網址長得不一樣，而「沒有固定網址」的那一種根本不是連結——
+   做成灰色的連結，學生會一直點它。 */
+
+/* ── 查資料清單 ─────────────────────────────────────────── */
+.yz-ref__steps { list-style: none; margin: 0 0 8px; padding: 0; counter-reset: none; }
+.yz-ref__step {
+  padding: 14px 0 16px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-ref__step--note { border-bottom: 0; padding-bottom: 0; }
+
+.yz-ref__stephead {
+  display: flex; flex-wrap: wrap; gap: 3px 10px; align-items: baseline;
+  margin-bottom: 6px;
+}
+/* 序號用宋體圈起來。清單是「照順序做」而不是「挑一個做」，
+   所以序號要看得見。 */
+.yz-ref__stepno {
+  flex: 0 0 auto;
+  min-width: 19px; height: 19px;
+  border: 1px solid var(--rule); border-radius: 50%;
+  font-family: var(--font-num); font-size: 11.5px;
+  line-height: 17px; text-align: center; color: var(--ink-2);
+}
+.yz-ref__stepwhen {
+  padding: 1px 6px;
+  background: var(--paper-sunk); border-radius: var(--r-sm);
+  font-size: 11.5px; color: var(--ink-2);
+  white-space: nowrap;
+}
+.yz-ref__steptitle {
+  font-family: var(--font-doc); font-size: 14px; color: var(--ink);
+}
+.yz-ref__what {
+  margin: 0 0 8px 29px;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+
+.yz-ref__wheres { list-style: none; margin: 0 0 8px 29px; padding: 0; }
+.yz-ref__where {
+  display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline;
+  padding: 6px 0 6px 10px;
+  border-left: 2px solid var(--rule-2);
+  margin-bottom: 4px;
+}
+/* 網址的性質。三種顏色刻意不用紅綠——它不是「好壞」，是「這個連結
+   能不能信」，而那件事要靠文字說，顏色只負責讓三種分得開。 */
+.yz-ref__urlkind {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-size: 11px; color: var(--ink-2);
+  white-space: nowrap;
+}
+.yz-ref__urlkind--fixed   { border-color: var(--ink-3); color: var(--ink); }
+.yz-ref__urlkind--derived { border-color: #B76E00; color: #B76E00; }
+.yz-ref__urlkind--none    { border-style: dashed; color: var(--ink-3); }
+
+.yz-ref__link { font-size: 13px; }
+/* 查不到的那一種**不是連結**。 */
+.yz-ref__nolink {
+  font-size: 13px; color: var(--ink);
+  border-bottom: 1px dashed var(--rule);
+}
+.yz-ref__nav {
+  flex: 1 1 100%;
+  font-family: var(--font-num);
+  font-size: 12px; color: var(--ink-2);
+}
+.yz-ref__caution, .yz-ref__fallback {
+  flex: 1 1 100%;
+  font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-ref__fallback { color: var(--ink-3); }
+
+.yz-ref__record {
+  margin: 0 0 0 29px;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+/* 「查到之後填哪裡」。這一段的視覺重量刻意接近標題——漏掉它的後果是
+   這一頁變成一份書籤清單，而系統這一側什麼都沒有。 */
+.yz-ref__recordtag {
+  display: inline-block; margin-right: 7px;
+  padding: 1px 6px;
+  background: var(--mark-soft); border-radius: var(--r-sm);
+  font-size: 11.5px; color: var(--mark);
+}
+.yz-ref__recordtag--none { background: var(--paper-sunk); color: var(--ink-3); }
+
+/* ── 已經輸入的資料 ─────────────────────────────────────── */
+.yz-ref__list { list-style: none; margin: 0 0 12px; padding: 0; }
+.yz-ref__item {
+  padding: 10px 0 11px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-ref__itemhead {
+  display: flex; flex-wrap: wrap; gap: 3px 10px; align-items: baseline;
+}
+.yz-ref__kind {
+  padding: 1px 6px;
+  background: var(--paper-sunk); border-radius: var(--r-sm);
+  font-size: 11.5px; color: var(--ink-2);
+  white-space: nowrap;
+}
+/* 這一筆是關於哪一個校系。占滿剩下的寬度，因為校名加系名可能很長。 */
+.yz-ref__target { flex: 1 1 auto; font-size: 13px; }
+.yz-ref__year {
+  font-family: var(--font-num);
+  font-size: 12px; color: var(--ink-2);
+}
+/* 信任度。三級而不是一個分數——「可信度 0.72」本身就是一種假精確度。 */
+.yz-ref__trust {
+  padding: 0 5px;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-size: 11px; white-space: nowrap;
+}
+.yz-ref__trust--solid    { border-color: var(--confirm); color: var(--confirm); }
+.yz-ref__trust--workable { border-color: var(--ink-3);   color: var(--ink-2); }
+.yz-ref__trust--weak     { border-color: var(--mark); color: var(--mark); border-style: dashed; }
+
+/* 來源與日期。**與數字同一列，不收進展開區。** 收起來的話，
+   學生看到的就只是一串數字，而那正是這張表要防的事。 */
+.yz-ref__source {
+  display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline;
+  margin: 4px 0 0;
+  font-size: 12px; color: var(--ink-2);
+}
+.yz-ref__sourcekind { color: var(--ink); }
+.yz-ref__sourceref {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+.yz-ref__date { font-family: var(--font-num); }
+.yz-ref__age  { color: var(--ink-3); }
+
+.yz-ref__notes { list-style: none; margin: 5px 0 0; padding: 0; }
+.yz-ref__notes > li {
+  padding: 3px 0 3px 10px;
+  border-left: 2px solid #B76E00;
+  font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-ref__selfonly, .yz-ref__memo {
+  margin: 5px 0 0;
+  font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-ref__selfonly { padding-left: 10px; border-left: 2px solid var(--rule); }
+
+/* ── 兩個百分比，兩種用途 ───────────────────────────────── */
+.yz-ref__own {
+  margin-top: 18px; padding: 12px 14px;
+  background: var(--paper-sunk); border-radius: var(--r);
+}
+.yz-ref__ownlist { list-style: none; margin: 6px 0 0; padding: 0; }
+.yz-ref__ownlist > li {
+  display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline;
+  padding: 7px 0; border-top: 1px solid var(--rule-2);
+}
+.yz-ref__ownwho { flex: 0 0 96px; font-size: 12.5px; color: var(--ink); }
+.yz-ref__ownuse {
+  flex: 1 1 100%;
+  font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+
+/* ── 兩層競爭 ───────────────────────────────────────────── */
+/* 並排而不是上下。兩層要被一起讀——分開放的話，學生會以為
+   「我的百分比比門檻好」就等於會上。 */
+.yz-ref__layers {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin: 8px 0 8px 10px;
+}
+.yz-ref__layer {
+  flex: 1 1 240px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule-2); border-radius: var(--r);
+  background: var(--paper-raised);
+}
+.yz-ref__layerhead {
+  display: block; margin-bottom: 4px;
+  font-family: var(--font-doc); font-size: 12.5px; color: var(--ink);
+}
+.yz-ref__layerbody {
+  display: block;
+  font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-ref__thresholds { list-style: none; margin: 0; padding: 0; }
+.yz-ref__thresholds > li {
+  display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline;
+  padding: 3px 0;
+}
+.yz-ref__thyear { font-family: var(--font-num); font-size: 12px; color: var(--ink-2); }
+
+/* ── AI 老師 ────────────────────────────────────────────── */
+.yz-ref__gaps {
+  margin-top: 12px; padding: 10px 14px;
+  border-left: 2px solid var(--mark);
+  background: var(--mark-soft);
+}
+.yz-ref__gaps ul { margin: 4px 0 0; padding-left: 18px; }
+.yz-ref__gaps li {
+  margin-bottom: 4px;
+  font-size: 12.5px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+
+.yz-ref__advice {
+  margin-top: 16px; padding: 14px 16px;
+  border: 1px solid var(--rule); border-radius: var(--r);
+  background: var(--paper-raised);
+}
+/* 退回罐頭時外觀要**明顯不同**。同一個樣式的話，學生會把系統整理的
+   那一段當成 AI 的判斷。 */
+.yz-ref__advice--fallback {
+  border-style: dashed;
+  background: var(--paper-sunk);
+}
+.yz-ref__advicehead {
+  margin: 0 0 8px;
+  font-family: var(--font-doc); font-size: 13.5px; color: var(--ink);
+}
+/* 建議的內文用宋體：它是要被讀完的一段話，不是介面文字。 */
+.yz-ref__advicebody > p {
+  margin: 0 0 7px;
+  font-family: var(--font-doc);
+  font-size: 13.5px; line-height: var(--lh-doc); color: var(--ink);
+}
+.yz-ref__blocked { margin-top: 8px; font-size: 12px; color: var(--ink-2); }
+.yz-ref__blocked summary { cursor: pointer; color: var(--ink-2); }
+.yz-ref__blocked ul { margin: 6px 0 0; padding-left: 18px; }
+.yz-ref__blocked li { margin-bottom: 4px; line-height: var(--lh-ui); }
+
+.yz-ref__disclose {
+  margin-top: 24px; padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.yz-ref__statement {
+  margin: 8px 0 0; padding: 10px 14px;
+  border-left: 2px solid var(--rule);
+  background: var(--paper-sunk);
+  font-family: var(--font-doc);
+  font-size: 13px; line-height: var(--lh-doc); color: var(--ink);
+}
+
+@media (max-width: 620px) {
+  /* 說明文字的縮排在小螢幕上要收掉，否則一句話會剩下十幾個字寬。 */
+  .yz-ref__what, .yz-ref__wheres, .yz-ref__record { margin-left: 0; }
+  .yz-ref__layers { margin-left: 0; }
+  .yz-ref__ownwho { flex-basis: 100%; }
+}

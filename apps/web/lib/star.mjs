@@ -451,3 +451,123 @@ export function coordinatorReport(sim, { allGroups = [1, 2, 3, 4, 5, 6, 7, 8] } 
     positions: sim.positions,
   };
 }
+
+// ═════════════════════════════════════════════════════════════════
+// §5 把第二層接上來
+//
+// 這個檔案的檔頭寫著「這個檔案不做第二層」，而那句話仍然成立：**系統
+// 不會去取得全國錄取標準**（禁爬，見文件 07 §2.1）。改變的是資料來源
+// ——**學生自己去官方網頁查，然後輸入進來**。禁止爬取的是機器不是人，
+// 而那本來就是輔導老師會叫他做的事。
+//
+// 所以這一節不算任何東西，它只做一件事：**把兩層擺在同一個位置上。**
+// 校內排第幾（系統數得出來，資料只有學校有）＋ 該校系去年的門檻是多少
+// （學生查來的）。規格書 §7.1 說坊間工具只處理得了第二層，而學生真正
+// 卡住的往往是第一層——兩層放在一起才是完整的圖，而分開放的話學生會
+// 以為「我的百分比比門檻好」就等於會上，完全沒有意識到校內還有兩個人
+// 排在他前面。
+//
+// **這一節仍然不產生任何機率。** 位置是數出來的，門檻是查來的，
+// 兩個都是事實；把它們相減再乘一個係數就會變成編的。
+// ═════════════════════════════════════════════════════════════════
+
+/**
+ * 兩層競爭的說明。**這段文字要跟著資料一起走**，理由與
+ * `SECOND_ROUND_NOTE` 相同：它是規則的一部分，不是版面的一部分。
+ */
+export const TWO_LAYER_NOTE =
+  '繁星有兩層競爭，而它們的資料來源完全不同。**第一層是校內**：' +
+  '同校同學之間直接排擠，這一層系統算得出來（在校百分比只有學校自己有）。' +
+  '**第二層是全國**：該校系第一輪最後一名錄取者的在校百分比，' +
+  '這一層要你自己去官方網頁查——系統不會去抓，招聯會全站禁止爬取。' +
+  '兩層都要過。校內沒被推薦，全國門檻再寬也沒有用。';
+
+/**
+ * 學生查到的門檻要怎麼讀。
+ *
+ * 這段話不可以省略，也不可以縮短成「僅供參考」。規格書 §7.2 明文
+ * 要求這類估計一律標示「基於最後一名錄取者的極值統計，樣本量極小」。
+ */
+export const THRESHOLD_BASIS_NOTE =
+  '這幾個數字是**該校系第一輪最後一名錄取者**的在校百分比，' +
+  '不是平均、也不是全體錄取生的分布——官方只公布這一個數字。' +
+  '而繁星校系第一輪的名額常常只有 1 至 3 名，' +
+  '也就是**每年只有一個極值資料點**，年際波動可能很大。' +
+  '所以本系統不會把它算成一個機率，也不會用任何斷定的措辭——' +
+  '規格書明文禁止那一類說法，理由就是這個資料基礎。';
+
+/**
+ * 大學名稱是不是同一所。
+ *
+ * 學生輸入志願時打「臺灣大學」，查資料時抄成「台灣大學」——那是同一所
+ * 學校，而字串不相等。不處理的話，他查到的門檻對不上他的志願，畫面上
+ * 顯示「你還沒有查這個校系的資料」，而他明明剛剛才輸入。
+ *
+ * 只折**異體字與空白**，不做模糊比對。「台大」與「臺灣大學」刻意**不**
+ * 視為同一所：猜對了省一次輸入，猜錯了把甲校的門檻掛到乙校的位置上，
+ * 而那個錯誤在畫面上完全看不出來。
+ */
+export function sameInstitution(a, b) {
+  const fold = (s) =>
+    String(s ?? '')
+      .replace(/[\s　]+/g, '')
+      .replace(/臺/g, '台')
+      .replace(/國立|私立/g, '');
+  return fold(a) === fold(b) && fold(a) !== '';
+}
+
+/**
+ * 把學生查來的全國錄取標準掛到他自己的校內位置上。
+ *
+ * @param {ReturnType<typeof studentView>} view
+ * @param {{institutionName: string, starGroup?: number|null, year: number,
+ *   kind: string, describe?: string,
+ *   value?: {percentile?: number}|null}[]} thresholds
+ *   學生輸入的門檻資料（`AdmissionReference` 裡 `threshold` 那幾種）。
+ *
+ * 回傳是 `view` 的**擴充**而不是取代：既有的每一個欄位原樣留著，
+ * 所以既有的畫面與那 39 項測試不受影響。
+ */
+export function withNationalThresholds(view, thresholds = []) {
+  const matched = new Set();
+
+  const positions = (view.positions ?? []).map((p) => {
+    const mine = thresholds
+      .filter((t) => {
+        if (!sameInstitution(t.institutionName, p.institutionName)) return false;
+        // 學群沒填的門檻資料**照樣掛上去**（學生查簡章時常常只記了學校
+        // 與百分比）。掛錯學群的風險由畫面上標「這一筆沒有學群」承擔，
+        // 而漏掉的成本是他看不到自己剛剛才輸入的東西。
+        return t.starGroup == null || Number(t.starGroup) === Number(p.starGroup);
+      })
+      .sort((a, b) => b.year - a.year);
+    for (const t of mine) matched.add(t);
+
+    return {
+      ...p,
+      /** 第二層：他查來的全國門檻。**空陣列表示他還沒查**，不是沒有門檻。 */
+      nationalThresholds: mine.map((t) => ({
+        year: t.year,
+        kind: t.kind,
+        starGroup: t.starGroup ?? null,
+        describe: t.describe ?? '',
+        percentile: Number.isFinite(t.value?.percentile) ? t.value.percentile : null,
+      })),
+      twoLayerNote: TWO_LAYER_NOTE,
+      thresholdBasisNote: mine.length > 0 ? THRESHOLD_BASIS_NOTE : null,
+    };
+  });
+
+  return {
+    ...view,
+    positions,
+    /**
+     * 查到了但對不上任何校內位置的門檻。
+     *
+     * 要列出來而不是丟掉：最常見的原因是**他查了一個還沒填成志願的校系**
+     * （那是好事，他在比較），第二常見的是校名打錯。兩種都需要被看見，
+     * 而靜靜吞掉的症狀是「我輸入的資料不見了」。
+     */
+    unmatchedThresholds: thresholds.filter((t) => !matched.has(t)),
+  };
+}

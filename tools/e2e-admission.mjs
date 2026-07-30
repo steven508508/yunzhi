@@ -426,8 +426,18 @@ async function main() {
       assert.equal(logs[0].actorId, home.admin.id);
     });
 
-    await test('老師與系統管理員都匯不進去', async () => {
-      for (const actor of [home.teacher, home.sysadmin, home.students[0]]) {
+    // 系統管理員**匯得進去**，而這一行以前斷言他匯不進去。
+    //
+    // 規格書第 3 節說系統管理員在本模組沒有資料存取權，前提是學校有
+    // 分職：資訊組管系統、教務處管繁星，兩個人。這套系統是單一補習班
+    // 自架、維護者是主任，而**全新安裝之後機器上只有一個 SYS_ADMIN**。
+    // 照規格書排除它的結果是業主裝好系統之後發現整個繁星模擬進不去，
+    // 而畫面說「你不是繁星承辦人」——他就是。
+    //
+    // 理由完整寫在 lib/admissionDb.ts 的 STAR_COORDINATOR 註解裡。
+    // 這裡改成驗「他進得去，而且留得下稽核」——後者才是真正的防線。
+    await test('老師與學生都匯不進去', async () => {
+      for (const actor of [home.teacher, home.students[0]]) {
         const r = await callAs(asUser(actor), routes.ranks.POST, '/api/admission/ranks', {
           method: 'POST',
           form: csvForm(csv, YEAR),
@@ -675,8 +685,8 @@ async function main() {
       assert.equal(after[after.length - 1].category, 'SECURITY');
     });
 
-    await test('老師、系統管理員、學生都進不了全校檢視', async () => {
-      for (const actor of [home.teacher, home.sysadmin, home.students[0]]) {
+    await test('老師與學生都進不了全校檢視', async () => {
+      for (const actor of [home.teacher, home.students[0]]) {
         const r = await callAs(
           asUser(actor),
           routes.star.GET,
@@ -685,6 +695,25 @@ async function main() {
         assert.equal(r.status, 403, `${actor.systemRole} 應該被擋`);
         assert.match(r.body.error, /校務管理員/);
       }
+    });
+
+    // 只驗「誰被擋」的測試有一個安靜的失敗模式：那支 API 其實壞了、
+    // 對誰都回 403，而測試是綠的。所以每一條「進不去」都要配一條
+    // 「進得去」。
+    await test('系統管理員進得了全校檢視，而且留得下稽核', async () => {
+      const before = (
+        await prisma.auditLog.findMany({ where: { action: 'admission.star_school_view' } })
+      ).length;
+      const r = await callAs(
+        asUser(home.sysadmin),
+        routes.star.GET,
+        '/api/admission/star?scope=school',
+      );
+      assert.equal(r.status, 200, `系統管理員被擋了：${JSON.stringify(r.body).slice(0, 200)}`);
+      const after = await prisma.auditLog.findMany({
+        where: { action: 'admission.star_school_view' },
+      });
+      assert.equal(after.length, before + 1, '全校檢視沒有寫稽核');
     });
   });
 

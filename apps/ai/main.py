@@ -33,6 +33,7 @@ from providers import (
     RetryableError,
     build_provider,
 )
+from routes_advice import build_advice_router
 from routes_import import build_router
 from routes_tutor import build_tutor_router
 
@@ -84,6 +85,9 @@ app.include_router(build_router(_get_provider))
 # 智慧老師。與匯入同一個 provider 單例——引導式教學的每一輪都是一次
 # 模型呼叫，走同一條路才會被同一份重試、參數協商與用量回報涵蓋。
 app.include_router(build_tutor_router(_get_provider))
+# 升學建議。同一個 provider 單例——它與智慧老師的差別在提示詞與版本號，
+# 不在傳輸層（見 routes_advice.py 的檔頭）。
+app.include_router(build_advice_router(_get_provider))
 
 
 # ─────────────────────────────────────────────────────────────────
