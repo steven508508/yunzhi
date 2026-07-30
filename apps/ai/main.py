@@ -34,6 +34,7 @@ from providers import (
     build_provider,
 )
 from routes_advice import build_advice_router
+from routes_grading import build_grading_router
 from routes_import import build_router
 from routes_tutor import build_tutor_router
 
@@ -88,6 +89,10 @@ app.include_router(build_tutor_router(_get_provider))
 # 升學建議。同一個 provider 單例——它與智慧老師的差別在提示詞與版本號，
 # 不在傳輸層（見 routes_advice.py 的檔頭）。
 app.include_router(build_advice_router(_get_provider))
+# 非選題閱卷。同上，而且它是三者中唯一會對同一份輸入呼叫多次的
+# （評 N 次量離散度），所以走同一個 provider 單例特別重要——各自建
+# client 的話，那 N 次會繞過 BaseProvider 的併發訊號量。
+app.include_router(build_grading_router(_get_provider))
 
 
 # ─────────────────────────────────────────────────────────────────

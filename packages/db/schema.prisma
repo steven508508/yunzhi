@@ -55,6 +55,10 @@ model Tenant {
   academicRanks     AcademicRank[]
   wishes            Wish[]
   admissionReferences AdmissionReference[]
+  gradeProposals   AnswerGradeProposal[]
+  gradeRecords     SubjectGradeRecord[]
+  gradePredictions GradePrediction[]
+  simulationRuns   SimulationRun[]
 }
 
 model AcademicYear {
@@ -169,6 +173,9 @@ model User {
   academicRanks     AcademicRank[]     @relation("RankUser")
   wishes            Wish[]             @relation("WishUser")
   admissionReferences AdmissionReference[] @relation("ReferenceStudent")
+  gradeRecords     SubjectGradeRecord[] @relation("GradeRecordUser")
+  gradePredictions GradePrediction[]    @relation("PredictionUser")
+  simulationRuns   SimulationRun[]      @relation("SimulationUser")
 }
 
 model GuardianLink {
@@ -920,6 +927,7 @@ model Question {
   @@index([sourceImportJobId])
   @@map("questions")
   tutorSessions TutorSession[]
+  gradeProposals AnswerGradeProposal[]
 }
 
 // 選項獨立成表而非 JSON 陣列：選項數不固定（數學 5、英文 4），
@@ -1515,6 +1523,7 @@ model Attempt {
   @@map("attempts")
   tutorSessions TutorSession[]
   proctorEvents ProctorEvent[]
+  gradeProposals AnswerGradeProposal[]
 }
 
 model AttemptAnswer {
@@ -1964,4 +1973,249 @@ model AdmissionReference {
   @@index([tenantId, year, channel])
   @@index([userId, year])
   @@map("admission_references")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 非選題的 AI 閱卷、級分預測、個申落點
+//
+// 這三塊的共同前提是**它們都已經不缺資料了**：
+//
+//   · 評分規準（Rubric／RubricDimension／RubricBand）從第一版就在
+//     schema 裡，只是從來沒有人寫進去
+//   · 級分預測原本卡在「需要 IRT 能力估計」——但補習班的模擬考本來
+//     就會announce級分，那是直接觀測值，比從作答反推可靠得多
+//   · 個申落點原本卡在「歷年篩選標準禁止爬取」——而
+//     `AdmissionReference` 已經收得下學生自己查來的門檻
+//
+// 三個貫穿的決定：
+//
+// **一、AI 的評分是提案，不是分數。**
+// 這是專案第一條原則（AI 提出、人類決定）在這裡最硬的一次應用。
+// AI 的輸出寫進 `AnswerGradeProposal`，**永遠不會自己變成
+// `AttemptAnswer.earnedScore`**——中間一定要有一個老師按下去的動作。
+// 理由見那張表的註解。
+//
+// **二、預測一律是區間加信心，而且要追蹤自己的準確度。**
+// 「你的數學 A 預估 12 級分」會被學生當成承諾。`GradePrediction`
+// 保存每一次預測，等實際成績出來後回填 `actualGrade`——**一個不追蹤
+// 自己準確度的預測系統只是在製造好看的數字**。
+//
+// **三、每一次模擬都要能重現。**
+// 學生會問「上週看到的是 60%，現在怎麼變 45%」。`SimulationRun`
+// 保存輸入快照，才回答得出是資料更新了還是他的成績變了。
+// ═══════════════════════════════════════════════════════════════
+
+// ── 非選題的 AI 閱卷 ────────────────────────────────────────
+
+enum ProposalState {
+  /// AI 給了建議，還沒有人看
+  PENDING
+  /// 老師照 AI 的建議給分
+  ACCEPTED
+  /// 老師改了分數才給
+  ADJUSTED
+  /// 老師不採用，自己給分
+  REJECTED
+  /// 安全規則擋下來了（見 blockedReason）
+  BLOCKED
+}
+
+/// AI 對一題非選答案的評分**建議**。
+///
+/// # 為什麼它與分數是兩張表
+///
+/// 因為它們是兩件事，而把它們放在一起的那一版一定會有人「順手」讓
+/// AI 的分數直接生效——那是這個系統裡最不能發生的事。作文的分數會
+/// 影響學生的成績單，而 AI 對中文作文的評分**沒有任何可稽核的
+/// 基準**；老師改過的分數才是分數。
+///
+/// 所以 `AttemptAnswer.earnedScore` 只有兩個寫入者：客觀題的自動
+/// 計分，與老師手動輸入。這張表**沒有任何路徑**寫得到它。
+///
+/// # 為什麼要保存被否決的建議
+///
+/// 因為那是唯一看得出「AI 的閱卷準不準」的資料。老師採用率 90% 與
+/// 30% 是兩個完全不同的世界，而後者代表這個功能該關掉。刪掉被否決
+/// 的建議，就永遠算不出這個數字。
+model AnswerGradeProposal {
+  id       String @id @default(cuid())
+  tenantId String
+  /// 對哪一份作答的哪一題。不用 attemptAnswerId：學生可能整題空白
+  /// 而沒有那一列，而空白也是要給 0 分的。
+  attemptId  String
+  questionId String
+
+  state ProposalState @default(PENDING)
+
+  /// AI 建議的總分。
+  suggestedScore Float
+  /// 逐面向的分數。形狀 [{ dimensionId, name, score, max, reason }]
+  /// 沒有 rubric 時是空陣列——那時 `suggestedScore` 的可信度低得多，
+  /// 而畫面上要說出來。
+  dimensions Json @default("[]")
+  /// 給老師看的理由。**不直接給學生**——它可能引用 rubric 的描述文字，
+  /// 而 `Rubric.internalOnly` 預設為真（授權範圍是內部閱卷）。
+  rationale  String
+  /// 模型自陳的信心。低信心的要排在老師的待閱清單前面。
+  confidence Float?
+
+  /// 被安全規則擋下的建議仍然存，理由必填。
+  blockedReason String?
+
+  modelUsed     String?
+  promptVersion String?
+  rubricId      String?
+
+  /// 老師最後給了幾分。與 `suggestedScore` 的差距就是這個功能的誤差。
+  finalScore   Float?
+  decidedBy    String?
+  decidedAt    DateTime?
+  /// 老師為什麼改。ADJUSTED／REJECTED 時要求填——那是改進提示詞的唯一素材。
+  decisionNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  attempt  Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([attemptId, questionId])
+  @@index([tenantId, state, createdAt])
+  @@map("answer_grade_proposals")
+}
+
+// ── 級分預測 ────────────────────────────────────────────────
+
+/// 一位學生在一次考試中某一科的級分。
+///
+/// # 為什麼要有這張表，而不是從作答記錄反推
+///
+/// 級分預測原本被記成「需要 IRT 能力估計，核心系統沒有」。那個判斷
+/// 錯在它忽略了一件現成的事：**補習班的模擬考本來就會公布級分**
+/// （南模、全模、校內模考），而那是直接觀測值。
+///
+/// 從我們自己的作答記錄反推級分要跨兩道換算（原始分→難度校正→級距），
+/// 每一道都會放大誤差，而級距在校內人數不足時本身就不可靠（文件 A.2）。
+/// 直接收學生手上那張成績單上的數字，誤差是零。
+///
+/// `source` 分辨這個級分是哪裡來的——系統自己算的（本系統的模考）
+/// 與外部模考公布的，可信度不同，而混在一起算趨勢會讓人以為兩者
+/// 一樣準。
+model SubjectGradeRecord {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  /// 科目代碼，與 `Subject.code` 一致（MATH_A、CHINESE…）。
+  subjectCode String
+  /// 這次考試的名稱。「115 全模一」「校內第二次模考」
+  examName    String
+  /// 考試日期。趨勢與時間加權都靠它。
+  examDate    DateTime
+  /// 級分 0 到 15。
+  grade       Int
+  /// 全國或全校的百分位（如果成績單有給）。
+  percentile  Float?
+
+  /// EXTERNAL_MOCK（外部模考）／INTERNAL_MOCK（本系統的模考）／
+  /// OFFICIAL_GSAT（真正的學測，公布後填）
+  source     String
+  /// 誰輸入的。學生自己，或老師代為輸入。
+  enteredBy  String
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("GradeRecordUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, subjectCode, examName])
+  @@index([tenantId, userId, examDate])
+  @@map("subject_grade_records")
+}
+
+/// 一次級分預測的快照。**存在的理由是校準,不是顯示。**
+///
+/// 規格書第 6.2 節：「預測系統若不追蹤自己的準確度,就只是在製造好看
+/// 的數字。」所以每一次預測都存下來,等實際學測成績出來後回填
+/// `actualGrade`,然後算校準曲線——所有被預測為「信心 70%」的區間裡,
+/// 實際落在區間內的比例是否接近 70%。
+///
+/// 偏離就代表模型過度自信或過度保守。這份資料按年度累積,是機構真正
+/// 的資產:用了三屆之後這套預測會明顯比第一屆準,**而且準確度是可以
+/// 被證明的**。
+model GradePrediction {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  subjectCode String
+  /// 預測的是哪一個學年度的學測（民國）。
+  targetYear  Int
+
+  /// 區間下界與上界（級分）。**介面上不存在呈現單一數字的路徑。**
+  intervalLow  Int
+  intervalHigh Int
+  /// 信心水準 0 到 1。0.7 代表「七成的機會落在這個區間裡」。
+  confidence   Float
+
+  /// 完整的機率分布。[{ grade: 12, p: 0.28 }, ...]
+  /// 下游的落點模擬**直接用這個分布而非點估計**——用點估計算落點會
+  /// 嚴重低估風險（規格書第 6.1 節）。
+  distribution Json
+
+  /// 這個預測建立在什麼上面。樣本數、用了哪幾次考試、剩餘時間。
+  /// 資料不足時要說得出來,而不是硬給一個區間。
+  basis Json
+  /// 樣本數低於門檻。介面上要標「資料不足,預測不可靠」。
+  thin  Boolean @default(false)
+
+  /// 實際成績（學測公布後回填,3 月）。校準曲線靠它。
+  actualGrade Int?
+
+  predictedAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("PredictionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, targetYear, subjectCode])
+  @@index([userId, predictedAt])
+  @@map("grade_predictions")
+}
+
+// ── 個申落點模擬 ────────────────────────────────────────────
+
+/// 一次落點模擬。**保存輸入快照,理由是可重現。**
+///
+/// 學生會問「上週看到的是 60%,現在怎麼變 45%」。沒有快照的話,
+/// 沒有人回答得出是資料更新了、他的成績變了、還是程式改了。
+model SimulationRun {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  channel AdmissionChannel
+  year    Int
+
+  /// 輸入快照:當時的級分分布、當時採用的門檻資料（含每一筆的來源
+  /// 與可靠度）、當時的志願清單。
+  input  Json
+  /// 逐志願的結果。含每一個數字的資料基礎與可靠度標示。
+  result Json
+
+  /// 所用資料的最舊更新日期。畫面上要顯示——一份三年前的資料算出來
+  /// 的機率,與上週更新過的,不是同一種東西。
+  dataAsOf DateTime
+  /// 抽樣次數。
+  draws    Int      @default(10000)
+
+  runAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("SimulationUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, runAt])
+  @@map("simulation_runs")
 }

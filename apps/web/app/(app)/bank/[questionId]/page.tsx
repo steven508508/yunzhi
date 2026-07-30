@@ -24,12 +24,15 @@ import { notFound } from 'next/navigation';
 
 import { Denied, Note } from '@/components/Feedback';
 import { MathText } from '@/components/MathText';
+import { isAiGradable } from '@/lib/gradingProposal.mjs';
 import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import { loadQuestionDetail, mayEditQuestion } from '@/lib/question';
 import { TYPE_LABELS, checkRetire } from '@/lib/questionEdit.mjs';
+import { loadRubricForGrading, rubricTemplates } from '@/lib/rubric';
 import QuestionEditor from './QuestionEditor';
+import { RubricEditor } from './RubricEditor';
 import StatusControl from './StatusControl';
 
 export const dynamic = 'force-dynamic';
@@ -108,6 +111,18 @@ export default async function QuestionPage({
       select: { id: true, name: true },
       orderBy: { name: 'asc' },
     });
+
+    // 評分規準。**只有非選題有**，而且描述文字受著作權保護——
+    // `loadRubricForGrading` 自己判 `mayGrade`，所以看不到的人會拿到 403
+    // 而不是一份被過濾過的資料（過濾是會忘記的，權限判斷不會）。
+    const aiGradable = isAiGradable(
+      q.type,
+      q.scoringRule && typeof q.scoringRule === 'object' && !Array.isArray(q.scoringRule)
+        ? q.scoringRule
+        : null,
+    );
+    const rubric =
+      aiGradable && canEdit ? await loadRubricForGrading(user, questionId).catch(() => null) : null;
 
     // 已經計過分、會被這次改動影響的任務。上面那一塊與確認視窗共用。
     const affected = q.usage.papers
@@ -236,6 +251,26 @@ export default async function QuestionPage({
             存了之後學生看到的會是它。
           </Note>
         )}
+
+        {/* 評分規準。**只有非選題畫得出來**：客觀題的「規準」就是標準答案，
+            上面那一格已經在編了。規準掛在題目上而不是卷子上，理由見
+            RubricEditor 的檔頭。 */}
+        {aiGradable &&
+          (canEdit ? (
+            <RubricEditor
+              questionId={q.id}
+              questionScore={q.score}
+              existing={rubric}
+              templates={rubricTemplates()}
+            />
+          ) : (
+            <p className="yz-grade-hint">
+              這是一題非選題。
+              {rubric
+                ? `它有一份評分規準（${rubric.name}，總分 ${rubric.totalScore} 分）。規準的描述文字是內部閱卷用的，只有這一科的授課老師看得到。`
+                : '它還沒有評分規準。有規準時 AI 的評分建議才給得出逐面向的分數。'}
+            </p>
+          ))}
 
         <h2 className="yz-grade-h">狀態</h2>
         {canEdit ? (

@@ -29,6 +29,8 @@ import { notFound } from 'next/navigation';
 import { Denied, Empty, Note } from '@/components/Feedback';
 import { MathText } from '@/components/MathText';
 import { isManualScore } from '@/lib/examOps.mjs';
+import { isAiGradable } from '@/lib/gradingProposal.mjs';
+import { loadProposalsForAttempt, type ProposalView } from '@/lib/gradingProposalDb';
 import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import {
@@ -38,6 +40,7 @@ import {
 } from '@/lib/result';
 import { attemptTarget, mayGrade, mayViewGrades } from '@/lib/scoring';
 import { prisma } from '@/lib/prisma';
+import { ProposalCard } from '../ProposalCard';
 import { ScoreOne } from './ScoreOne';
 
 export const dynamic = 'force-dynamic';
@@ -137,6 +140,47 @@ export default async function TeacherAttemptPage({
       where: { id: target.userId },
       select: { displayName: true, username: true },
     });
+
+    // 非選題的 AI 建議。**這一頁只讀，不產生**——產生要按按鈕
+    // （`ProposalCard` 裡那一顆），而按鈕走 `/api/proposals`。
+    //
+    // 為什麼在這一層查而不是在 `ProposalCard` 裡：`scopedPage` 建立的
+    // 租戶脈絡在 render 回傳之後就不存在了，而 RLS 是 fail closed
+    // ——查詢寫在子元件裡的症狀是「那一塊永遠是空的，而且沒有錯誤訊息」。
+    // 與 `TutorReview` 同一個理由。
+    // `ResultQuestion` 沒有帶 `scoringRule`（那是計分用的東西，不該進
+    // 學生的檢討頁），所以這裡自己查一次——設了關鍵詞比對的簡答題是
+    // 自動計分的，不該出現 AI 建議那一塊。
+    const rules = await prisma.question.findMany({
+      where: { id: { in: view.questions.map((q) => q.questionId) } },
+      select: { id: true, type: true, scoringRule: true },
+    });
+    const aiGradable = new Set(
+      rules
+        .filter((r) =>
+          isAiGradable(
+            r.type,
+            r.scoringRule && typeof r.scoringRule === 'object' && !Array.isArray(r.scoringRule)
+              ? r.scoringRule
+              : null,
+          ),
+        )
+        .map((r) => r.id),
+    );
+    const proposals = mayEdit ? await loadProposalsForAttempt(attemptId) : new Map();
+    const rubrics =
+      aiGradable.size > 0
+        ? await prisma.rubric.findMany({
+            where: { questionId: { in: [...aiGradable] } },
+            select: {
+              questionId: true,
+              dimensions: { select: { name: true }, orderBy: { order: 'asc' } },
+            },
+          })
+        : [];
+    const dimensionsByQuestion = new Map(
+      rubrics.map((r) => [r.questionId ?? '', r.dimensions.map((d) => d.name)]),
+    );
 
     const rate =
       view.totalScore === null || view.maxScore === 0
@@ -242,6 +286,9 @@ export default async function TeacherAttemptPage({
                 q={q}
                 attemptId={attemptId}
                 mayEdit={mayEdit && view.status !== 'VOIDED' && view.status !== 'IN_PROGRESS'}
+                aiGradable={aiGradable.has(q.questionId)}
+                proposal={proposals.get(q.questionId) ?? null}
+                rubricDimensions={dimensionsByQuestion.get(q.questionId) ?? []}
               />
             ))}
           </ol>
@@ -257,10 +304,17 @@ function QuestionBlock({
   q,
   attemptId,
   mayEdit,
+  aiGradable,
+  proposal,
+  rubricDimensions,
 }: {
   q: ResultQuestion;
   attemptId: string;
   mayEdit: boolean;
+  /** 非選題（而且沒有設自動比對規則）。只有這種題目畫得出 AI 建議。 */
+  aiGradable: boolean;
+  proposal: ProposalView | null;
+  rubricDimensions: string[];
 }) {
   // 老師看的預設展開順序與學生相反：他是來查這一份的，所以**沒有分數
   // 的與寫錯的先打開**，答對的收起來。
@@ -339,6 +393,22 @@ function QuestionBlock({
                 </span>
               )}
             </p>
+          )}
+
+          {/* AI 的建議與老師的輸入框**並列**，而且建議不會被填進輸入框。
+              預填的話老師會直接按確認——那就是「AI 決定」而不是「AI 提出」。
+              兩塊都畫是刻意的：`ScoreOne` 是不看建議也給得了分的那一條路，
+              而它必須一直在（AI 掛掉、預算用完、建議被擋下時就靠它）。 */}
+          {mayEdit && aiGradable && (
+            <ProposalCard
+              attemptId={attemptId}
+              questionId={q.questionId}
+              max={q.score}
+              current={q.earnedScore}
+              manual={isManualScore(q.scoreNote)}
+              proposal={proposal}
+              rubricDimensions={rubricDimensions}
+            />
           )}
 
           {mayEdit && (

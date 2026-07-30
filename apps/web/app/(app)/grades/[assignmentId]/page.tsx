@@ -281,6 +281,10 @@ export default async function AssignmentGradesPage({
                 切走了 14 次」與他的分數並排出現，而那個並排本身就是
                 一種暗示。系統不做暗示，判斷是老師的事。 */}
             　·　<Link href={`/assignments/${assignmentId}/proctor`}>考試行為記錄</Link>
+            {/* 非選題的閱卷在另一頁，而且是「一題 × 全班」而不是這一頁的
+                「一份 × 全部題目」——三十份作文比較著改比一份一份改快得多，
+                而且標準比較一致。那一頁上也有「AI 閱卷準不準」的數字。 */}
+            　·　<Link href={`/grades/${assignmentId}/grading`}>非選題批次閱卷</Link>
           </p>
         </div>
 

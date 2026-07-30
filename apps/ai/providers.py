@@ -569,6 +569,21 @@ def _mock_reply(system: str, user: str) -> str:
             f"{_MOCK_NOTE}"
         )
 
+    # 非選題閱卷。同樣要排在前面，同樣的理由：它會被 Node 端的
+    # gradingProposal 閘門檢查，而一段通用假回應會因為「沒有引用學生
+    # 答案裡的任何一句」被擋下三次，然後那一筆被記成 BLOCKED——
+    # AI_PROVIDER=mock 的安裝驗證就看不出這條路徑到底通不通。
+    #
+    # 這一支要從**這一次的提示詞裡**把學生的答案與面向讀回來（假評分
+    # 必須真的引用一段原文才過得了閘門），所以它做不到寫死在這裡。
+    # 解析放在 pipeline/grading_prompts.py：提示詞的格式是那裡定的，
+    # 格式改了、解析跟著改，兩件事在同一個檔案裡看得到。
+    # 函式內 import 是為了不讓下層的 providers 在模組載入時就依賴 pipeline。
+    if "非選題閱卷" in s:
+        from pipeline.grading_prompts import mock_grading_reply
+
+        return mock_grading_reply(user)
+
     # 整頁閱讀。要排在「版面分析」之前判斷——兩者的提示詞都提到
     # 版面，而這一支回的是完整的題目而不只是區塊。
     if "題本的判讀器" in s:

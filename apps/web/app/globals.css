@@ -3278,3 +3278,141 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-ref__layers { margin-left: 0; }
   .yz-ref__ownwho { flex-basis: 100%; }
 }
+
+/* ── AI 閱卷 ────────────────────────────────────────────── */
+
+/* AI 的建議與老師的輸入框是同一塊裡的兩層，而**視覺上要分得開**：
+   上半是機器提出的，下半是人決定的。合成一塊的話，老師會把整塊
+   當成「系統算好的東西」然後直接按下去——而那正是這個功能不該做的事。 */
+.yz-prop {
+  margin: 10px 0 4px; padding: 10px 12px;
+  border: 1px solid var(--rule); border-radius: var(--r);
+  background: var(--paper-sunk);
+}
+/* 判斷不穩的那幾份要一眼看得出來。用左邊一條而不是整塊變色：
+   整塊變色在三十份的清單上會變成一片紅，而那時它就不再是警告。 */
+.yz-prop--unstable { border-left: 3px solid var(--mark); background: var(--mark-soft); }
+
+.yz-prop__ask { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.yz-prop__asktext { font-size: 12px; color: var(--ink-2); flex: 1 1 220px; }
+
+.yz-prop__head {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+  padding-bottom: 6px; border-bottom: 1px solid var(--rule-2);
+}
+.yz-prop__badge {
+  padding: 1px 6px; border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-size: 10.5px; color: var(--ink-2); background: var(--paper-raised);
+}
+.yz-prop__score { font-family: var(--font-num); font-size: 14px; color: var(--ink); }
+.yz-prop__conf  { font-size: 11.5px; color: var(--ink-2); }
+.yz-prop__state { font-size: 11.5px; color: var(--ink-2); }
+.yz-prop__meta  { font-size: 10.5px; margin-left: auto; }
+
+.yz-prop__unstable {
+  margin: 6px 0 0; font-size: 12px; line-height: var(--lh-ui); color: var(--mark);
+}
+
+.yz-prop__dims { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-prop__dim {
+  display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline;
+  padding: 3px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-prop__dimname  { flex: 0 0 5.5em; font-size: 12px; color: var(--ink); }
+.yz-prop__dimscore { flex: 0 0 4.5em; font-family: var(--font-num); font-size: 12px; text-align: right; }
+.yz-prop__dimwhy   { flex: 1 1 240px; font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2); }
+
+.yz-prop__norubric {
+  margin: 8px 0 0; padding: 6px 10px;
+  border-left: 2px solid var(--mark); background: var(--mark-soft);
+  font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+/* 理由用宋體：它是一段要被讀完的話，不是介面文字。 */
+.yz-prop__why {
+  margin: 8px 0 0;
+  font-family: var(--font-doc); font-size: 13px; line-height: var(--lh-doc); color: var(--ink);
+  white-space: pre-wrap;
+}
+.yz-prop__blocked { margin-top: 8px; font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2); }
+.yz-prop__blocked p { margin: 0 0 4px; }
+
+.yz-prop__decided {
+  margin: 8px 0 0; font-size: 12px; line-height: var(--lh-ui); color: var(--ink-2);
+}
+.yz-prop__note { display: block; font-size: 11.5px; color: var(--ink-3); }
+
+/* 老師這一側。與 .yz-score 同一種排法（就地輸入、就地送出），
+   因為改一整題是連續打三十次分數，開關對話框三十次不可行。 */
+.yz-prop__acts {
+  display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--rule);
+}
+.yz-prop__lab { font-size: 11.5px; color: var(--ink-2); }
+.yz-prop__notein { flex: 1 1 200px; min-width: 0; }
+.yz-prop__tags { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; flex-basis: 100%; }
+.yz-prop__tag { display: inline-flex; gap: 4px; align-items: center; font-size: 11.5px; color: var(--ink-2); }
+
+.yz-prop__stem {
+  margin-bottom: 10px; padding: 10px 12px;
+  border: 1px solid var(--rule); border-radius: var(--r); background: var(--paper-raised);
+  font-family: var(--font-doc); font-size: 13.5px; line-height: var(--lh-doc);
+}
+/* 規準預設收起來。老師改到第五份就不必再看它了，而它很長。 */
+.yz-prop__rubric { margin-bottom: 10px; font-size: 12px; }
+.yz-prop__rubric summary { cursor: pointer; color: var(--ink-2); }
+.yz-prop__rubricbody { padding: 6px 0 0 12px; }
+.yz-prop__internal {
+  margin-left: 8px; padding: 1px 6px;
+  border: 1px solid var(--mark); border-radius: var(--r-sm);
+  font-size: 10.5px; color: var(--mark);
+}
+.yz-prop__batchbar {
+  display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
+  margin: 10px 0; padding: 8px 10px;
+  border: 1px solid var(--rule); border-radius: var(--r); background: var(--paper-raised);
+}
+.yz-prop__batchbar .yz-grade-hint { flex-basis: 100%; margin: 0; }
+
+/* 批次閱卷的清單。一列就是一位學生的一題：姓名、他寫的字、建議、輸入框。 */
+.yz-batch { list-style: none; margin: 0; padding: 0; }
+.yz-batch__row {
+  padding: 12px 0; border-bottom: 1px solid var(--rule);
+}
+.yz-batch__who { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.yz-batch__name { font-size: 13px; color: var(--ink); }
+.yz-batch__score { font-family: var(--font-num); font-size: 13px; }
+/* 學生寫的字**照原樣**（pre-wrap）。他在純文字方塊裡打的，
+   打了什麼就該看到什麼——重排一次，畫面上會出現他沒有寫過的東西。 */
+.yz-batch__answer {
+  margin: 6px 0 0; padding: 8px 10px;
+  border: 1px solid var(--rule-2); border-radius: var(--r); background: var(--paper-raised);
+  font-family: var(--font-doc); font-size: 13px; line-height: var(--lh-doc);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* 規準編輯器 */
+.yz-rubric { margin: 22px 0; }
+.yz-rubric__templates { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 6px; }
+.yz-rubric__head {
+  display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center;
+  margin: 10px 0;
+}
+.yz-rubric__rows { list-style: none; margin: 6px 0; padding: 0; }
+.yz-rubric__row {
+  display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: flex-start;
+  padding: 6px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-rubric__name  { flex: 0 0 7em; }
+.yz-rubric__grade { flex: 0 0 4em; text-align: center; }
+.yz-rubric__desc  { flex: 1 1 260px; min-width: 0; font-family: var(--font-doc); }
+.yz-rubric__license {
+  margin: 12px 0; padding: 10px 12px;
+  border-left: 2px solid var(--mark); background: var(--mark-soft);
+}
+
+@media (max-width: 620px) {
+  /* 小螢幕上這幾格各自佔一整行，否則一個輸入框剩下十幾像素寬。 */
+  .yz-prop__notein, .yz-rubric__desc, .yz-prop__asktext { flex-basis: 100%; }
+  .yz-prop__dimwhy { flex-basis: 100%; }
+  .yz-rubric__head { grid-template-columns: 1fr; }
+}
