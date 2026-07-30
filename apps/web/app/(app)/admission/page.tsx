@@ -21,6 +21,21 @@
  * 他會以為是還沒算完然後一直等。與其留白，不如明說資料為什麼取不到——
  * 那段文字在 `lib/admission.mjs` 的 `NOT_OFFERED`，與規則同一個檔案，
  * 有測試釘著它不能被改成「暫不支援」。
+ *
+ * # 那份清單裡有兩條已經過時了，而這一頁的處理方式是「移走而不是刪掉」
+ *
+ * `NOT_OFFERED` 裡的 `GRADE_PREDICTION` 與 `APPLY_ODDS` 記的是兩個
+ * **當時成立、現在不成立**的判斷：
+ *
+ *   · 級分預測卡在「需要 IRT 能力估計」。那個判斷忽略了一件現成的事
+ *     ——補習班的模擬考本來就會公布級分，而那是直接觀測值。
+ *   · 落點卡在「歷年篩選標準禁止爬取」。禁止的是**機器**：學生自己去
+ *     官方網頁查完輸入進來，那條路一直是通的。
+ *
+ * 那兩段文字**留在 `admission.mjs` 裡不動**（它們是判斷的歷史，而且
+ * 有測試釘著），這一頁改的只是「哪幾條要印出來」加上一段說明它們搬到
+ * 哪裡去了。理由是刪掉那兩段的話，下一個人會重新推導出同樣的結論然後
+ * 再關掉這兩個功能一次——**被推翻的判斷比沒有判斷有價值**。
  */
 import Link from 'next/link';
 
@@ -49,6 +64,36 @@ const REMEDY_TAG: Record<string, string> = {
   NONE: '放棄也無法解除',
 };
 
+/**
+ * `NOT_OFFERED` 裡已經做出來的那幾條，以及**當初卡住的判斷錯在哪裡**。
+ *
+ * 這一份不是「功能上線公告」。它要回答的是同一個讀者的同一個疑問：
+ * 他上次來的時候這裡寫著「不做，因為資料取不到」，現在有了——那到底
+ * 是資料變了，還是當初判斷錯了？答案是後者，而說清楚是哪裡錯了，才
+ * 不會讓人以為這個系統的「不做」是隨時會改口的。
+ */
+const NOW_OFFERED: Record<string, { href: string; label: string; why: string }> = {
+  GRADE_PREDICTION: {
+    href: '/admission/predict',
+    label: '級分預測',
+    why:
+      '當初卡在「要由作答記錄推估級分需要 IRT 能力估計」。那個判斷漏掉了一件現成的事：' +
+      '**補習班的模擬考本來就會公布級分**（南模、全模、校內模考），而成績單上那個數字是' +
+      '**直接觀測值**，不需要任何換算。反推才需要 IRT。輸出仍然只有區間加信心水準，' +
+      '不會有一個「你會考幾級分」的數字。',
+  },
+  APPLY_ODDS: {
+    href: '/admission/placement',
+    label: '個申落點（通過第一階段的機率）',
+    why:
+      '當初卡在「歷年篩選標準無法合法取得」。那句話只對了一半：' +
+      '**禁止爬取的是機器，不是人。** 你自己打開委員會的歷年篩選標準查詢、把那幾個數字' +
+      '輸入進來，這條路一直是通的。所以基準是**你查來的歷年實際門檻**，而每一個機率' +
+      '旁邊都標著它用了哪幾年的資料、可靠度多少、什麼時候查的。' +
+      '資料可靠度不足的校系照樣顯示「無法估計」——那一條沒有變。',
+  },
+};
+
 export default async function AdmissionPage() {
   return scopedPage(async (user) => {
     const year = admissionYearOf();
@@ -67,18 +112,32 @@ export default async function AdmissionPage() {
           <Empty
             title="這一頁是學生看自己的升學規劃"
             hint={
-              isStarCoordinator(user)
-                ? '你是繁星承辦（校務管理員）。全校的繁星校內競爭分布與在校成績百分比的匯入在下一頁。'
-                : '老師要看的是所帶班級的升學狀況，那在班級頁的升學總覽裡。'
+              <>
+                {isStarCoordinator(user)
+                  ? '你是繁星承辦（校務管理員）。全校的繁星校內競爭分布與在校成績百分比的匯入在下一頁。'
+                  : '老師要看的是所帶班級的升學狀況，那在班級頁的升學總覽裡。'}
+                {/*
+                  校準報告在這裡出現一次，因為老師找不到它的話它就等於不存在
+                  ——而它是級分預測唯一的品質訊號。學生的預測頁對老師是空的，
+                  所以那一頁上的連結他看不到。
+                */}
+                <br />
+                級分預測準不準（校準曲線）是<strong>機構自己的品質報告</strong>，
+                在下面那個連結。它要等學測成績公布、學生的實際級分回填之後才算得出來。
+              </>
             }
             action={
-              isStarCoordinator(user) ? (
-                <Link href="/admission/star" className="yz-btn yz-btn--primary">
-                  去繁星全校檢視
-                </Link>
-              ) : (
+              <>
+                {isStarCoordinator(user) && (
+                  <Link href="/admission/star" className="yz-btn yz-btn--primary">
+                    去繁星全校檢視
+                  </Link>
+                )}
+                {'　'}
+                <Link href="/admission/calibration">級分預測的校準</Link>
+                {'　'}
                 <Link href="/classes">去班級</Link>
-              )
+              </>
             }
           />
         </main>
@@ -118,6 +177,13 @@ export default async function AdmissionPage() {
           <Link href="/admission/refs">升學資料查詢</Link>
           那一頁照繁星的時序列出了要查什麼、去哪裡查，你查到之後輸入進去，
           AI 老師就會在你自己的資料上給建議。
+          <br />
+          另外兩頁吃的是你自己手上的東西：
+          <Link href="/admission/predict">級分預測</Link>
+          收模考成績單上的級分（那是直接觀測值），
+          <Link href="/admission/placement">個申落點</Link>
+          用那些級分加上你查來的歷年篩選門檻算通過第一階段的機率。
+          <strong>那是這個系統裡唯一會給你機率的地方</strong>，而它必須帶著資料基礎一起看。
         </Note>
 
         {/* ── 管道資格 ─────────────────────────────────────── */}
@@ -149,9 +215,14 @@ export default async function AdmissionPage() {
         </ul>
         <p className="yz-hint">
           這一份只判<strong>管道層級</strong>的資格。各校系自己的門檻（繁星的五學期百分比
-          達標、學測檢定標準）本系統<strong>判定不了</strong>——那需要逐校系的簡章資料，
-          而歷年篩選與檢定資料無法合法取得（見下方）。不要把「可以報名」讀成「符合這個
-          校系的門檻」。
+          達標、學測檢定標準）這裡<strong>判定不了</strong>——那需要逐校系的簡章資料，
+          而系統不會去抓。不要把「可以報名」讀成「符合這個校系的門檻」。
+          個人申請那一邊有一個例外：你把檢定標準抄進
+          <Link href="/admission/refs">升學資料查詢</Link>
+          （含五標對應的級分）之後，
+          <Link href="/admission/placement">落點模擬</Link>
+          會逐次抽樣去檢查它——<strong>抄進來的才會被檢查</strong>，沒抄的那幾條會被明確標成
+          「無法判定」而不是靜靜當成通過。
         </p>
 
         {/* ── 規劃的後果 ───────────────────────────────────── */}
@@ -326,6 +397,33 @@ export default async function AdmissionPage() {
           </>
         )}
 
+        {/* ── 原本不做、現在做得到的兩件 ───────────────────── */}
+        <h2 className="yz-card__title" style={{ marginTop: 30 }}>
+          原本記著「不做」，而那個判斷已經過時的兩件
+        </h2>
+        <p className="yz-hint">
+          這兩件曾經寫在下面那份「不做的幾件事」裡，理由是資料取不到。
+          <strong>那個理由錯了</strong>，而錯在哪裡值得寫清楚——不然下一次有人會重新推導出
+          同樣的結論，然後再把它關掉一次。
+        </p>
+        <dl className="yz-adm__nope">
+          {NOT_OFFERED.filter((n) => NOW_OFFERED[n.key]).map((n) => {
+            const now = NOW_OFFERED[n.key];
+            return (
+              <div key={n.key}>
+                <dt>
+                  {n.title}
+                  {'　'}
+                  <Link href={now.href}>去{now.label} →</Link>
+                </dt>
+                <dd>
+                  <Emph text={now.why} />
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
+
         {/* ── 明確不做的事 ─────────────────────────────────── */}
         <h2 className="yz-card__title" style={{ marginTop: 30 }}>
           本系統不做的幾件事
@@ -336,7 +434,7 @@ export default async function AdmissionPage() {
           給一個沒有根據的百分比比不給更糟，因為你會照著它做決定。
         </p>
         <dl className="yz-adm__nope">
-          {NOT_OFFERED.map((n) => (
+          {NOT_OFFERED.filter((n) => !NOW_OFFERED[n.key]).map((n) => (
             <div key={n.key}>
               <dt>{n.title}</dt>
               <dd>{n.body}</dd>

@@ -3512,3 +3512,382 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-inbox__when { margin-left: 0; }
   .yz-prefs__quiet .yz-field { flex: 1 1 46%; }
 }
+
+/* ── 級分預測與落點 ──────────────────────────────────────────
+   兩頁的共同問題是**它們要顯示不確定性**，而不確定性最容易被畫成
+   一個很有信心的數字。所以這一段的每一個圖都是為了同一件事：
+   把「有多不確定」變成看得見的面積或長度，而不是一行小字。
+
+   沒有圖表套件。這套系統部署在補習班機房的封閉網段，為了幾條線
+   引入一個要下載的相依，是把一個離線安裝的問題換一個裝飾。
+   與 .yz-rate、能力分析那一頁同一個決定。 */
+
+/* ── 級分記錄 ─────────────────────────────────────────────── */
+
+.yz-gr__list { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.yz-gr__row {
+  display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline;
+  padding: 8px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-gr__subject { flex: 0 0 4.5em; font-size: 12.5px; }
+/* 級分用宋體、靠右、等寬數字：它是這一列的主角，而老師會拿它跟
+   成績單核對。 */
+.yz-gr__grade {
+  flex: 0 0 2em; text-align: right;
+  font-family: var(--font-num); font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.yz-gr__unit { font-size: 11px; color: var(--ink-3); }
+.yz-gr__exam { flex: 1 1 12em; font-size: 12.5px; color: var(--ink-2); }
+.yz-gr__when { font-family: var(--font-num); font-size: 11.5px; color: var(--ink-3); }
+.yz-gr__src { font-size: 11.5px; color: var(--ink-3); }
+
+/* ── 信心水準的切換 ───────────────────────────────────────── */
+
+.yz-pred__conf {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+  margin: 10px 0 16px;
+}
+.yz-pred__conflabel { font-size: 12px; color: var(--ink-2); }
+.yz-pred__confopt {
+  padding: 1px 7px; border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-family: var(--font-num); font-size: 12px; color: var(--ink-2);
+}
+.yz-pred__confopt--on { border-color: var(--ink); color: var(--ink); background: var(--select); }
+.yz-pred__confwhy { flex: 1 1 20em; font-size: 11.5px; color: var(--ink-3); line-height: 1.75; }
+
+/* ── 一科的預測 ───────────────────────────────────────────── */
+
+.yz-pred__list { list-style: none; margin: 0; padding: 0; }
+.yz-pred__item { padding: 14px 0 16px; border-top: 1px solid var(--rule); }
+.yz-pred__head { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline; }
+.yz-pred__subject { flex: 0 0 4.5em; font-size: 14px; font-weight: 600; }
+/* 區間是這一列唯一的結論，所以它是最大的字。**旁邊一定有信心水準**
+   ——沒有信心水準的區間會被讀成一個確定的範圍。 */
+.yz-pred__range { font-family: var(--font-num); font-size: 17px; letter-spacing: 0.02em; }
+.yz-pred__conflevel {
+  padding: 1px 6px; border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-family: var(--font-num); font-size: 11.5px; color: var(--ink-2);
+}
+/* 資料不足。刻意用硃砂紅的框而不是灰字：灰字會被讀成「還在算」。 */
+.yz-pred__thin {
+  padding: 1px 6px; border: 1px solid var(--mark); border-radius: var(--r-sm);
+  font-size: 12px; color: var(--mark);
+}
+.yz-pred__n { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
+.yz-pred__why { margin: 6px 0 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.85; }
+.yz-pred__note { margin: 7px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.85; }
+
+/* ── 0 到 15 的整條尺 ──────────────────────────────────────
+   「11 至 13」這三個字讀起來像一個很窄的範圍，而在 16 個級分的尺度上
+   它是六分之一。把整條尺畫出來，區間的寬度就變成一個看得見的事實。 */
+
+.yz-pred__track {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 62px; margin: 12px 0 0;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-pred__cell {
+  position: relative; flex: 1 1 0;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  height: 100%;
+}
+/* 區間內的那幾格：底線加粗成墨色，長條換成硃砂紅。
+   面積很小，符合「硃砂紅只出現在校對記號」那條規則。 */
+.yz-pred__cell--in { box-shadow: inset 0 -2px 0 0 var(--ink); }
+.yz-pred__bar { display: block; width: 100%; min-height: 1px; background: var(--rule); }
+.yz-pred__cell--in .yz-pred__bar { background: var(--mark); }
+.yz-pred__tick {
+  position: absolute; bottom: -17px; left: 0; right: 0;
+  text-align: center;
+  font-family: var(--font-num); font-size: 10px; color: var(--ink-3);
+}
+.yz-pred__cell--in .yz-pred__tick { color: var(--ink); }
+.yz-pred__legend { margin: 24px 0 0; font-size: 11.5px; color: var(--ink-3); line-height: 1.8; }
+
+/* ── 這個寬度是哪裡來的（四個不確定性來源）─────────────────
+   四項對應到**學生做得到的事**：級距那一項大 → 去考一次全模；
+   剩餘時間那一項大 → 那是好事，它會自己縮。只給一個總寬度的話，
+   這幾種完全不同的處境長得一樣。
+
+   四段用**線的密度**而不是四個顏色來分：這一套介面只有一個記號色。 */
+
+.yz-pred__var { margin: 14px 0 0; }
+.yz-pred__varhead { display: block; font-size: 11.5px; color: var(--ink-2); }
+.yz-pred__varbar { display: flex; height: 7px; margin: 5px 0 7px; border: 1px solid var(--rule); }
+.yz-pred__varseg { display: block; min-width: 2px; }
+.yz-pred__varseg--disp { background: var(--ink-2); }
+.yz-pred__varseg--diff {
+  background: repeating-linear-gradient(45deg, var(--ink-3) 0 2px, transparent 2px 4px);
+}
+.yz-pred__varseg--scale {
+  background: repeating-linear-gradient(-45deg, var(--mark) 0 2px, transparent 2px 4px);
+}
+.yz-pred__varseg--drift { background: var(--rule-2); }
+
+.yz-pred__varlist { list-style: none; margin: 0; padding: 0; }
+.yz-pred__varlist li {
+  display: flex; flex-wrap: wrap; gap: 1px 8px; align-items: baseline;
+  padding: 3px 0;
+}
+.yz-pred__varkey { flex: 0 0 14px; height: 7px; border: 1px solid var(--rule); }
+.yz-pred__varkey--disp { background: var(--ink-2); }
+.yz-pred__varkey--diff {
+  background: repeating-linear-gradient(45deg, var(--ink-3) 0 2px, transparent 2px 4px);
+}
+.yz-pred__varkey--scale {
+  background: repeating-linear-gradient(-45deg, var(--mark) 0 2px, transparent 2px 4px);
+}
+.yz-pred__varkey--drift { background: var(--rule-2); }
+.yz-pred__varname { flex: 0 0 11em; font-size: 12px; }
+.yz-pred__varshare {
+  flex: 0 0 3em; text-align: right;
+  font-family: var(--font-num); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.yz-pred__varwhy { flex: 1 1 16em; font-size: 11.5px; color: var(--ink-3); line-height: 1.75; }
+
+.yz-pred__srcmix { margin: 10px 0 0; font-size: 11.5px; color: var(--ink-2); }
+.yz-pred__srchint { color: var(--ink-3); }
+
+/* ── 預測怎麼變的 ─────────────────────────────────────────── */
+
+.yz-pred__hist { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.yz-pred__hist li {
+  display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-pred__histwhen { flex: 0 0 6em; font-family: var(--font-num); font-size: 11.5px; color: var(--ink-3); }
+.yz-pred__histsub { flex: 0 0 4.5em; font-size: 12.5px; }
+.yz-pred__histrange { font-family: var(--font-num); font-size: 13px; }
+.yz-pred__histconf { font-family: var(--font-num); font-size: 11.5px; color: var(--ink-2); }
+.yz-pred__histn { font-size: 11.5px; color: var(--ink-3); }
+/* 「等學測成績」不是一個錯誤狀態，所以它是虛線而不是紅字。 */
+.yz-pred__histpend {
+  margin-left: auto; padding: 0 5px;
+  border: 1px dashed var(--rule); border-radius: var(--r-sm);
+  font-size: 11px; color: var(--ink-3);
+}
+.yz-pred__histhit { margin-left: auto; font-size: 11.5px; color: var(--confirm); }
+.yz-pred__histhit.yz-warn { color: var(--mark); }
+
+/* ── 落點：這一份是什麼時候算的 ───────────────────────────── */
+
+.yz-plc__meta { margin: 14px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.85; }
+.yz-plc__meta b { font-family: var(--font-num); font-weight: 600; }
+.yz-plc__metahint { display: block; margin-top: 3px; font-size: 11.5px; color: var(--ink-3); }
+
+/* ── 組合層級的三個數字 ───────────────────────────────────── */
+
+.yz-plc__combo { display: flex; flex-wrap: wrap; gap: 0; margin: 10px 0 0; }
+.yz-plc__stat {
+  flex: 1 1 15em; padding: 10px 16px 10px 0;
+  border-top: 1px solid var(--ink);
+}
+.yz-plc__stat + .yz-plc__stat { padding-left: 16px; border-left: 1px solid var(--rule); }
+.yz-plc__statnum {
+  display: block;
+  font-family: var(--font-num); font-size: 22px; line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.yz-plc__statlabel { display: block; font-size: 12px; color: var(--ink-2); }
+.yz-plc__statwhy { display: block; margin-top: 4px; font-size: 11.5px; color: var(--ink-3); line-height: 1.8; }
+
+/* ── 會通過幾個 ───────────────────────────────────────────── */
+
+.yz-plc__hist { margin: 20px 0 0; }
+.yz-plc__histhead { display: block; font-size: 12px; color: var(--ink-2); }
+.yz-plc__histbars {
+  display: flex; align-items: flex-end; gap: 6px;
+  height: 70px; margin: 8px 0 0;
+  border-bottom: 1px solid var(--rule);
+}
+.yz-plc__histcol {
+  position: relative; flex: 0 0 34px;
+  display: flex; flex-direction: column; justify-content: flex-end; height: 100%;
+}
+.yz-plc__histbar { display: block; width: 100%; min-height: 1px; background: var(--ink-3); }
+/* 「六個都沒過」那一根。它是這張圖唯一該被看見的一根。 */
+.yz-plc__histbar--zero { background: var(--mark); }
+.yz-plc__histtick {
+  position: absolute; bottom: -17px; left: 0; right: 0; text-align: center;
+  font-family: var(--font-num); font-size: 11px; color: var(--ink-2);
+}
+.yz-plc__histp {
+  position: absolute; bottom: -31px; left: 0; right: 0; text-align: center;
+  font-family: var(--font-num); font-size: 10px; color: var(--ink-3);
+}
+.yz-plc__histwhy { display: block; margin-top: 38px; font-size: 11.5px; color: var(--ink-3); line-height: 1.8; }
+
+/* ── 逐個志願 ─────────────────────────────────────────────── */
+
+.yz-plc__list { list-style: none; margin: 6px 0 0; padding: 0; }
+.yz-plc__item { padding: 14px 0 16px; border-top: 1px solid var(--rule); }
+.yz-plc__head { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }
+.yz-plc__rank { flex: 0 0 4.5em; font-size: 11.5px; color: var(--ink-3); }
+.yz-plc__name { flex: 1 1 14em; font-size: 13.5px; font-weight: 600; }
+/* 機率。大字，但**旁邊一定跟著資料基礎那一行**（見 .yz-plc__basis）
+   ——規格書 §8.4：每一個機率數字旁邊都必須標示資料基礎。 */
+.yz-plc__rate {
+  font-family: var(--font-num); font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+/* 0.4 至 0.7 的可靠度：機率照樣顯示，但**視覺上要區別**（§8.4）。
+   用虛線底而不是變灰：變灰會被讀成「停用」，虛線會被讀成「還沒定」。 */
+.yz-plc__rate--soft { border-bottom: 1px dashed var(--mark); color: var(--ink-2); }
+.yz-plc__none {
+  padding: 1px 6px; border: 1px solid var(--mark); border-radius: var(--r-sm);
+  font-size: 12px; color: var(--mark);
+}
+.yz-plc__risk { font-size: 11.5px; color: var(--ink-2); }
+.yz-plc__risk--sprint { color: var(--mark); }
+.yz-plc__risk--safe { color: var(--confirm); }
+
+/* 機率的長條，含 30% 與 70% 兩條分層線。學生要看得出這個數字落在
+   哪一檔，而「29%」與「31%」在數字上差 2、在決策上差一檔。 */
+.yz-plc__gauge {
+  position: relative; height: 4px; margin: 9px 0 0;
+  background: var(--rule-2);
+}
+.yz-plc__gaugefill { position: absolute; inset: 0 auto 0 0; background: var(--ink-2); }
+.yz-plc__gaugecut {
+  position: absolute; top: -3px; bottom: -3px; width: 1px;
+  background: var(--ink);
+}
+
+.yz-plc__basis {
+  display: flex; flex-wrap: wrap; gap: 2px 14px;
+  margin: 8px 0 0; font-size: 11.5px; color: var(--ink-2);
+}
+.yz-plc__basisitem { font-family: var(--font-num); }
+.yz-plc__soft { margin: 7px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.85; }
+.yz-plc__note { margin: 7px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.85; }
+
+/* 篩選的關卡。序號是這一段的重點——篩選是**依序**的，而畫面上要
+   看得出「你是在第幾關被擋掉的」。 */
+.yz-plc__stages { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-plc__stage {
+  display: flex; flex-wrap: wrap; gap: 1px 12px; align-items: baseline;
+  padding: 4px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-plc__stageno { flex: 0 0 4em; font-size: 11.5px; color: var(--ink-3); }
+.yz-plc__stagesub { flex: 0 0 10em; font-size: 12.5px; }
+.yz-plc__stagethr { font-family: var(--font-num); font-size: 12.5px; }
+.yz-plc__stagemul { font-family: var(--font-num); font-size: 11px; color: var(--ink-3); }
+.yz-plc__stagefail { margin-left: auto; font-size: 11.5px; color: var(--ink-2); }
+
+.yz-plc__qualify { margin: 9px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.8; }
+.yz-plc__qualifyhead { margin-right: 8px; font-size: 11.5px; color: var(--ink-3); }
+.yz-plc__qualifyfail { font-family: var(--font-num); }
+.yz-plc__qualifywarn { color: var(--mark); }
+
+.yz-plc__refs { list-style: none; margin: 9px 0 0; padding: 0; }
+.yz-plc__refs li {
+  display: flex; flex-wrap: wrap; gap: 1px 10px; align-items: baseline;
+  padding: 2px 0; font-size: 11.5px;
+}
+.yz-plc__refyear { flex: 0 0 6em; font-family: var(--font-num); color: var(--ink-3); }
+.yz-plc__refval { flex: 1 1 12em; font-family: var(--font-num); color: var(--ink); }
+.yz-plc__refsrc { color: var(--ink-3); }
+
+/* ── 相關性 ───────────────────────────────────────────────── */
+
+.yz-plc__corr { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-plc__corr li {
+  display: flex; flex-wrap: wrap; gap: 1px 12px; align-items: baseline;
+  padding: 3px 0; border-bottom: 1px solid var(--rule-2); font-size: 11.5px;
+}
+.yz-plc__corrpair { flex: 0 0 13em; }
+.yz-plc__corrval { flex: 0 0 3em; text-align: right; font-family: var(--font-num); font-size: 12.5px; }
+.yz-plc__corrsrc { flex: 1 1 14em; color: var(--ink-3); }
+
+/* ── 每一次模擬的紀錄 ─────────────────────────────────────── */
+
+.yz-plc__runs { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.yz-plc__runs li {
+  display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px solid var(--rule-2); font-size: 11.5px;
+}
+.yz-plc__runwhen { flex: 0 0 9em; font-family: var(--font-num); }
+.yz-plc__runasof { font-family: var(--font-num); color: var(--ink-3); }
+.yz-plc__runseed { font-family: var(--font-num); color: var(--ink-3); }
+.yz-plc__runsum { margin-left: auto; font-family: var(--font-num); color: var(--ink-2); }
+
+/* ── 校準 ─────────────────────────────────────────────────── */
+
+.yz-calib__years { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin: 14px 0 0; }
+.yz-calib__year {
+  padding: 1px 7px; border: 1px solid var(--rule); border-radius: var(--r-sm);
+  font-family: var(--font-num); font-size: 12px; color: var(--ink-2);
+}
+.yz-calib__year--on { border-color: var(--ink); color: var(--ink); background: var(--select); }
+.yz-calib__yearhint { flex: 1 1 18em; font-size: 11.5px; color: var(--ink-3); }
+
+.yz-calib__verdict {
+  margin: 16px 0 0; padding: 9px 0;
+  border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule);
+  font-size: 13px; line-height: 1.85;
+}
+.yz-calib__summary { margin: 12px 0 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.9; }
+
+.yz-calib__bands { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-calib__band { padding: 12px 0 14px; border-top: 1px solid var(--rule); }
+/* 樣本太少的組整組壓淡。它不是「正常」也不是「有問題」，
+   而那兩種以外的第三種狀態最容易被畫成其中一種。 */
+.yz-calib__band--thin { opacity: 0.62; }
+.yz-calib__bandhead { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline; }
+.yz-calib__bandname { flex: 0 0 6em; font-family: var(--font-num); font-size: 13.5px; font-weight: 600; }
+.yz-calib__bandn { font-size: 11.5px; color: var(--ink-3); }
+.yz-calib__bandthin {
+  margin-left: auto; padding: 0 5px;
+  border: 1px dashed var(--rule); border-radius: var(--r-sm);
+  font-size: 11px; color: var(--ink-3);
+}
+.yz-calib__bandok { margin-left: auto; font-size: 11.5px; color: var(--confirm); }
+.yz-calib__bandflag {
+  margin-left: auto; padding: 0 5px;
+  border: 1px solid var(--mark); border-radius: var(--r-sm);
+  font-size: 11px; color: var(--mark);
+}
+.yz-calib__bandflag--overcautious { border-color: var(--ink-3); color: var(--ink-2); }
+
+/* 兩根對照的線：宣稱 vs 實際。校準曲線的全部內容就是這個對照。 */
+.yz-calib__pair { margin: 9px 0 0; }
+.yz-calib__line { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
+.yz-calib__linelabel { flex: 0 0 2.5em; font-size: 11.5px; color: var(--ink-2); }
+.yz-calib__track { position: relative; flex: 1 1 auto; height: 8px; background: var(--rule-2); }
+.yz-calib__fill { position: absolute; inset: 0 auto 0 0; }
+.yz-calib__fill--claim { background: var(--ink-3); }
+.yz-calib__fill--actual { background: var(--ink); }
+.yz-calib__fill--bad { background: var(--mark); }
+/* 命中率的 95% 範圍。少了它，一組 10 筆與一組 400 筆的「實際 45%」
+   在畫面上長得一樣，而它們的意思完全不同。 */
+.yz-calib__ci {
+  position: absolute; top: -3px; bottom: -3px;
+  border-left: 1px solid var(--ink-2); border-right: 1px solid var(--ink-2);
+}
+.yz-calib__linenum {
+  flex: 0 0 3em; text-align: right;
+  font-family: var(--font-num); font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+.yz-calib__bandci { margin: 7px 0 0; font-size: 11.5px; color: var(--ink-3); line-height: 1.8; }
+
+.yz-calib__subjects { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.yz-calib__subject {
+  display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-calib__subjname { flex: 0 0 5em; font-size: 12.5px; }
+.yz-calib__subjn { font-size: 11.5px; color: var(--ink-3); }
+.yz-calib__subjrate { font-family: var(--font-num); font-size: 11.5px; color: var(--ink-2); }
+
+@media (max-width: 620px) {
+  /* 級分的長條在手機上留著（它是這一頁的主角），但刻度改成只標
+     0、5、10、15——16 個 10px 的數字在窄螢幕上會疊在一起。 */
+  .yz-pred__tick { font-size: 9px; }
+  .yz-pred__varname { flex: 1 1 8em; }
+  .yz-pred__varwhy { flex: 1 1 100%; }
+  .yz-plc__stat + .yz-plc__stat { padding-left: 0; border-left: none; }
+  .yz-plc__histcol { flex: 1 1 0; }
+  .yz-plc__stagesub { flex: 1 1 7em; }
+  .yz-calib__linelabel { flex: 0 0 2.2em; }
+}
