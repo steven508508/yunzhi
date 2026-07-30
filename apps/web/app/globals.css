@@ -3891,3 +3891,169 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-plc__stagesub { flex: 1 1 7em; }
   .yz-calib__linelabel { flex: 0 0 2.2em; }
 }
+
+/* ── 學習歷程與面試 ──────────────────────────────────────────────
+   兩件事決定了這一段的樣子。
+
+   一、**額度是這一頁的主角。** 學生來這裡要回答的問題是「我還剩幾件」，
+   所以逐學年的額度用等寬的數字排成一列，超過的那一格才上色。整頁只有
+   超過額度、制度沒過、與確認清單的阻斷項會出現 --mark，其餘一律是灰階
+   ——三種紅色一起出現的話，沒有一種是紅的。
+
+   二、**回饋區塊刻意做得不像可以拿走的東西。** 它沒有邊框、沒有背景色、
+   沒有複製鈕，就是一段縮排的文字。這是防代寫的介面層：一個看起來像
+   「產出物」的方框會邀請人把它搬走，而學習歷程的意義在於學生自己寫。
+   揭露聲明那一段相反——它本來就是要被貼進檔案的，所以它有框也有複製鈕。
+   ────────────────────────────────────────────────────────────── */
+
+/* 逐學年的額度。等寬數字，因為它們是要被比對的。 */
+.yz-pf__years { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-pf__year {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline;
+  padding: 8px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-pf__yearname { flex: 0 0 3.5em; font-size: 13px; }
+.yz-pf__quota {
+  font-family: var(--font-num); font-size: 12.5px; font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.yz-pf__quota--over { color: var(--mark); font-weight: 600; }
+/* 綜整心得不計入額度。這一行是整頁最容易被漏讀的一句，所以它獨立成
+   一行而不是括號補述——括號裡的東西不會被讀。 */
+.yz-pf__excluded {
+  flex: 1 1 100%; font-size: 11.5px; color: var(--ink-3); line-height: 1.8;
+}
+
+.yz-pf__progs { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-pf__prog {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline;
+  padding: 5px 0; font-size: 12px; color: var(--ink-2);
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-pf__progname { flex: 0 0 8em; color: var(--ink); }
+.yz-pf__progrow {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0 14px; padding: 10px 0; border-bottom: 1px solid var(--rule-2);
+}
+
+/* 素材。每一件是一段，不是一列表格——它有標題、有標籤、有勾選，
+   塞進表格的欄位裡會讓每一格都很擠。 */
+.yz-pf__items { list-style: none; margin: 10px 0 14px; padding: 0; }
+.yz-pf__item { padding: 10px 0; border-bottom: 1px solid var(--rule-2); }
+.yz-pf__itemhead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.yz-pf__code {
+  flex: 0 0 auto; font-family: var(--font-num); font-size: 12px;
+  border: 1px solid var(--rule); padding: 0 5px; color: var(--ink-2);
+}
+.yz-pf__title { font-size: 14px; }
+.yz-pf__meta { font-size: 11.5px; color: var(--ink-3); }
+.yz-pf__kind { font-size: 12px; color: var(--ink-2); }
+.yz-pf__tags, .yz-pf__pick, .yz-pf__teachers, .yz-pf__kindpick {
+  display: flex; flex-wrap: wrap; gap: 6px; margin: 7px 0 0;
+}
+.yz-pf__picklabel { font-size: 11.5px; color: var(--ink-3); align-self: center; }
+.yz-pf__addprog { display: flex; gap: 10px; align-items: flex-end; margin: 10px 0 16px; }
+.yz-pf__form { margin: 10px 0 0; padding: 12px 0 0; border-top: 1px solid var(--rule); }
+
+/* 制度檢查與確認清單。旗標在左、說明在右，沒過的才上色。 */
+.yz-pf__rules, .yz-pf__checks { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-pf__rule, .yz-pf__check {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid var(--rule-2);
+  font-size: 12.5px; line-height: 1.8;
+}
+.yz-pf__ruleflag, .yz-pf__checkflag {
+  flex: 0 0 4.5em; font-size: 11.5px; color: var(--ink-3); text-align: right;
+}
+.yz-pf__rule--bad, .yz-pf__check--block { color: var(--ink); }
+.yz-pf__rule--bad .yz-pf__ruleflag,
+.yz-pf__check--block .yz-pf__checkflag { color: var(--mark); font-weight: 600; }
+.yz-pf__check--warn .yz-pf__checkflag { color: var(--ink-2); }
+.yz-pf__checkbody { display: flex; flex-direction: column; gap: 2px; }
+.yz-pf__checkdetail { font-size: 12px; color: var(--ink-2); }
+
+/* 回饋。**刻意沒有邊框也沒有背景。** 見這一段的抬頭：一個看起來像
+   產出物的方框會邀請人把它搬走。 */
+.yz-pf__asks { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; }
+.yz-pf__ask { display: flex; flex-direction: column; gap: 4px; max-width: 15em; }
+.yz-pf__askhint { font-size: 11.5px; color: var(--ink-3); line-height: 1.7; }
+.yz-pf__feedback { margin: 12px 0 0; padding-left: 14px; border-left: 2px solid var(--rule); }
+.yz-pf__feedbacktext { font-size: 13.5px; line-height: 2; white-space: pre-wrap; margin: 0; }
+.yz-pf__blocked { font-size: 11.5px; color: var(--ink-3); line-height: 1.8; margin: 8px 0 0; }
+
+/* AI 使用層級。四級並排，未設定的班級要看得出來——那一班的學生
+   正在等他，而留白說不出這件事。 */
+.yz-pf__levels { list-style: none; margin: 10px 0; padding: 0; }
+.yz-pf__level { padding: 9px 0; border-bottom: 1px solid var(--rule-2); }
+.yz-pf__levelsum { font-size: 12.5px; color: var(--ink-2); margin: 3px 0 0; line-height: 1.8; }
+.yz-pf__levelwhy { font-size: 11.5px; color: var(--ink-3); margin: 4px 0 0; line-height: 1.9; }
+.yz-pf__levelnow { font-size: 13px; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.yz-pf__classes { list-style: none; margin: 12px 0 0; padding: 0; }
+.yz-pf__class {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-pf__classname { flex: 0 0 8em; font-size: 13px; }
+.yz-pf__classlevels { display: flex; flex-wrap: wrap; gap: 5px; }
+.yz-pf__unset { font-size: 11.5px; color: var(--mark); }
+
+/* AI 使用記錄。時間在左，因為學生要對的是「我那天做了什麼」。 */
+.yz-pf__logs { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-pf__log {
+  display: flex; flex-wrap: wrap; gap: 3px 12px; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px solid var(--rule-2); font-size: 12px;
+}
+.yz-pf__logwhen {
+  flex: 0 0 9em; font-family: var(--font-num); font-size: 11.5px; color: var(--ink-3);
+}
+.yz-pf__logwhat { flex: 0 0 6em; color: var(--ink); }
+.yz-pf__lognote { flex: 1 1 14em; color: var(--ink-2); line-height: 1.8; }
+
+/* 老師看到的、學生分享過來的自述。 */
+.yz-pf__shared { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-pf__sharedone { padding: 12px 0; border-bottom: 1px solid var(--rule-2); }
+.yz-pf__sharedhead { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.yz-pf__sharedbody {
+  margin: 8px 0 0; font-size: 13.5px; line-height: 2; white-space: pre-wrap;
+  padding-left: 14px; border-left: 2px solid var(--rule-2);
+}
+
+/* 面試。題目是要被點的，所以它整句是一個按鈕而不是一列加一顆鈕。 */
+.yz-iv__questions { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-iv__question { border-bottom: 1px solid var(--rule-2); }
+.yz-iv__pick {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border: none; background: none; padding: 10px 0;
+  font: inherit; font-size: 13px; line-height: 1.9; color: var(--ink);
+}
+.yz-iv__pick:hover { color: var(--mark); }
+.yz-iv__pick--on { color: var(--mark); font-weight: 600; }
+.yz-iv__now { font-size: 14px; line-height: 2; margin: 8px 0 12px; }
+.yz-iv__checks { list-style: none; margin: 10px 0 0; padding: 0; }
+.yz-iv__check {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
+  padding: 8px 0; border-bottom: 1px solid var(--rule-2); font-size: 12.5px;
+}
+.yz-iv__checkname { flex: 0 0 9em; color: var(--ink-2); }
+.yz-iv__checknote { flex: 1 1 16em; line-height: 1.9; }
+.yz-iv__check--bad .yz-iv__checkname { color: var(--mark); }
+.yz-iv__asks { margin: 8px 0 0; padding-left: 20px; font-size: 13px; line-height: 2.1; }
+.yz-iv__history { list-style: none; margin: 8px 0 0; padding: 0; }
+.yz-iv__past {
+  display: flex; flex-wrap: wrap; gap: 3px 12px; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid var(--rule-2); font-size: 12px;
+}
+.yz-iv__pastq { flex: 1 1 18em; color: var(--ink); }
+.yz-iv__pasta { flex: 1 1 100%; color: var(--ink-3); font-size: 11.5px; line-height: 1.8; }
+
+@media (max-width: 620px) {
+  /* 額度那一列在手機上要留著（它是這一頁的主角），但校系與班級的
+     固定寬度欄位要放開——8em 的欄名加上四顆按鈕在窄螢幕上會擠成兩行
+     而且對不齊。 */
+  .yz-pf__yearname { flex: 0 0 100%; }
+  .yz-pf__progname, .yz-pf__classname { flex: 1 1 100%; }
+  .yz-pf__logwhen, .yz-pf__logwhat { flex: 0 0 auto; }
+  .yz-pf__addprog { flex-direction: column; align-items: stretch; }
+  .yz-iv__checkname { flex: 0 0 100%; }
+  .yz-pf__ruleflag, .yz-pf__checkflag { flex: 0 0 3.5em; }
+}

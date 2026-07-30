@@ -584,6 +584,21 @@ def _mock_reply(system: str, user: str) -> str:
 
         return mock_grading_reply(user)
 
+    # 學習歷程回饋與 AI 使用揭露聲明。同樣要排在前面，同樣的理由：
+    # 它們會被 Node 端的 portfolioGuard 檢查，而一段通用假回應會因為
+    # 「沒有問句」被擋下三次然後退回罐頭——AI_PROVIDER=mock 的安裝驗證
+    # 就看不出這條路徑到底通不通。
+    #
+    # 揭露聲明那一支特別要注意：它走的是**另一組**後處理規則（比對聲明
+    # 內容與實際記錄是否相符），所以假回應必須從這一次的提示詞裡把
+    # 「要寫進聲明」的那幾類讀回來。寫死一段的話，記錄裡有互動時它會
+    # 因為漏掉而被擋下三次。解析放在 pipeline/portfolio_prompts.py：
+    # 提示詞的格式是那裡定的，格式改了、解析跟著改。
+    if "（學習歷程回饋）" in s or "（AI 使用揭露聲明）" in s:
+        from pipeline.portfolio_prompts import mock_portfolio_reply
+
+        return mock_portfolio_reply(s, user)
+
     # 整頁閱讀。要排在「版面分析」之前判斷——兩者的提示詞都提到
     # 版面，而這一支回的是完整的題目而不只是區塊。
     if "題本的判讀器" in s:

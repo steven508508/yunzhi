@@ -36,6 +36,7 @@ from providers import (
 from routes_advice import build_advice_router
 from routes_grading import build_grading_router
 from routes_import import build_router
+from routes_portfolio import build_portfolio_router
 from routes_tutor import build_tutor_router
 
 logging.basicConfig(
@@ -93,6 +94,10 @@ app.include_router(build_advice_router(_get_provider))
 # （評 N 次量離散度），所以走同一個 provider 單例特別重要——各自建
 # client 的話，那 N 次會繞過 BaseProvider 的併發訊號量。
 app.include_router(build_grading_router(_get_provider))
+# 學習歷程輔助與揭露聲明。同一個 provider 單例；它的特別之處在於**同一個
+# 端點有兩套互斥的系統提示**（回饋禁止第一人稱、聲明要求第一人稱），
+# 由 feature 決定用哪一套。理由見 routes_portfolio.py 的檔頭。
+app.include_router(build_portfolio_router(_get_provider))
 
 
 # ─────────────────────────────────────────────────────────────────
