@@ -3416,3 +3416,99 @@ body[data-yz-taking] .yz-shell__main { overscroll-behavior: contain; }
   .yz-prop__dimwhy { flex-basis: 100%; }
   .yz-rubric__head { grid-template-columns: 1fr; }
 }
+
+/* ── 通知 ────────────────────────────────────────────────────
+   兩個畫面：收件匣與通知設定。
+
+   收件匣是**手機優先**的：學生與家長多半在手機上，而一則通知真正
+   重要的東西是最後那個連結（「下一步做得到什麼」）。所以一則就是
+   一個區塊、標題與內文各自成行、連結佔滿寬度好按——不是一張有欄位
+   的表。表在 360 像素寬的螢幕上會把「下一步」擠到看不見。
+
+   未讀用**左邊一條實線加一點底色**標示，不是只有顏色：色盲的人也
+   讀得到（WCAG 1.4.1），而且列印時線條還在。 */
+
+.yz-inbox { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+.yz-inbox__item {
+  padding: 12px 0 13px;
+  border-bottom: 1px solid var(--rule-2);
+}
+.yz-inbox__item--new {
+  padding-left: 11px;
+  border-left: 2px solid var(--mark);
+  background: var(--mark-soft);
+}
+.yz-inbox__head {
+  display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline;
+}
+.yz-inbox__title { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+/* 時間推到右邊，而且不換行——「9/8 15:59」拆成兩行讀不出是什麼。 */
+.yz-inbox__when {
+  margin-left: auto;
+  font-family: var(--font-num); font-size: 11.5px; color: var(--ink-3);
+  white-space: nowrap;
+}
+.yz-inbox__body {
+  margin: 4px 0 0;
+  font-family: var(--font-doc); font-size: 13px; line-height: 1.75;
+  color: var(--ink-2);
+}
+/* 下一步。**這是一則通知存在的理由**，所以它是唯一有顏色的東西，
+   而且在手機上是一個高度足夠按的目標（44px 是 WCAG 2.5.5 的建議）。 */
+.yz-inbox__act {
+  display: inline-block; margin-top: 7px; padding: 3px 0;
+  min-height: 24px;
+  font-size: 12.5px; color: var(--mark);
+}
+
+/* 「全部標成已讀」那一條。它只在清單超過一頁時出現——一頁列得完
+   的時候，打開這一頁本身就已經把它們標起來了。 */
+.yz-inbox__bar {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline;
+  margin: 0 0 12px;
+}
+.yz-inbox__barnote { flex: 1 1 240px; font-size: 11.5px; color: var(--ink-3); }
+
+/* 導覽列上的未讀數。
+   小、貼在字後面、只在真的有未讀時出現（見 components/Nav.tsx）。
+   刻意不是一個圓形的紅點：這一套介面全部是線條與宋體，一個實心的
+   紅色圓球在上面是唯一一個看起來像別的產品的東西。 */
+.yz-nav__badge {
+  margin-left: 4px; padding: 0 4px;
+  border: 1px solid var(--mark); border-radius: var(--r-sm);
+  font-family: var(--font-num); font-size: 10.5px; line-height: 1.5;
+  color: var(--mark);
+}
+
+/* 通知設定 */
+.yz-prefs { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.yz-prefs__row {
+  padding: 9px 0; border-bottom: 1px solid var(--rule-2);
+}
+.yz-prefs__note { margin: 4px 0 10px; font-size: 12px; color: var(--ink-2); line-height: 1.8; }
+/* 「必收」。停用的核取方塊旁邊一定要有這個字，否則使用者只會看到
+   一個點不動的方塊，然後以為畫面壞了。 */
+.yz-prefs__must {
+  margin-left: 6px; padding: 1px 5px;
+  border: 1px solid var(--mark); border-radius: var(--r-sm);
+  font-size: 10.5px; color: var(--mark);
+}
+.yz-prefs__ch { font-size: 13px; color: var(--ink); }
+.yz-prefs__on  { margin-left: 6px; font-size: 11px; color: var(--ink-3); }
+.yz-prefs__off {
+  margin-left: 6px; padding: 1px 5px;
+  border: 1px dashed var(--rule); border-radius: var(--r-sm);
+  font-size: 10.5px; color: var(--ink-3);
+}
+.yz-prefs__why {
+  display: block; margin-top: 3px;
+  font-size: 11.5px; color: var(--ink-3); line-height: 1.7;
+}
+.yz-prefs__quiet { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 8px; }
+.yz-prefs__quiet .yz-field { flex: 0 0 8em; }
+
+@media (max-width: 620px) {
+  /* 時間回到標題下面：小螢幕上把它推到右邊會讓標題只剩幾個字寬。 */
+  .yz-inbox__when { margin-left: 0; }
+  .yz-prefs__quiet .yz-field { flex: 1 1 46%; }
+}

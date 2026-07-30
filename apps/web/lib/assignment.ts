@@ -42,6 +42,7 @@ import {
   checkExtendMinutes,
 } from '@/lib/attemptClock.mjs';
 import { countAnswered, rosterTally } from '@/lib/examOps.mjs';
+import { notifyGradeReleased } from '@/lib/notifyDb';
 import { prisma } from '@/lib/prisma';
 import { countByAssignment } from '@/lib/scope.mjs';
 import { requireTenant } from '@/lib/tenant';
@@ -306,6 +307,28 @@ export async function updateAssignment(
     patch: data,
     started,
   });
+
+  // 手動放行的那一刻要告訴學生。
+  //
+  // 這是整個系統裡唯一一件「做了之後學生完全沒有跡象」的事：MANUAL 的
+  // 任務交完卷之後，學生畫面上只有一句「老師還沒有開放」，而開放的
+  // 那一秒沒有任何訊號——他唯一的辦法是每天回來按一次。
+  //
+  // **只在 `releasedAt` 真的從無變有的時候。** 收回（變成 null）不通知，
+  // 上面的逐欄比對已經保證了「值沒變就不會出現在 data 裡」。
+  //
+  // 通知失敗一律吞掉（見 `lib/notifyDb.ts`）：放行已經寫進資料庫了，
+  // 讓這一行有能力把整個請求變成 500 的話，老師會以為放行沒成功、
+  // 再按一次，然後撞到「這份任務已經放行過了」。
+  if (data.releasedAt instanceof Date) {
+    const recipientIds = [...(await resolveRecipientIds(assignmentId))];
+    await notifyGradeReleased(assignmentId, {
+      tenantId,
+      title: after.title,
+      recipientIds,
+    });
+  }
+
   return after;
 }
 

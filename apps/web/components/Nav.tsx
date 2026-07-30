@@ -21,10 +21,65 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { Button } from '@/components/Button';
 import { activeHref, ROLE_LABELS, type NavItem } from '@/lib/nav';
+
+/**
+ * 收件匣把幾則標成已讀之後，用它通知導覽列重新問一次未讀數。
+ *
+ * 匯出成一個常數而不是兩邊各打一次字串：打錯的話**不會有任何錯誤，
+ * 只是那個數字不再更新**，而那是這個功能最容易失敗的地方。
+ */
+export const UNREAD_CHANGED = 'yz:unread-changed';
+
+/**
+ * 未讀數。
+ *
+ * # 為什麼是在瀏覽器端問，而不是由版面算好傳進來
+ *
+ * 因為它必須**在不重新載入整頁的情況下跟著變**。使用者在收件匣裡
+ * 把幾則標成已讀，而那個數字如果是伺服器元件在頁面載入時算好的一個
+ * 字面值，它會停在原本的數字——**於是那個紅點永遠不歸零，而一週
+ * 之後沒有人再看它**。
+ *
+ * # 兩個觸發點，缺一個都會讓數字停住
+ *
+ *   · **換頁時**（依賴 `pathname`）。剛剛產生的通知在下一次換頁
+ *     就看得到。
+ *   · **收到 `UNREAD_CHANGED` 事件時**。`router.refresh()` 只重跑
+ *     伺服器元件，client component 的 effect 依賴沒變就不會再跑——
+ *     所以在收件匣裡標記已讀之後，光靠 refresh 這個數字不會動。
+ *
+ * 不做定時輪詢：每一個開著頁面的瀏覽器每分鐘敲一次資料庫，而同一台
+ * 機器同時要服務正在考試的學生（理由與工作者把匯入併發設成 1 相同）。
+ *
+ * 失敗一律當成 0：這個數字畫在每一頁上，讓它有能力顯示錯誤
+ * 等於把一個裝飾品放到承重牆上。
+ */
+function useUnread(pathname: string): number {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    // 元件卸載後不要再 setState（換頁很快時真的會發生）。
+    let alive = true;
+    const ask = () => {
+      fetch('/api/notifications/unread')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((b) => {
+          if (alive && b && typeof b.unread === 'number') setN(b.unread);
+        })
+        .catch(() => {});
+    };
+    ask();
+    window.addEventListener(UNREAD_CHANGED, ask);
+    return () => {
+      alive = false;
+      window.removeEventListener(UNREAD_CHANGED, ask);
+    };
+  }, [pathname]);
+  return n;
+}
 
 export function Nav({
   items,
@@ -39,6 +94,7 @@ export function Nav({
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const current = activeHref(pathname);
+  const unread = useUnread(pathname);
 
   async function signOut() {
     if (busy) return;
@@ -86,6 +142,30 @@ export function Nav({
           {displayName}
           <span className="yz-nav__role">{ROLE_LABELS[systemRole] ?? systemRole}</span>
         </span>
+        {/* 通知放在這裡而不是 NAV_ITEMS 裡，理由與旁邊的「更換密碼」
+            一樣：**每一個角色都有，而且只關於他自己。** 放進主導覽會
+            打亂那一份清單刻意的順序（老師的動線是題庫→匯入→考卷→
+            派卷→成績，而通知會插在最前面，因為前面幾項對學生是被
+            過濾掉的）。
+
+            未讀數只在真的有未讀的時候才畫。**一個寫著 0 的紅點是最快
+            被學會忽略的東西**，而那正是這個功能最容易失敗的地方。
+            超過 99 顯示「99+」：三位數會把導覽列撐開，而 100 與 137
+            對使用者是同一個意思。 */}
+        <Link
+          href="/inbox"
+          className="yz-nav__link"
+          aria-current={pathname === '/inbox' ? 'page' : undefined}
+        >
+          通知
+          {unread > 0 && (
+            <span className="yz-nav__badge">
+              {unread > 99 ? '99+' : unread}
+              {/* 數字本身讀螢幕的人聽到的是一串沒有上下文的字。 */}
+              <span className="yz-sr">則未讀</span>
+            </span>
+          )}
+        </Link>
         {/* 更換密碼放在這裡而不是 NAV_ITEMS 裡，因為它**每個角色都有**
             ——放進主導覽等於在學生唯一的一個項目旁邊多一個他一學期
             用一次的東西。但它不能只存在於強制更換那條路（/password，

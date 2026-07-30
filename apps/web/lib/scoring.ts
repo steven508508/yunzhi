@@ -38,6 +38,7 @@ import {
   isManualScore,
   manualScoreNote,
 } from '@/lib/examOps.mjs';
+import { notifyVoided } from '@/lib/notifyDb';
 import { prisma } from '@/lib/prisma';
 import { requireTenant } from '@/lib/tenant';
 import { gradeAttempt, roundScore } from '@/lib/grading.mjs';
@@ -663,6 +664,19 @@ export async function voidAttempt(
   // 一樣吞掉錯誤：作廢本身已經成功，不能被統計拖回去。
   await refreshAbilityForUser(attempt.user.id);
 
+  // **學生必須知道這一份不算數了**，而且不能從一個 0 分自己猜。
+  // 在此之前他唯一的線索是檢討頁那一句（`lib/release.mjs` 的 VOIDED
+  // 分支）——而那要他自己點進去才看得到，成績單上那一格是空的。
+  //
+  // 通知裡**不含 `reason`**：作廢的原因有誠信事件與系統故障兩種，
+  // 系統分不出來，而猜錯的方向是指控一個沒有作弊的孩子。詳見
+  // `lib/notifyDb.ts` 的 `notifyVoided`。這一則是必收的（關不掉）。
+  await notifyVoided(
+    attempt.id,
+    { tenantId, recipientId: attempt.user.id, assignmentId: attempt.assignmentId },
+    true,
+  );
+
   return { attemptId: attempt.id, displayName: attempt.user.displayName, status: 'VOIDED' };
 }
 
@@ -726,6 +740,15 @@ export async function unvoidAttempt(
 
   // 撤銷作廢：那一份又算數了，掌握度要把它加回去。與作廢同一支。
   await refreshAbilityForUser(attempt.user.id);
+
+  // 恢復也要通知，而且理由與作廢完全一樣。少了這一則，一個被誤判的
+  // 學生會永遠停在「我的卷子不算數」——他收到過作廢那一則，
+  // 而恢復沒有任何人告訴他。同樣是必收的。
+  await notifyVoided(
+    attempt.id,
+    { tenantId, recipientId: attempt.user.id, assignmentId: attempt.assignmentId },
+    false,
+  );
 
   return { attemptId: attempt.id, displayName: attempt.user.displayName, status: allowed.status };
 }

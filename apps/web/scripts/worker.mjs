@@ -2,8 +2,8 @@
  * 背景工作者。
  *
  * 兩類工作：
- *   · 週期性維護（清 session、解鎖帳號、找出卡住的匯入）
- *   · 佇列消費（匯入管線；評分、解析生成、通知依路線圖加入）
+ *   · 週期性維護（清 session、解鎖帳號、找出卡住的匯入、產生與送出通知）
+ *   · 佇列消費（匯入管線；評分、解析生成依路線圖加入）
  *
  * 兩者共用一個行程但**不共用失敗**：任何一邊出錯都不能拖垮另一邊。
  * 一個壞掉的清理工作不該讓老師的題本匯入停擺。
@@ -13,6 +13,7 @@ import { PrismaClient } from '@prisma/client';
 import { UnrecoverableError, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { runImport, stageLabel } from './import-pipeline.mjs';
+import { deliverDue, examBusy, generateAll } from '../lib/notify.mjs';
 import { tenantScoped } from '../lib/prismaClient.mjs';
 import { withoutTenantScope } from '../lib/tenantContext.mjs';
 
@@ -36,6 +37,9 @@ let shuttingDown = false;
 // ─────────────────────────────────────────────────────────────
 
 const jobs = [];
+
+/** 間隔 0 = 每一輪 tick 都跑（見 `tick` 的間隔判斷）。 */
+const EVERY_TICK = 0;
 /**
  * 週期性維護一律**跨租戶**執行。
  *
@@ -107,6 +111,71 @@ registerJob('detect-stuck-imports', 5 * 60 * 1000, async () => {
       },
     });
     console.warn(`[detect-stuck-imports] ${j.id} 卡在 ${j.status} 已 ${mins} 分鐘，標記為失敗`);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 通知
+//
+// 兩支工作，刻意分開而且節奏差很多：
+//
+//   產生（15 分鐘）  掃過所有租戶的任務、作答、匯入。這是整個模組
+//                    最重的查詢，而它跟考試搶同一個資料庫。
+//   送出（每一輪）    只撈 QUEUED 而且到期的那幾列，有數量上限。
+//
+// 合成一支的話，要嘛送出被拖到 15 分鐘一次（老師按下放行，學生
+// 十五分鐘後才看到「成績開放了」——他早就自己重整過八次了），
+// 要嘛掃描每 30 秒跑一次（考試中的資料庫多了一個每半分鐘的全表掃描）。
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 產生通知。
+ *
+ * **冪等。** 工作者重啟、跑兩次、或同時跑兩個實例都不會送出兩份：
+ * 每一則都帶 `dedupeKey`，而 `@@unique([tenantId, dedupeKey])` 讓
+ * 第二次寫入撞在資料庫上（`lib/notify.mjs` 的 `enqueueMany` 把那個
+ * 衝突當成正常結果）。**不是靠「先查有沒有」**——兩個實例會同時查到
+ * 沒有、同時寫進去。
+ *
+ * 有考試正在進行時整輪跳過。掃描補得回來（下一輪的結果一樣），
+ * 考試不能等——這與匯入併發設成 1 是同一個決定。
+ */
+registerJob('notify-generate', 15 * 60 * 1000, async () => {
+  if (await examBusy(prisma)) {
+    console.log('[notify-generate] 有考試正在進行，這一輪跳過（下一輪會補上）');
+    return;
+  }
+  const r = await generateAll(prisma, { log: (m) => console.log(m) });
+  for (const f of r.failures) {
+    // 一支掃描壞掉不該讓其他三支的結果消失，所以失敗是回傳值而不是
+    // 例外；但它一定要印出來，否則「通知怎麼都沒有」查不到原因。
+    console.error(`[notify-generate] ${f}`);
+  }
+});
+
+/**
+ * 送出到期的通知。
+ *
+ * 站內通知的「送出」是 QUEUED → SENT 的狀態轉換——**什麼都沒有離開
+ * 這台機器**。仍然讓它走一次工作者，理由見 `lib/notify.mjs` 的檔頭：
+ * 免打擾與節流只在一個地方生效、失敗與重試的帳從第一天就記著、
+ * 而日後真的接上 LINE 時管線已經在那裡。
+ *
+ * 每一輪都跑（tick 是 30 秒），因為老師按下放行之後學生應該很快
+ * 看得到。查詢很輕：`(status, scheduledAt)` 有索引，而且有數量上限。
+ */
+registerJob('notify-deliver', EVERY_TICK, async () => {
+  const r = await deliverDue(prisma);
+  if (r.rescued > 0) {
+    console.warn(`[notify-deliver] ${r.rescued} 則卡在送出中，放回佇列重試`);
+  }
+  if (r.sent > 0 || r.failed > 0 || r.dead > 0 || r.suppressed > 0) {
+    console.log(
+      `[notify-deliver] 送出 ${r.sent} 則` +
+        (r.failed > 0 ? `、失敗待重試 ${r.failed} 則` : '') +
+        (r.dead > 0 ? `、達重試上限 ${r.dead} 則` : '') +
+        (r.suppressed > 0 ? `、抑制 ${r.suppressed} 則` : ''),
+    );
   }
 });
 

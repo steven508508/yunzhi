@@ -47,6 +47,7 @@ import type { Prisma } from '@prisma/client';
 import { isNamedTarget, resolveRecipients } from '@/lib/assignment';
 import { attemptWritable, checkFinalizeOnBehalf } from '@/lib/attemptClock.mjs';
 import { hasAnswer } from '@/lib/examOps.mjs';
+import { notifyFinalizedOnBehalf } from '@/lib/notifyDb';
 import { prisma } from '@/lib/prisma';
 import { maySeeResult, type ResultLevel } from '@/lib/release.mjs';
 import { gradeAttemptById } from '@/lib/scoring';
@@ -744,7 +745,36 @@ export async function finalizeAttemptOnBehalf(
   const allowed = checkFinalizeOnBehalf(attempt);
   if (!allowed.ok) throw err.conflict('SUBMITTED', allowed.error);
 
-  return finalizeAttempt(attempt.id, { auto: true, actorId });
+  const result = await finalizeAttempt(attempt.id, { auto: true, actorId });
+
+  // **他的成績多了一個他沒有按下交卷的分數，那是他該知道的事。**
+  //
+  // 在此之前學生那一側完全沒有回音：他的作答次數已經用完（清單上
+  // 沒有按鈕），而那一份忽然從「進行中」變成有分數的。沒有這一則的話
+  // 他會以為自己那次沒交成功，而成績單上有它。這一則是必收的。
+  //
+  // 只在真的轉換了狀態時送。`alreadySubmitted` 為真代表這一次呼叫
+  // 什麼都沒做（別人剛剛收過了），那時再送一則等於把同一件事說兩次。
+  if (!result.alreadySubmitted) {
+    const info = await prisma.attempt.findFirst({
+      where: { id: attempt.id },
+      select: {
+        userId: true,
+        assignmentId: true,
+        assignment: { select: { title: true, tenantId: true } },
+      },
+    });
+    if (info) {
+      await notifyFinalizedOnBehalf(attempt.id, {
+        tenantId: info.assignment.tenantId,
+        recipientId: info.userId,
+        assignmentId: info.assignmentId,
+        title: info.assignment.title,
+      });
+    }
+  }
+
+  return result;
 }
 
 /**
