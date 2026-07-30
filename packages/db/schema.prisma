@@ -59,6 +59,14 @@ model Tenant {
   gradeRecords     SubjectGradeRecord[]
   gradePredictions GradePrediction[]
   simulationRuns   SimulationRun[]
+  portfolioLimitSets PortfolioLimitSet[]
+  portfolioItems     PortfolioItem[]
+  portfolioEssays    PortfolioEssay[]
+  aiUsagePolicies    AiUsagePolicy[]
+  disclosureLogs     AiDisclosureLog[]
+  disclosureStmts    AiDisclosureStatement[]
+  interviewQuestions InterviewQuestion[]
+  interviewPractices InterviewPractice[]
 }
 
 model AcademicYear {
@@ -176,6 +184,11 @@ model User {
   gradeRecords     SubjectGradeRecord[] @relation("GradeRecordUser")
   gradePredictions GradePrediction[]    @relation("PredictionUser")
   simulationRuns   SimulationRun[]      @relation("SimulationUser")
+  portfolioItems     PortfolioItem[]         @relation("PortfolioOwner")
+  portfolioEssays    PortfolioEssay[]        @relation("EssayAuthor")
+  disclosureLogs     AiDisclosureLog[]       @relation("DisclosureUser")
+  disclosureStmts    AiDisclosureStatement[] @relation("StatementUser")
+  interviewPractices InterviewPractice[]     @relation("PracticeUser")
 }
 
 model GuardianLink {
@@ -217,6 +230,7 @@ model Class {
   @@unique([tenantId, academicYearId, name])
   @@index([tenantId, active])
   @@map("classes")
+  aiUsagePolicy AiUsagePolicy?
 }
 
 model ClassMembership {
@@ -2218,4 +2232,335 @@ model SimulationRun {
 
   @@index([tenantId, userId, runAt])
   @@map("simulation_runs")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 學習歷程檔案輔助與第二階段準備
+//
+// 這一塊與系統其餘部分最大的不同：**它處理的是學生的個人陳述與生涯
+// 敘事,不是他的作答**。敏感度完全不同,所以隱私規則也不同——
+// 老師預設看不到、家長看不到、AI 對話**連老師都看不到**（與智慧老師
+// 那一塊的立場相反,理由在 PortfolioEssay 的註解裡）。
+//
+// 四個貫穿的決定：
+//
+// **一、協助整理與回饋可以,代寫不行。**
+// 制度上招生單位重視「資料真實性與學生自主準備」;法規上教育部
+// 113 年 12 月 13 日函文要求 AI 使用須誠實揭露並在檔案中標註;
+// 而最根本的是教育層面——學習歷程的意義在於學生自己回顧與反思的
+// 過程,由 AI 代寫等於把那個過程刪掉,剩下一份文件。
+//
+// **二、揭露機制是及格線,不是加分項。**
+// 一個 AI 輔助升學的系統若不內建揭露機制,就是在幫學生違規。
+// `AiDisclosureLog` 是不可竄改的稽核記錄,`AiDisclosureStatement`
+// 是學生可編輯的產出——兩者分開,因為前者是事實後者是他要負責的文件。
+//
+// **三、制度限制是資料不是常數。**
+// 件數與檔案大小上限每年可能改（簡章逐年公告）。寫死在程式裡的那一版,
+// 明年會用去年的規則擋住學生而且沒有人知道。所以放在
+// `PortfolioLimitSet`,並且**要求建檔的人填上他是從哪一份簡章的哪一頁
+// 抄來的**。
+//
+// **四、面試回饋只評結構,不評內容。**
+// 「有沒有回答到問題、有沒有具體例子、有沒有前後矛盾」是看得出來的;
+// 「這個答案好不好」是招生委員的judgement,系統給了只會誤導。
+// ═══════════════════════════════════════════════════════════════
+
+/// 學習歷程的官方五大項。代碼 A–T 見 `PortfolioItem.itemCode`。
+enum PortfolioCategory {
+  /// A 修課紀錄。由學校系統提供,本系統不存。
+  COURSE_RECORD
+  /// B–E 課程學習成果
+  COURSE_OUTCOME
+  /// F–N 多元表現
+  DIVERSE_PERFORMANCE
+  /// O–Q 學習歷程自述。實體存在 PortfolioEssay。
+  SELF_STATEMENT
+  /// R–T 其他,校系自訂
+  OTHER
+}
+
+enum EssayKind {
+  /// N 多元表現綜整心得。**800 字加 3 張圖,而且不計入 10 件多元表現
+  /// 的額度**——這一條很多人搞錯。
+  DIVERSE_SUMMARY
+  /// O 高中學習歷程反思
+  REFLECTION
+  /// P 就讀動機
+  MOTIVATION
+  /// Q 未來學習計畫與生涯規劃
+  PLAN
+}
+
+/// 這一次 AI 互動屬於哪一種。**決定它走哪一組後處理規則。**
+enum PortfolioAiFeature {
+  /// 撰寫回饋（具體性、一致性）
+  WRITING_FEEDBACK
+  /// 從學習軌跡找素材提示
+  MATERIAL_HINT
+  /// 選件討論
+  SELECTION_DISCUSS
+  /// 制度檢查（字數、件數、必要項目）。純規則,不呼叫模型。
+  RULE_CHECK
+  /// 面試回答的結構回饋
+  INTERVIEW_FEEDBACK
+  /// **產生揭露聲明本身。**
+  ///
+  /// 這一個值存在的理由是它必須被防代寫閘門**排除**：聲明本身就是
+  /// 一段五十幾字的連續第一人稱敘述（「本文之構思與撰寫由本人完成,
+  /// 過程中使用 AI 輔助工具進行……」）,而它又必須隨互動性質變化、
+  /// 不能寫死成樣板。不排除的話,揭露聲明產生器會被自己的後處理層
+  /// 無限重試——一個功能把自己擋掉,而症狀是它永遠轉圈。
+  ///
+  /// 排除不等於不檢查：它走另一組規則（比對聲明內容與 AiDisclosureLog
+  /// 的實際記錄是否相符,而不是檢查人稱與長度）。
+  DISCLOSURE_STATEMENT
+}
+
+/// 某一學年度的件數與容量上限。**是資料不是常數。**
+///
+/// 每年簡章可能改。寫死在程式裡的那一版,明年會用去年的規則擋住學生,
+/// 而且**擋錯的方向是「你超過上限了」而他其實沒有**——他會相信系統
+/// 然後刪掉一件該留的。
+///
+/// `sourceRef` 是必填：填的人要說得出他從哪一份簡章的哪一頁抄來的。
+model PortfolioLimitSet {
+  id       String @id @default(cuid())
+  tenantId String
+  /// 民國學年度。
+  year     Int
+
+  /// 上傳中央資料庫：課程學習成果每學年至多幾件。
+  outcomePerYear   Int @default(6)
+  /// 上傳中央資料庫：多元表現每學年至多幾件。
+  diversePerYear   Int @default(10)
+  /// 個人申請階段勾選：課程學習成果至多幾件。
+  outcomeSelected  Int @default(3)
+  /// 個人申請階段勾選：多元表現至多幾件。
+  diverseSelected  Int @default(10)
+
+  /// 綜整心得的字數上限。
+  summaryChars  Int @default(800)
+  /// 綜整心得的圖片張數上限。
+  summaryImages Int @default(3)
+
+  /// 中央資料庫端單件文件上限（bytes）。
+  docBytes   Int @default(4194304)
+  /// 中央資料庫端單件影音上限（bytes）。
+  mediaBytes Int @default(10485760)
+
+  /// 從哪一份簡章的哪一頁。**必填。**
+  sourceRef String
+  /// 誰建的、什麼時候。這些數字錯了會擋住學生,要查得出來。
+  setBy     String
+  setAt     DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, year])
+  @@map("portfolio_limit_sets")
+}
+
+/// 一件素材（B–N）。A 由學校提供、O–Q 在 PortfolioEssay。
+model PortfolioItem {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  category PortfolioCategory
+  /// 官方代碼 B–N。
+  itemCode String
+  title    String
+  /// 「高二上」這種。
+  semester String?
+
+  storageKey String?
+  fileName   String?
+  fileBytes  Int?
+  /// DOC 或 MEDIA。兩者的容量上限不同。
+  fileKind   String?
+
+  /// 對應的課程。
+  courseRef   String?
+  /// 學生自己標的能力面向。選件討論時用來看「這三件呈現的是不是
+  /// 同一種能力」。
+  abilityTags String[] @default([])
+
+  /// 為哪些校系勾選。個人申請階段的件數上限是逐校系算的。
+  selectedFor String[] @default([])
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("PortfolioOwner", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, category])
+  @@index([tenantId, userId])
+  @@map("portfolio_items")
+}
+
+/// 綜整心得與學習歷程自述。
+///
+/// # 隱私：這張表與系統其他地方的規則不同
+///
+/// 內容**預設只有學生本人看得到**。學生可以選擇性分享給特定老師徵詢
+/// 意見,而且可以隨時撤回（`sharedWith`）。**家長在任何路徑下都讀不到**
+/// ——學生可能寫下不希望家長看到的事,而那正是這種文件的本質。
+///
+/// 而且**這裡的 AI 對話連老師都看不到**,與智慧老師那一塊的立場相反。
+/// 智慧老師的對話是「他在數學第 7 題卡住」,留給老師看是監督;
+/// 這裡的對話會談到家庭、生涯、以及他為什麼想讀那個系,留給老師看
+/// 是侵入。兩者的差別在內容的性質,不在技術。
+///
+/// `version` 保留修改歷程供回顧——寫學習歷程的價值有一半在回頭看
+/// 自己三個月前怎麼想的。
+model PortfolioEssay {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  kind EssayKind
+  /// 針對特定校系客製的版本。null 是通用版。
+  programRef String?
+
+  body       String
+  charCount  Int    @default(0)
+  imageCount Int    @default(0)
+
+  version   Int     @default(1)
+  isCurrent Boolean @default(true)
+
+  /// 分享給哪幾位老師（userId）。空陣列＝只有自己看得到。
+  /// **可以隨時撤回**,所以是一個可寫的陣列而不是一張只增不減的表。
+  sharedWith String[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("EssayAuthor", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, kind, isCurrent])
+  @@map("portfolio_essays")
+}
+
+/// 老師為班級設定的 AI 使用層級。教育部函文要求教師事前明定。
+///
+/// 1 到 4,數字越大允許的範圍越廣。超出該層級的功能對該班學生**停用**,
+/// 而不是「可以用但要標註」——事前明定的意思就是有些事不准做。
+model AiUsagePolicy {
+  id       String @id @default(cuid())
+  tenantId String
+  classId  String @unique
+
+  level Int
+  note  String?
+
+  setBy String
+  setAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  class  Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@map("ai_usage_policies")
+}
+
+/// AI 使用記錄。**不可竄改。**
+///
+/// 這是揭露聲明的事實基礎。學生可以編輯聲明（那是他要負責的文件）,
+/// 但不可以編輯這裡——否則聲明就不是揭露而是宣稱。
+model AiDisclosureLog {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  feature PortfolioAiFeature
+  essayId String?
+  /// 互動性質摘要。用來生成揭露聲明,所以要寫得像人話。
+  natureNote String
+  /// 互動當下適用的層級,取自 AiUsagePolicy。事後改設定不影響已發生的事。
+  aiLevel    Int?
+
+  occurredAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("DisclosureUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, occurredAt])
+  @@map("ai_disclosure_logs")
+}
+
+/// 產出的揭露聲明。`generated` 是系統依記錄生成的草稿,
+/// `edited` 是學生改過的版本——**兩者都留著**,因為前者是系統說了什麼,
+/// 後者是他決定要說什麼。
+model AiDisclosureStatement {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+  essayId  String?
+
+  generated String
+  edited    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation("StatementUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("ai_disclosure_statements")
+}
+
+/// 面試題庫。依校系類型分類。
+model InterviewQuestion {
+  id       String @id @default(cuid())
+  tenantId String
+
+  /// 校系類型分類。「醫牙」「電資」「商管」…
+  fieldTag String
+  question String
+  /// 回饋時要檢查的結構要素。「有沒有具體例子」「有沒有說出為什麼是這個系」
+  focusPoints String[] @default([])
+
+  active    Boolean  @default(true)
+  createdBy String?
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, fieldTag, active])
+  @@map("interview_questions")
+  practices InterviewPractice[]
+}
+
+/// 一次面試練習。
+///
+/// `feedback` 只放**結構面**的觀察,不做內容評價——「這個答案好不好」
+/// 是招生委員的判斷,系統給了只會誤導,而且學生會照著改成他以為的
+/// 「正確答案」。
+model InterviewPractice {
+  id       String @id @default(cuid())
+  tenantId String
+  userId   String
+
+  questionId String
+  answerText String
+  /// 結構面回饋。{ addressed, examples, contradictions, questions }
+  feedback   Json?
+
+  /// 與學習歷程的一致性檢查結果。面試最常見的失分是「檔案裡寫的跟
+  /// 口頭講的對不起來」。
+  consistency Json?
+
+  createdAt DateTime @default(now())
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User              @relation("PracticeUser", fields: [userId], references: [id], onDelete: Cascade)
+  question InterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("interview_practices")
 }
