@@ -175,7 +175,8 @@ section "停用服務"
 for u in yunzhi-backup.timer yunzhi-worker yunzhi-web yunzhi-ai yunzhi-minio; do
   systemctl list-unit-files 2>/dev/null | grep -q "^${u}" || continue
   info "停用 ${u}…"
-  # 給 60 秒讓正在作答的學生把本地暫存同步上來
+  # 給 60 秒收尾。不是等前端同步本機暫存（前端沒有本機暫存），
+  # 是等「已經送出、還沒寫進資料庫」的請求與 worker 手上的匯入。
   run systemctl stop "${u}"
   run systemctl disable "${u}"
 done

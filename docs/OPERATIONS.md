@@ -155,8 +155,13 @@ docker compose exec postgres psql -U yunzhi -d yunzhi -c "
   FROM pg_stat_user_tables WHERE n_dead_tup > 1000 ORDER BY n_dead_tup DESC;"
 ```
 
-`response_events` 與 `proctor_events` 寫入量最大，是膨脹的主要來源。
-`postgresql.conf` 已把 autovacuum 門檻調低（`scale_factor = 0.05`）。
+寫入量最大、也就是膨脹主要來源的是這五張：`attempt_answers`（每一次
+存檔一列）、`proctor_events`、`notifications`、`tutor_messages`、
+`ai_usage_logs`。`postgresql.conf` 已把 autovacuum 門檻調低
+（`scale_factor = 0.05`）。
+
+（這裡以前寫的是 `response_events`——**沒有這張表**。照著查的人會得到
+「relation does not exist」，然後以為是自己打錯字。）
 
 ---
 
@@ -204,26 +209,50 @@ docker compose exec postgres psql -U yunzhi -d yunzhi -c "
 `AI_MONTHLY_TOKEN_BUDGET` **預設是 0，也就是沒有上限。** 設成正整數之後，
 實際行為是這樣，三點都要知道：
 
-**一、它只擋新的題本匯入。** 超過上限時，下一個匯入工作會直接失敗
-（狀態 FAILED），老師看到的訊息是「本月 AI 用量已達上限（x / y token）。
-題本匯入暫停，但考試、客觀題評分、既有解析都不受影響」。
-**考試、自動計分、已經生成好的解析全部照常**——這是刻意的降級設計，
-預算用完不該讓考試停擺。
+**一、它擋四件事，不是只擋題本匯入。** 超過上限時，這四條路都會停：
+
+| 停掉的 | 使用者看到什麼 |
+|---|---|
+| 題本匯入 | 匯入工作直接失敗（狀態 FAILED） |
+| 智慧老師 | 「智慧老師暫停，但成績、解析與考試都不受影響」 |
+| AI 閱卷（含「全班一起評」） | 「AI 閱卷暫停，人工給分、成績與考試都不受影響」 |
+| 升學 AI 建議 | 「AI 老師暫停，但你查到的資料與下面的整理都不受影響」 |
+
+**考試、自動計分、人工給分、已經生成好的解析全部照常**——這是刻意的
+降級設計，預算用完不該讓考試停擺。
+
+> 這一段以前寫的是「它**只**擋新的題本匯入」。那句話讓人以為智慧老師
+> 與 AI 閱卷不受管控是設計如此，於是不會有人去追。實際上程式在
+> v0.23.0–v0.25.0 就替這三條各加了守門，但 `docker-compose.yml` 沒有把
+> `AI_MONTHLY_TOKEN_BUDGET` 傳給 web 容器，而三處守門的寫法都是
+> 「讀不到就等於不限制」——所以那三條真的一路花下去，而且沒有任何
+> 錯誤訊息。**v0.27.0 補上了那三個變數。**
+> 如果你的 `.env` 是更早以前建立的，這件事不必改 `.env`（變數本來就在
+> 那裡），但**要重新建立 web 容器**才會生效：
+> `docker compose up -d --force-recreate web`。
+
+一次「全班一起評」是三十份 × 三次呼叫，每次含題幹、規準與整篇作文
+——那是這個系統裡單次最貴的動作。上限沒生效時，它是最先把錢花光的。
 
 **二、它是「開始之前檢查一次」，不是「花到上限就停」。**
-檢查點在每一個匯入工作的**起點**，之後那份題本會跑
-SEGMENTING → EXTRACTING → SOLVING → ANNOTATING 四個 AI 階段、
-幾百次模型呼叫，中間**不再檢查**。所以一份 200 頁的大題本可以一口氣
-把用量衝到上限的 150%。上限的實際語意是
-「已經超支就不給開新的」，不是「本月最多花這麼多」。
+四條路都一樣：檢查點在**動作的起點**，開始之後不再檢查。匯入尤其明顯
+——一份題本會跑 SEGMENTING → EXTRACTING → SOLVING → ANNOTATING 四個
+AI 階段、幾百次模型呼叫，中間都不回頭問。所以一份 200 頁的大題本可以
+一口氣把用量衝到上限的 150%；「全班一起評」按下去也是同一回事。
+
+上限的實際語意是「**已經超支就不給開新的**」，不是「本月最多花這麼多」。
 真的要控成本，把上限設得比你能接受的天花板低一截。
 
-**三、改上限要重啟。** 值是從環境變數讀的，沒有畫面可以改：
+**三、改上限要重啟，而且是兩個服務。** 值是從環境變數讀的，
+沒有畫面可以改；匯入跑在 worker，另外三條跑在 web：
 
 ```bash
-nano .env                                   # 改 AI_MONTHLY_TOKEN_BUDGET
-docker compose up -d --force-recreate worker
+nano .env                                          # 改 AI_MONTHLY_TOKEN_BUDGET
+docker compose up -d --force-recreate worker web
 ```
+
+漏掉 `web` 的話，改的只有匯入那一條——而那正是這個上限最不容易花掉的
+一條。
 
 半夜老師要匯一份明天要用的題本、而預算剛好滿了——這時候你要 SSH 進去
 做上面這兩件事。想避開就別把上限壓得太貼近實際用量。
@@ -269,13 +298,46 @@ df -h                                            # 確認磁碟餘裕
 
 ## 監控
 
+先講結論，因為這一段以前寫反了：
+
+> **`--monitoring` 裝起來的東西不會通知你任何事。**
+> 它現在能給的是「事後翻日誌的地方」（Grafana ＋ Loki），
+> 不是「出事時會叫你的東西」。**會叫你的是 `doctor.sh`。**
+
 ```bash
 docker compose --profile monitoring up -d
 ```
 
-Grafana 在 `https://你的網域/grafana`。告警規則在
-`deploy/monitoring/alerts.yml`，預設涵蓋：服務不可用、資料庫連線數
-逼近上限、磁碟超過 85%、備份超過 26 小時未執行、**WAL 歸檔失敗**。
+Grafana 在 `https://你的網域/grafana`，可以查 Loki 收集的容器日誌
+——排查「上禮拜三下午到底發生什麼事」時很好用。
 
-最後一項容易被忽略但很重要：WAL 歸檔失敗是靜默的，而它失敗的後果
-是 PostgreSQL 持續累積 WAL 直到磁碟寫滿。
+### 為什麼告警是空的
+
+`deploy/monitoring/alerts.yml` 這一節以前寫著「預設涵蓋：服務不可用、
+資料庫連線數逼近上限、磁碟超過 85%、備份超過 26 小時未執行、WAL 歸檔
+失敗」。那五條規則的檔案確實在，但**一則都送不出去**：
+
+* 其中四條引用的指標沒有任何東西產生（要 `postgres_exporter`、
+  `node_exporter`，還有應用自己的 `/api/metrics`——三樣 compose 裡都沒有）
+* 唯一求得出值的那條，因為抓取目標不存在而**永遠成立**
+* 而且 compose 裡沒有 Alertmanager，`ALERT_WEBHOOK_URL` 標著【尚未實作】
+
+規則已經全部改成註解，理由寫在檔案裡。**這不是退步，是把假的指示燈
+關掉**——一個裝了但什麼都不會通知的監控，會讓人不再自己去看。
+
+### 那現在靠什麼
+
+`./deploy/scripts/doctor.sh`。它會實際連資料庫、數最新備份的年齡、
+讀備份守護行程留下的失敗原因、看還原演練紀錄與 AI 用量，有紅燈時
+回傳非零。要它「自動」的話，排進 cron 並在出事時寄信：
+
+```bash
+sudo tee /etc/cron.d/yunzhi-doctor >/dev/null <<'EOF'
+30 7 * * * root /opt/yunzhi/deploy/scripts/doctor.sh > /tmp/yz-doctor.log 2>&1 || \
+  mail -s "雲端智學健康檢查有紅燈" 你的信箱@example.com < /tmp/yz-doctor.log
+EOF
+```
+
+（路徑照你實際安裝的位置改。要收得到信，機器上得有可用的 `mail`。）
+
+**每天早上花十秒看一次 `doctor.sh` 的輸出，比一整套沒接通的監控有用。**

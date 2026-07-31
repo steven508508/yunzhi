@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # 雲端智學 — 備份
 #
-# 一份備份包含四樣東西，缺任何一樣還原後都是壞的：
-#   1. PostgreSQL 全庫 dump（成績、題庫、作答）
-#   2. WAL 歸檔（讓還原可以指定時間點，RPO 15 分鐘的來源）
-#   3. MinIO 物件（題本原檔、圖片、掃描答卷）
-#   4. .env 的**結構**（欄位名稱，不含值）與版本資訊
+# 一份備份包含五樣東西，缺任何一樣還原後都是壞的：
+#   1. PostgreSQL 全庫 dump（成績、題庫、作答）— 日常還原用這一份
+#   2. 實體基礎備份 base.tar.gz（pg_basebackup）— 時間點還原用這一份
+#   3. WAL 歸檔（把第 2 項往前滾到指定的那一分鐘）
+#   4. MinIO 物件（題本原檔、圖片、掃描答卷）
+#   5. .env 的**結構**（欄位名稱，不含值）與版本資訊
 #
-# 第 4 項容易被忽略但很重要：還原到一台新機器時，如果不知道
+# **第 1 項與第 2 項不能互相取代，這是這支腳本最容易被誤解的地方。**
+# WAL 只能重放在實體基礎備份（第 2 項）上，重放不到 pg_restore 還原
+# 出來的邏輯資料庫上。所以：
+#   · 只有第 1 項 → 只能還原到「上一次備份的那一刻」，中間全掉
+#   · 有第 2、3 項 → 才有「回到今天下午三點整」這件事
+# 這份腳本原本只有第 1 項，而文件寫著 RPO 15 分鐘。
+#
+# 第 5 項容易被忽略但很重要：還原到一台新機器時，如果不知道
 # 原本的版本與設定欄位，會用新版程式去讀舊版 schema。
 #
 # 備份檔本身加密（BACKUP_ENCRYPTION_KEY），因為它含全體學生
@@ -30,7 +38,7 @@ while [[ $# -gt 0 ]]; do
     --tag) TAG="$2"; shift 2 ;;
     --quiet|-q) QUIET=1; shift ;;
     --no-objects) INCLUDE_OBJECTS=0; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) die "不認得的參數：$1" ;;
   esac
 done
@@ -58,7 +66,9 @@ started="$(date +%s)"
 # 備份寫到一半磁碟滿了，會同時毀掉這次備份與資料庫的寫入能力。
 db_size_bytes="$(pg_scalar "SELECT pg_database_size('${POSTGRES_DB}')")"
 db_size_bytes="${db_size_bytes:-0}"
-need_gb=$(( (db_size_bytes / 1073741824) * 2 + 2 ))   # dump 加壓縮的暫存，抓兩倍再加 2GB
+# dump 加壓縮的暫存抓兩倍，實體基礎備份再算一份（它是整個資料目錄的
+# 壓縮副本，通常比 dump 大），最後加 2GB 的餘裕。
+need_gb=$(( (db_size_bytes / 1073741824) * 3 + 2 ))
 free_gb="$(disk_free_gb "${BACKUP_DIR}")"
 if (( ${free_gb:-0} < need_gb )); then
   die "備份目錄剩餘 ${free_gb}GB，估計需要 ${need_gb}GB。請先清理或調低 BACKUP_RETENTION_DAYS。"
@@ -81,7 +91,59 @@ dump_size="$(stat -c %s "${WORK}/database.dump")"
 (( dump_size < 1024 )) && die "資料庫 dump 只有 ${dump_size} 位元組，明顯不對。備份中止。"
 ok "資料庫 $(human_size "${dump_size}")"
 
-# ── 2. WAL 歸檔 ─────────────────────────────────────────────────
+# ── 2. 實體基礎備份 ─────────────────────────────────────────────
+#
+# **這一份才是時間點還原的起點。** 上面那份 dump 是邏輯備份，
+# 它記的是「有哪些資料」；WAL 記的是「資料庫檔案的哪個位元組被改了」，
+# 兩者不在同一個層次上，所以 WAL 重放不到 dump 還原出來的資料庫上。
+# 沒有這一段的話，「回到今天下午三點」這件事在技術上不存在，
+# 不管收集了多少 WAL。
+#
+# 失敗不中止整份備份：dump 是日常還原的主力，為了拿不到基礎備份
+# 而讓當晚連 dump 都沒有，是把小損失換成大損失。但 manifest 會記下
+# 這件事，還原端與 verify-restore.sh 會據此說出「這份不能做 PITR」。
+BASE_OK=false
+BASE_SIZE=0
+if [[ "${BACKUP_BASE_BACKUP:-true}" == "true" ]]; then
+  info "取得實體基礎備份…"
+  # 三個參數都不是可有可無的：
+  #   -D -      整份寫到 stdout。不必在資料庫容器裡找一個寫得下
+  #             整個資料目錄的暫存位置（那個位置多半就是快滿的那顆磁碟）。
+  #   -Xfetch   把復原所需的 WAL 段一起收進同一份 tar。少了它，這份
+  #             基礎備份自己起不來——而錯誤要到真的要用的那天才出現。
+  #             （-Xstream 需要另外開一條連線寫第二個檔，和 -D - 不相容。）
+  #   --checkpoint=fast
+  #             不等下一次自然檢查點。省下來的是「備份卡在那裡不動」
+  #             的十幾分鐘，代價是那一刻多一些磁碟 I/O；凌晨三點值得換。
+  # 不指定 -h：docker 模式在容器裡走 unix socket（pg_hba 的 local
+  # replication trust），原生模式由 pg_exec 帶 PGHOST/PGPASSWORD 走
+  # 127.0.0.1（Debian 預設的 host replication 規則）。兩邊都通。
+  if pg_exec pg_basebackup -U "${POSTGRES_USER}" \
+        -D - --format=tar --gzip --wal-method=fetch --checkpoint=fast \
+        > "${WORK}/base.tar.gz" 2>"${WORK}/basebackup.err"; then
+    BASE_SIZE="$(stat -c %s "${WORK}/base.tar.gz" 2>/dev/null || echo 0)"
+    if (( BASE_SIZE > 1024 )); then
+      BASE_OK=true
+      ok "基礎備份 $(human_size "${BASE_SIZE}")"
+    else
+      err "基礎備份只有 ${BASE_SIZE} 位元組，不是有效的備份。"
+      rm -f "${WORK}/base.tar.gz"
+      BASE_SIZE=0
+    fi
+  fi
+  if [[ "${BASE_OK}" != true ]]; then
+    err "實體基礎備份失敗——**這份備份不能做時間點還原**。"
+    dim "後果：誤刪資料時只能還原到備份當下，中間的作答與成績回不來。"
+    sed -n '1,3p' "${WORK}/basebackup.err" 2>/dev/null | while IFS= read -r l; do dim "  ${l}"; done
+    dim "最常見的原因是 pg_hba.conf 少了 replication 規則："
+    dim "  deploy/postgres/pg_hba.conf 有沒有掛進容器（docker compose config | grep pg_hba）"
+    dim "改好之後：docker compose restart postgres，再重跑一次備份。"
+  fi
+else
+  warn "BACKUP_BASE_BACKUP=false：這份備份不含實體基礎備份，無法做時間點還原。"
+fi
+
+# ── 3. WAL 歸檔 ─────────────────────────────────────────────────
 if [[ "${WAL_ARCHIVE_ENABLED:-true}" == "true" ]]; then
   info "收集 WAL 歸檔…"
   # 先切換一次 WAL，把當前還沒歸檔的交易也納入 ——
@@ -98,7 +160,7 @@ else
   warn "WAL 歸檔未啟用，這份備份只能還原到備份當下，無法指定時間點。"
 fi
 
-# ── 3. 物件儲存 ─────────────────────────────────────────────────
+# ── 4. 物件儲存 ─────────────────────────────────────────────────
 #
 # 失敗的後果值得寫清楚：資料庫還原之後題目文字全都在，但每一道
 # 「如右圖」的題目變成一片空白，每一份題本原檔消失。而完成訊息會說
@@ -131,7 +193,7 @@ else
   info "已指定 --no-objects，略過物件儲存。"
 fi
 
-# ── 4. 中繼資料 ─────────────────────────────────────────────────
+# ── 5. 中繼資料 ─────────────────────────────────────────────────
 app_version="${APP_VERSION:-$(cat "${YZ_ROOT}/VERSION" 2>/dev/null || echo unknown)}"
 schema_hash="$(pg_scalar "SELECT md5(string_agg(table_name || column_name || data_type, ',' ORDER BY table_name, column_name)) FROM information_schema.columns WHERE table_schema='public'")"
 schema_hash="${schema_hash:-unknown}"
@@ -145,6 +207,8 @@ cat > "${WORK}/manifest.json" <<EOF
   "schemaHash": "${schema_hash}",
   "postgres": { "database": "${POSTGRES_DB}", "sizeBytes": ${db_size_bytes}, "dumpFormat": "custom" },
   "walArchive": ${WAL_ARCHIVE_ENABLED:-true},
+  "includesBaseBackup": ${BASE_OK},
+  "baseBackupSizeBytes": ${BASE_SIZE},
   "includesObjects": ${OBJECTS_OK},
   "objectCount": ${OBJ_COUNT},
   "encrypted": ${BACKUP_ENCRYPTION_ENABLED:-true},
@@ -213,6 +277,13 @@ ok "$(basename "${ARCHIVE}")"
 dim "位置：${ARCHIVE}"
 dim "大小：$(human_size "${final_size}")"
 dim "耗時：${elapsed} 秒"
+if [[ "${BASE_OK}" == true ]]; then
+  dim "基礎備份：$(human_size "${BASE_SIZE}")（時間點還原用）"
+else
+  # 「備份完成」不可以在沒有基礎備份的情況下單獨出現：少了它，
+  # 這份備份能給的只有「還原到備份當下」，而文件承諾的是 15 分鐘。
+  err "基礎備份：**沒有**。這份備份無法做時間點還原。"
+fi
 if [[ "${OBJECTS_OK}" == true ]]; then
   dim "物件：${OBJ_COUNT} 個（題本原檔與題目附圖）"
 else

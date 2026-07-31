@@ -458,6 +458,76 @@ if (!compose) {
     );
   });
 
+  /**
+   * lib/env.ts 之外的那一半：直接讀 process.env 的設定。
+   *
+   * **這一項比上一項更容易漏，而且漏掉之後更安靜。** 上一項管的是
+   * lib/env.ts 的必填欄位——那些漏了會 exit 78，至少行程會死。這一項管的是
+   * 程式裡直接 `process.env.X` 的那些：漏了不會有任何錯誤訊息，
+   * 只是那段程式換一條路走。實際發生的：
+   *
+   *   AI_MONTHLY_TOKEN_BUDGET 沒傳給 web，而智慧老師／AI 閱卷／升學建議
+   *   三處的守門都是 `if (!(budget > 0)) return;`——**拿不到就等於不限制**。
+   *   月預算上限對這三條完全失效，帳單來了才知道，而 doctor.sh 的
+   *   ai.budget 一路顯示得像在管控。
+   *
+   * 為什麼要有這一項而不是只修好那一行 compose：web 服務刻意不用
+   * env_file（不讓它拿到 BACKUP_ENCRYPTION_KEY），逐項列出的清單必然會
+   * 過期——**下一個變數還會再漏一次**。所以擋的是那個結構，不是那一次。
+   */
+  check('apps/web 直接讀的 process.env，跑它的容器真的拿得到', () => {
+    // 檔案在哪個目錄，決定它在哪個容器裡跑：
+    //   scripts/  → worker 與 migrate（兩者都 env_file: .env，整份載入）
+    //   其餘      → web（Next.js 行程）
+    const SERVICE_OF = (rel) => (rel.startsWith('apps/web/scripts/') ? ['worker', 'migrate'] : ['web']);
+
+    /**
+     * 不必出現在 compose 的變數，**每一個都要說得出理由**。
+     * 這份豁免名單是這一項唯一會被繞過的地方，所以寧可短。
+     */
+    const EXEMPT = {
+      NODE_ENV: 'apps/web/Dockerfile 最終階段設 production；compose 再設一次只會有兩個來源',
+      HOSTNAME: '已在 web 服務設定（Next.js standalone 要它才會聽 0.0.0.0）',
+      PORT: 'Next.js standalone 的預設 3000 就是 compose 對外映射的埠',
+      TENANT_ID: 'scripts/rebuild-ability.mjs 的手動參數退路（--tenant 優先），非常駐服務',
+    };
+
+    const found = new Map(); // 變數 → 讀它的檔案
+    const walk = (rel) => {
+      for (const e of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name === '.next' || e.name.startsWith('.')) continue;
+        const child = `${rel}/${e.name}`;
+        if (e.isDirectory()) { walk(child); continue; }
+        if (!/\.(ts|tsx|mjs|js)$/.test(e.name)) continue;
+        // next.config.mjs 在建置機器上執行，不是在容器裡的執行期。
+        if (child === 'apps/web/next.config.mjs') continue;
+        for (const m of readFileSync(join(ROOT, child), 'utf8').matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) {
+          if (!found.has(m[1])) found.set(m[1], child);
+        }
+      }
+    };
+    walk('apps/web');
+
+    const bad = [];
+    for (const [name, file] of found) {
+      if (name in EXEMPT) continue;
+      for (const svc of SERVICE_OF(file)) {
+        const env = compose.services[svc]?.environment;
+        if (!env) continue; // 沒有這個服務就不管
+        if (name in env) continue;
+        bad.push(`${file} 讀 process.env.${name}，但 compose 的 ${svc} 服務沒有這一項`);
+      }
+    }
+    assert(
+      bad.length === 0,
+      `${bad.join('\n       ')}\n       ` +
+        `讀不到時 process.env.X 是 undefined，而這一類程式多半寫成\n       ` +
+        `\`?? 0\`、\`?? 'unknown'\`、\`if (!x) return\`——也就是**安靜地換一條路走**。\n       ` +
+        `補進 docker-compose.yml 對應服務的 environment；\n       ` +
+        `真的不需要就加進這一項的 EXEMPT 並寫下理由。`,
+    );
+  });
+
   check('先後有依賴的服務都用了 condition，不是只寫服務名', () => {
     // depends_on 的簡寫（只寫服務名）只保證「容器被建立了」，不保證
     // 它能服務。migrate 會在 Postgres 還在跑 initdb 時就連線失敗；
@@ -531,39 +601,110 @@ console.log('\n\x1b[1m── 設定與腳本\x1b[0m');
 check('.env.example 宣告的每個變數都真的有人讀', () => {
   // 標了「尚未實作」的變數不算——但**必須標**，否則老師會設了
   // 一個以為有效的值（例如 AI 月預算上限）然後在帳單來的時候才發現。
+  //
+  // 【尚未實作】要往上找**整段註解**，不是固定的前三行。
+  // 原本只看前三行，於是把說明寫詳細一點（例如補上「改成 openai
+  // 不會省記憶體」的那幾句）就會把標記推到第四行以外，變成
+  // 「標了卻不算數」——而這一項的失敗訊息會叫人去標一個已經標了的東西。
   const lines = read('.env.example').split('\n');
   const declared = [];
   for (const [i, l] of lines.entries()) {
     if (!/^[A-Z][A-Z0-9_]*=/.test(l)) continue;
-    const prev = lines.slice(Math.max(0, i - 3), i).join('\n');
-    if (/尚未實作/.test(prev)) continue;
+    // 只往上收**連續的註解行**，碰到空行或別的設定就停。
+    // 刻意不跨過別的設定行：跨過去的話，一個標了【尚未實作】的變數
+    // 會把它下面每一個變數都一起豁免掉——而那幾個多半是有實作的
+    // （LOG_FORMAT 尚未實作，緊接著的 LOG_MAX_SIZE 則真的有人讀）。
+    // 每一個未實作的變數都要自己標，這是刻意的重複。
+    const block = [];
+    for (let j = i - 1; j >= 0 && /^\s*#/.test(lines[j]); j--) block.push(lines[j]);
+    if (/尚未實作/.test(block.join('\n'))) continue;
     declared.push(l.split('=')[0]);
   }
 
-  // 全文檢索一次，避免對每個變數各跑一次 grep
-  const haystack = [
-    'docker-compose.yml',
-    'apps/web/Dockerfile',
-    'apps/ai/Dockerfile',
-    'deploy/backup/Dockerfile',
-    'deploy/backup/entrypoint.sh',
-    'deploy/caddy/Caddyfile',
-  ]
+  // 全文一次讀進來。原本這裡跑的是 `grep -rhoE '[A-Z][A-Z0-9_]{3,}'`，
+  // 它只把「看起來像變數名的字串」抓出來比對，於是**任何地方提到那個
+  // 名字都算數**——包括註解、說明文字、和給人看的警告訊息。
+  //
+  // 被它放過的實例：EMBEDDING_PROVIDER 全 repo 沒有任何一行程式讀取，
+  // 卻通過了這一項，靠的是 preflight.sh 一句警告文字裡的字串
+  //   「考慮把 EMBEDDING_PROVIDER 改為 openai（本地嵌入模型約吃 2GB）」
+  // 於是 8GB 的機器照著做、重裝、記憶體一點沒省——因為根本沒有本地
+  // 嵌入模型在跑。**檢查器被自己要檢查的那份說明騙過去了。**
+  //
+  // 所以現在比對的是「有沒有人用讀取的形式提到它」，不是「有沒有提到」。
+  const sources = [];
+  const walkSrc = (rel) => {
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) return;
+    for (const e of readdirSync(abs, { withFileTypes: true })) {
+      if (['node_modules', '.next', '.git', '__pycache__'].includes(e.name)) continue;
+      const child = `${rel}/${e.name}`;
+      if (e.isDirectory()) { walkSrc(child); continue; }
+      if (/\.(ts|tsx|mjs|js|py|sh|ya?ml|conf)$/.test(e.name) || /Dockerfile|Caddyfile/.test(e.name)) {
+        sources.push(child);
+      }
+    }
+  };
+  for (const d of ['apps', 'tools', 'deploy', 'packages']) walkSrc(d);
+  sources.push('docker-compose.yml');
+  // 二進位當文字讀：tools/e2e-grading-ai.mjs 含幾個非 UTF-8 位元組，
+  // 原本的 grep 判定它是二進位就整份跳過（順便在畫面上印一行看起來
+  // 像錯誤的 `binary file matches`）。只在它裡面出現的變數會被誤判成
+  // 沒人讀。latin1 解碼不會失敗，而我們只需要 ASCII 那一部分。
+  const haystack = sources
     .filter((f) => existsSync(join(ROOT, f)))
-    .map(read)
+    .map((f) => readFileSync(join(ROOT, f), 'latin1'))
     .join('\n');
 
-  const src = execFileSync(
-    'grep',
-    ['-rhoE', '[A-Z][A-Z0-9_]{3,}', '--include=*.ts', '--include=*.tsx', '--include=*.mjs',
-     '--include=*.py', '--include=*.sh', 'apps', 'tools', 'deploy', 'packages'],
-    { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  );
+  /** 「這個變數被讀取」的幾種真實寫法。純粹出現在文字裡不算。 */
+  const isRead = (v) =>
+    [
+      `process\\.env\\.${v}\\b`,               // TypeScript／JavaScript
+      `process\\.env\\[['"\`]${v}['"\`]\\]`,
+      `\\$\\{${v}[:}\\-]`,                     // shell、compose、Dockerfile 的 ${VAR}
+      `\\$${v}\\b`,                            // shell 的 $VAR
+      `environ(?:\\.get)?[([]\\s*['"]${v}['"]`, // Python os.environ
+      `\\.get\\(\\s*['"]${v}['"]`,             // Python dict.get("VAR")
+      `getenv\\(\\s*['"]${v}['"]`,
+      `^\\s*${v}\\s*:`,                        // compose 的 environment、zod／pydantic 欄位
+      `^\\s*:?\\s*"?\\$\\{?${v}[:=]`,          // shell 的 : "${VAR:=預設}"
+    ].some((p) => new RegExp(p, 'm').test(haystack));
 
-  const unused = declared.filter((v) => !haystack.includes(v) && !src.includes(v));
+  const unused = declared.filter((v) => !isRead(v));
   assert(
     unused.length === 0,
-    `這些變數沒有任何程式讀取，設了也不會生效：${unused.join('、')}`,
+    `這些變數沒有任何程式讀取，設了也不會生效：${unused.join('、')}\n       ` +
+      `（註解或訊息文字裡提到不算數——那正是這一項上次被騙過去的方式。）\n       ` +
+      `要嘛接上程式，要嘛在 .env.example 的說明裡標【尚未實作】。`,
+  );
+});
+
+check('每一支端到端測試都有人跑得到', () => {
+  // 實際發生的事：tools/ 底下有十三支 e2e-*.mjs，而 npm run test:e2e
+  // 只跑得到其中兩支。另外十一支（名冊、智慧老師、能力分析、監考、
+  // 升學、AI 閱卷、通知、級分預測、學習歷程、家長端…）**沒有被任何
+  // shell 或 npm script 引用**，也不在 CI 裡——它們只有在有人記得
+  // 手動一支一支跑的時候才會被執行，而文件把那三百多項寫成「全過」。
+  //
+  // 「沒有人跑」與「跑了而且過了」在報告上長得一模一樣，這是這一項
+  // 存在的理由。runner 是用萬用字元找檔案的，所以正常情況下這裡永遠
+  // 會過；會紅的情況是有人把 runner 改回寫死清單、或者新增了一支
+  // 放在別的地方的端到端測試。
+  const runner = 'tools/e2e-import.sh';
+  if (!existsSync(join(ROOT, runner))) return;
+  const src = read(runner);
+  const suites = readdirSync(join(ROOT, 'tools')).filter((f) => /^e2e-.*\.mjs$/.test(f));
+  assert(suites.length > 0, 'tools/ 底下找不到任何 e2e-*.mjs');
+
+  // 萬用字元展開＝全部涵蓋。否則要求每一支都被指名。
+  const globbed = /for\s+\w+\s+in\s+tools\/e2e-\*\.mjs/.test(src);
+  if (globbed) return;
+  const orphans = suites.filter((f) => !src.includes(f) && !src.includes(f.replace(/\.mjs$/, '')));
+  assert(
+    orphans.length === 0,
+    `這幾支端到端測試沒有被 ${runner} 引用，等於沒有人在跑：\n       ` +
+      `${orphans.join('、')}\n       ` +
+      `寫死清單就會再發生一次。runner 請用 \`for f in tools/e2e-*.mjs\` 展開。`,
   );
 });
 
@@ -606,7 +747,14 @@ check('文件裡的版本字串與 VERSION 一致', () => {
   // 走查報告與進度紀錄**刻意**引用舊版本：它們在描述「當時的狀況」
   // 或原樣引述有問題的那一行。把它們改成新版號會讓紀錄失真，
   // 所以這裡排除，而不是去改它們。
-  const frozen = /^docs\/(情境-|功能清單|夜間進度|施工藍圖)/;
+  //
+  // **`功能清單` 曾經在這份名單裡，那是錯的。** 那三份是紀錄，
+  // 讀的人知道自己在讀歷史；功能清單是被當成**權威盤點**在用的
+  // ——驗收會議上照著它決定「這個功能有沒有交」。它停在 v0.21.0
+  // 的期間，逐條寫著「沒有能力分析」「沒有智慧老師，完全不存在」
+  // 「沒有家長端」「沒有通知」，而那時那些模組都已經在畫面上了。
+  // 唯一會擋下過期文件的機制，正好放過了最不該放過的那一份。
+  const frozen = /^docs\/(情境-|夜間進度|施工藍圖)/;
 
   const docs = [
     'README.md',

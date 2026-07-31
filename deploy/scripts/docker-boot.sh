@@ -35,7 +35,10 @@ PROFILES=()
 [[ "${MONITORING:-false}" == "true" ]]  && PROFILES+=(--profile monitoring)
 
 if [[ "${ACTION}" == "stop" ]]; then
-  # 60 秒優雅關閉：正在作答的學生需要時間讓前端把本地暫存同步上來。
+  # 60 秒優雅關閉。**不是**為了等前端同步本機暫存（前端沒有本機暫存，
+  # 答案是即時送出的），而是為了兩件真的會掉東西的事：
+  #   · web：學生剛按下送出、伺服器還沒寫進資料庫的那一瞬間
+  #   · worker：匯入被砍掉會 stalled 重派，同一份題本付兩次錢
   info "停止服務（最多 60 秒優雅關閉）…"
   compose "${PROFILES[@]}" stop -t 60
   exit 0

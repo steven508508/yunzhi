@@ -151,6 +151,44 @@ _do_backup() {
     return 1
   fi
 
+  # ── 實體基礎備份 ───────────────────────────────────────────────
+  #
+  # **這裡是「RPO 15 分鐘」真正兌現的地方。** 誤刪成績那天，手邊有的
+  # 是這個容器每晚產出的 tarball，不是誰在某個時候手動跑的那一份。
+  # 上面的 pg_dump 是邏輯備份，WAL 重放不到它上面；要回到「今天下午
+  # 三點」，唯一的起點是 pg_basebackup 產出的實體副本。
+  #
+  # 這一段原本不存在，而 archive_timeout=900 收集了半年的 WAL——
+  # 全部沒有東西可以重放上去。
+  local has_base=false base_bytes=0
+  if [[ "${BACKUP_BASE_BACKUP:-true}" == "true" ]]; then
+    # -Xfetch：把復原需要的 WAL 段收進同一份 tar，讓這份基礎備份
+    # 自己就能起得來。--checkpoint=fast：不等下一次自然檢查點，
+    # 否則備份可能卡住十幾分鐘不動。
+    if pg_basebackup -D - --format=tar --gzip --wal-method=fetch \
+         --checkpoint=fast > "${work}/base.tar.gz" 2>"${work}/base.err"; then
+      base_bytes="$(stat -c %s "${work}/base.tar.gz" 2>/dev/null || echo 0)"
+      [[ "${base_bytes}" =~ ^[0-9]+$ ]] || base_bytes=0
+      if (( base_bytes > 1024 )); then
+        has_base=true
+      else
+        base_bytes=0
+        rm -f "${work}/base.tar.gz"
+      fi
+    fi
+    if [[ "${has_base}" != true ]]; then
+      # 不 return 1：dump 已經好了，為了基礎備份失敗而整晚沒有備份
+      # 是把小損失換成大損失。但要說出後果，而且要說得出下一步——
+      # 最常見的原因是 pg_hba.conf 沒有 replication 規則。
+      log "【注意】實體基礎備份失敗，這份備份無法做時間點還原。"
+      log "【注意】$(head -1 "${work}/base.err" 2>/dev/null)"
+      log "【注意】若訊息是 no pg_hba.conf entry for replication connection，"
+      log "【注意】表示 deploy/postgres/pg_hba.conf 沒有生效：確認它有掛進"
+      log "【注意】postgres 容器，然後 docker compose restart postgres。"
+    fi
+    rm -f "${work}/base.err"
+  fi
+
   # WAL 歸檔以唯讀掛載進來。**只收最近的**：整個目錄複製進每一份
   # 每日 tarball（保留 30 天）等於把同一批 WAL 存三十遍。
   if [[ -d /wal_archive ]]; then
@@ -183,9 +221,13 @@ _do_backup() {
   # objectCount 讓還原端問得出「這份備份該有幾個物件」。沒有它，
   # 「objects/ 目錄不在」與「這份備份本來就沒有物件」長得一模一樣，
   # 而 restore.sh 對兩者都只能靜靜跳過。
+  # includesBaseBackup 與 objectCount 是同一個道理：讓還原端**問得出來**
+  # 這份備份少了什麼。沒有這個欄位的話，「base.tar.gz 不在」與「這份備份
+  # 本來就不做基礎備份」長得一模一樣，而兩者要跟使用者說的話完全不同。
   cat > "${work}/manifest.json" <<JSON
 {"name":"yunzhi-${stamp}","createdAt":"$(date -Iseconds)","appVersion":"${APP_VERSION:-unknown}",
  "source":"scheduled","schemaHash":"${schema_hash}",
+ "includesBaseBackup":${has_base},"baseBackupSizeBytes":${base_bytes},
  "includesObjects":${has_objects},"objectCount":${object_count},
  "encrypted":${BACKUP_ENCRYPTION_ENABLED:-true}}
 JSON
@@ -207,6 +249,9 @@ JSON
     # 變成一片空白，題本原檔全部消失。而完成訊息看起來完全正常，
     # 所以這一句必須自己說出後果。
     log "【注意】這份備份不含物件儲存。用它還原會缺少題本原檔與題目附圖。"
+  fi
+  if [[ "${has_base}" != true ]]; then
+    log "【注意】這份備份不含實體基礎備份，只能還原到備份當下（無法指定時間點）。"
   fi
 
   date +%s > "${STATE_FILE}"

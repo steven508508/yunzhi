@@ -108,7 +108,9 @@ ok "解壓完成"
 # ── 中繼資料與相容性 ────────────────────────────────────────────
 B_OBJECTS="unknown"
 B_OBJCOUNT="unknown"
+B_BASE="unknown"
 if [[ -f "${WORK}/manifest.json" ]]; then
+  B_BASE="$(grep -oP '"includesBaseBackup":\s*\K(true|false)' "${WORK}/manifest.json" || echo unknown)"
   b_ver="$(grep -oP '"appVersion":\s*"\K[^"]+' "${WORK}/manifest.json" || echo unknown)"
   b_time="$(grep -oP '"createdAt":\s*"\K[^"]+' "${WORK}/manifest.json" || echo unknown)"
   b_hash="$(grep -oP '"schemaHash":\s*"\K[^"]+' "${WORK}/manifest.json" || echo unknown)"
@@ -126,6 +128,73 @@ if [[ -f "${WORK}/manifest.json" ]]; then
     dim "還原後請立刻執行遷移：docker compose run --rm migrate"
     (( IS_DRILL )) || confirm_phrase "結構不符，仍要繼續？" "RESTORE ANYWAY"
   fi
+fi
+
+# ── 指定時間點還原（--to）───────────────────────────────────────
+#
+# **這一段一定要在覆蓋資料庫之前。**
+#
+# 原本的 --to 是這樣走的：整支腳本照常把備份**覆蓋到正式資料庫上**，
+# 一路走到最後才印一句「PITR 是另一個獨立流程，WAL 已解壓到某處」。
+# 也就是說，要求「回到今天下午三點」的人，實際拿到的是「回到凌晨
+# 三點十五分那份備份」，而中午到下午的作答已經被蓋掉了 ——
+# 那正是他打這個指令要救的東西。
+#
+# 現在改成：--to 完全不碰正式資料庫，只把時間點還原需要的材料備齊、
+# 檢查它們夠不夠，然後把**驗證過的**步驟印出來。時間點還原要停資料庫、
+# 換整個資料目錄，是一件需要人在旁邊看著的事，不適合順手做掉。
+if [[ -n "${TARGET_TIME}" ]]; then
+  section "指定時間點還原的準備"
+
+  if [[ ! -f "${WORK}/base.tar.gz" ]]; then
+    err "這份備份裡沒有實體基礎備份（base.tar.gz），做不了時間點還原。"
+    if [[ "${B_BASE}" == "false" ]]; then
+      dim "manifest 也是這麼記的：這份備份產生時就沒有取到基礎備份。"
+      dim "常見原因是 pg_hba.conf 少了 replication 規則，或 BACKUP_BASE_BACKUP=false。"
+    else
+      dim "這份備份是舊版本產生的（v0.26.0 之前只有邏輯 dump）。"
+    fi
+    echo
+    dim "**WAL 檔案本身不足以做時間點還原。** WAL 記的是資料庫檔案的哪個"
+    dim "位元組被改了，只能重放在實體基礎備份上，重放不到 pg_restore"
+    dim "還原出來的資料庫上——那是兩個不同層次的東西。"
+    echo
+    dim "現在可以做的：不加 --to 直接還原，得到「備份當下」的狀態。"
+    dim "  ./deploy/scripts/restore.sh $(basename "${ARCHIVE}")"
+    die "沒有基礎備份，時間點還原無法進行。正式資料庫未被更動。"
+  fi
+
+  PITR_DIR="${BACKUP_DIR}/pitr-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "${PITR_DIR}/wal"
+  cp "${WORK}/base.tar.gz" "${PITR_DIR}/"
+  if [[ -d "${WORK}/wal" ]]; then
+    cp -r "${WORK}/wal/." "${PITR_DIR}/wal/" 2>/dev/null || true
+  fi
+
+  # **備份裡的 WAL 是備份「之前」的。** 要往前滾到今天下午三點，需要的
+  # 是基礎備份**之後**產生的那些段，它們還在資料庫的歸檔目錄裡。
+  # 少了這一步，復原會停在基礎備份的時點而且看起來像成功了。
+  info "從資料庫的歸檔目錄補齊備份之後產生的 WAL…"
+  if pg_sh "tar -cf - -C '$(wal_archive_dir)' . 2>/dev/null" \
+       | tar -xf - -C "${PITR_DIR}/wal" 2>/dev/null; then
+    ok "歸檔目錄已併入"
+  else
+    warn "讀不到資料庫的 WAL 歸檔目錄。只能用備份裡的那些 WAL，"
+    warn "可還原的最新時點會停在備份當下。"
+  fi
+  wal_have="$(find "${PITR_DIR}/wal" -type f 2>/dev/null | wc -l)"
+
+  ok "材料已備妥：${PITR_DIR}"
+  dim "  base.tar.gz（實體基礎備份，備份時點 ${b_time:-未知}）"
+  dim "  wal/（${wal_have} 個 WAL 段）"
+  echo
+  warn "接下來的步驟要停止資料庫、在旁邊看著日誌跑完，不會自動進行。"
+  dim "完整步驟見 docs/DISASTER-RECOVERY.md 的「情況三」，該節已針對"
+  dim "這個目錄的內容寫成可以逐行照貼的指令。"
+  dim "目標時間：${TARGET_TIME}"
+  echo
+  ok "正式資料庫完全未被更動。"
+  exit 0
 fi
 
 # ── 物件儲存的可用性 ────────────────────────────────────────────
@@ -308,21 +377,8 @@ benign_count="$(grep -icE "${BENIGN}" "${WORK}/restore.err" 2>/dev/null || echo 
 
 ok "資料庫已還原到 ${RESTORE_DB}"
 
-# ── 時間點還原 ──────────────────────────────────────────────────
-if [[ -n "${TARGET_TIME}" ]]; then
-  if [[ -d "${WORK}/wal" ]] && [[ -n "$(ls -A "${WORK}/wal" 2>/dev/null)" ]]; then
-    warn "時間點還原（PITR）需要停止資料庫並重放 WAL，是一個獨立的流程。"
-    dim "本腳本已把 WAL 檔解壓到 ${WORK}/wal（$(find "${WORK}/wal" -type f | wc -l) 個檔案）。"
-    dim "完整步驟見 docs/DISASTER-RECOVERY.md 的「指定時間點還原」一節。"
-    dim "目標時間：${TARGET_TIME}"
-    # 保留 WAL 供手動流程使用
-    pitr_dir="${BACKUP_DIR}/pitr-$(date +%s)"
-    mkdir -p "${pitr_dir}" && cp -r "${WORK}/wal" "${pitr_dir}/"
-    info "WAL 已保留在 ${pitr_dir}"
-  else
-    err "這份備份不含 WAL 歸檔，無法做時間點還原。"
-  fi
-fi
+# 時間點還原（--to）在上面、覆蓋資料庫之前就處理完並結束了。
+# 走到這裡就表示這是一次一般還原。
 
 # ── 物件儲存 ────────────────────────────────────────────────────
 # 狀態在上面（覆蓋資料庫之前）就決定好了，這裡只負責執行與回報。

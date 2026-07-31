@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --all) ALL=1; shift ;;
     --report) REPORT_ONLY=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     -*) die "不認得的參數：$1" ;;
     *) ARCHIVE="$1"; shift ;;
   esac
@@ -62,6 +62,45 @@ if (( REPORT_ONLY )); then
 fi
 
 acquire_lock "verify-restore"
+
+# ── 讀備份自己的 manifest ───────────────────────────────────────
+#
+# **這是每季演練唯一問得出「這份備份少了什麼」的地方。**
+#
+# 演練原本只做一件事：把備份還原到一個獨立的資料庫，數 tenants／
+# users／audit_logs 三張表的筆數。那三個數字在「MinIO 已經掛了一週、
+# 每一份備份都只有資料庫」的情況下**完全正常**——資料表 68 張、
+# 使用者 213 位，於是演練寫下「通過」，doctor.sh 的 drill.age 轉綠，
+# 三個月後真的要還原時才發現題本原檔一份都沒有，每一道「如右圖」
+# 的題目是空白的。
+#
+# 備份端老老實實把 includesObjects、includesBaseBackup 寫進了
+# manifest.json（設計時就是為了讓還原端問得出來），只是從來沒有人問。
+#
+# 只取 manifest.json 一個成員，不解開整份備份：還原那一步
+# （restore.sh）本來就會做完整解壓，這裡重做一次只是多花一倍時間。
+read_manifest() {
+  local target="$1" out=""
+  if [[ "${target}" == *.enc ]]; then
+    [[ -n "${BACKUP_ENCRYPTION_KEY:-}" ]] || return 1
+    out="$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+             -in "${target}" -pass "pass:${BACKUP_ENCRYPTION_KEY}" 2>/dev/null \
+           | tar -xzO ./manifest.json 2>/dev/null || true)"
+  else
+    out="$(tar -xzO -f "${target}" ./manifest.json 2>/dev/null || true)"
+  fi
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# **`|| true` 不是保險，是這一支的正確行為。**
+# common.sh 開著 errexit ＋ pipefail，而欄位不存在時 grep 回 1、
+# pipefail 讓整條管線回 1，於是 `x="$(manifest_field …)"` 這個賦值
+# 會讓整支腳本當場結束——而「欄位不存在」正是舊備份的常態。
+# 演練會在印出第一行之後無聲中止，看起來像是它跑完了。
+manifest_field() {
+  grep -oP "\"$1\":\\s*\\K(true|false|[0-9]+)" <<< "$2" 2>/dev/null | head -1 || true
+}
 
 # 演練資料庫在任何結束路徑都要清掉，否則會在正式伺服器上
 # 累積一堆孤兒資料庫並吃掉磁碟。
@@ -102,8 +141,53 @@ for target in "${TARGETS[@]}"; do
   drill_start="$(date +%s)"
   failure_reason=""
 
+  # ── 步驟 0：這份備份裝了什麼 ──────────────────────────────────
+  #
+  # 排在最前面，因為它問的是「這份備份還原出來會不會少東西」，
+  # 而後面每一項都只看得到資料庫那一半。
+  info "0/6 備份內容清單"
+  manifest="$(read_manifest "${target}" || true)"
+  if [[ -z "${manifest}" ]]; then
+    # 不當成失敗：v0.26.0 之前的備份沒有這些欄位，而它們仍然可以還原。
+    # 但也不能當成通過——「讀不到」與「都在」不是同一件事。
+    warn "讀不到 manifest.json（舊版備份，或 BACKUP_ENCRYPTION_KEY 不對）。"
+    dim "這次演練無法確認備份裡有沒有物件儲存與基礎備份。"
+  else
+    m_obj="$(manifest_field includesObjects "${manifest}")"
+    m_objn="$(manifest_field objectCount "${manifest}")"
+    m_base="$(manifest_field includesBaseBackup "${manifest}")"
+
+    if [[ "${m_obj}" == "true" ]]; then
+      ok "物件儲存：有（${m_objn:-?} 個題本原檔與附圖）"
+    else
+      # **這一項要讓整場演練失敗。** MinIO 連不上時每晚的備份照常
+      # 產出、日誌只印一行注意、失敗標記還會被清掉，於是三層指示燈
+      # 全綠。演練是最後一道問得出來的關卡。
+      failure_reason="備份不含物件儲存：還原後每一道帶圖的題目都是空白，題本原檔全部不在"
+      err "物件儲存：**沒有**"
+      err "${failure_reason}"
+      dim "先確認 MinIO：docker compose ps minio"
+      dim "排除之後重跑一次備份：./deploy/scripts/backup.sh"
+    fi
+
+    if [[ "${m_base}" == "true" ]]; then
+      ok "實體基礎備份：有（可做指定時間點還原）"
+    elif [[ "${BACKUP_BASE_BACKUP:-true}" != "true" ]]; then
+      # 有人在 .env 明確關掉，那是一個知情的取捨（.env.example 寫了後果）。
+      # 這裡只提醒它現在的實際能力，不判失敗。
+      warn "實體基礎備份：關閉中（BACKUP_BASE_BACKUP=false）。"
+      dim "這台機器目前的 RPO 是「上一次備份」，不是 15 分鐘。"
+    elif [[ -z "${failure_reason}" ]]; then
+      failure_reason="備份不含實體基礎備份：無法做指定時間點還原，誤刪資料只能退回備份當下"
+      err "實體基礎備份：**沒有**"
+      err "${failure_reason}"
+      dim "多半是 pg_hba.conf 的 replication 規則沒生效。"
+      dim "確認：docker compose exec postgres cat /etc/postgresql/pg_hba.conf"
+    fi
+  fi
+
   # ── 步驟 1：完整性 ────────────────────────────────────────────
-  info "1/5 校驗碼"
+  info "1/6 校驗碼"
   if [[ -f "${target}.sha256" ]]; then
     if ( cd "$(dirname "${target}")" && sha256sum -c "${name}.sha256" >/dev/null 2>&1 ); then
       ok "校驗碼相符"
@@ -117,7 +201,7 @@ for target in "${TARGETS[@]}"; do
 
   # ── 步驟 2：解密 ──────────────────────────────────────────────
   if [[ -z "${failure_reason}" ]]; then
-    info "2/5 解密與解壓"
+    info "2/6 解密與解壓"
     if "${YZ_SCRIPTS_DIR}/restore.sh" "${target}" --into "${DRILL_DB}" --skip-objects --yes >/dev/null 2>"${TMPDIR:-/tmp}/drill-$$.err"; then
       ok "解密與還原成功"
     else
@@ -131,7 +215,7 @@ for target in "${TARGETS[@]}"; do
   # 只確認「有表」是不夠的。要確認關鍵表有資料、外鍵沒斷、
   # 而且稽核記錄的時間連續 —— 這三項才能說明備份是可用的。
   if [[ -z "${failure_reason}" ]]; then
-    info "3/5 資料完整性"
+    info "3/6 資料完整性"
     result="$(pg_exec psql -U "${POSTGRES_USER}" -d "${DRILL_DB}" -tAF'|' -c "
       SELECT
         (SELECT count(*) FROM information_schema.tables WHERE table_schema='public'),
@@ -158,7 +242,7 @@ for target in "${TARGETS[@]}"; do
 
   # ── 步驟 4：外鍵一致性 ────────────────────────────────────────
   if [[ -z "${failure_reason}" ]]; then
-    info "4/5 外鍵一致性"
+    info "4/6 外鍵一致性"
     # pg_restore 若在錯誤的順序下還原，外鍵可能失效但表面看不出來。
     orphans="$(pg_scalar "SELECT count(*) FROM users u LEFT JOIN tenants t ON u.\"tenantId\" = t.id WHERE t.id IS NULL" "${DRILL_DB}")"
     orphans="${orphans:-0}"
@@ -172,7 +256,7 @@ for target in "${TARGETS[@]}"; do
 
   # ── 步驟 5：RPO 量測 ──────────────────────────────────────────
   if [[ -z "${failure_reason}" ]]; then
-    info "5/5 RPO 量測"
+    info "5/6 RPO 量測"
     backup_time="$(stat -c %Y "${target}")"
     if [[ "${last_audit}" != "—" ]]; then
       # 資料庫的時間戳是 UTC（schema 一律存 UTC），而 stat 給的是

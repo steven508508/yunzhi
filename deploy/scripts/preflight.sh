@@ -86,7 +86,12 @@ mem="$(mem_total_gb)"
 if (( mem < 4 )); then
   check_fail "記憶體 ${mem}GB。最低 4GB —— 低於此值 PostgreSQL 與 AI 服務會互相搶記憶體並被 OOM killer 砍掉。"
 elif (( mem < 8 )); then
-  check_warn "記憶體 ${mem}GB。可以跑，但要把 .env 的 AI_MEMORY_LIMIT 調低到 2g，並考慮把 EMBEDDING_PROVIDER 改為 openai（本地嵌入模型約吃 2GB）。"
+  # 這裡原本還建議「把 EMBEDDING_PROVIDER 改為 openai，本地嵌入模型
+  # 約吃 2GB」。**那句話是錯的**：沒有任何本地嵌入模型在跑
+  # （apps/ai/requirements.txt 的 sentence-transformers 是註解掉的），
+  # 照做的人會重跑一次安裝然後發現記憶體一點沒省。
+  # 真正省得到的只有下面這兩個上限。
+  check_warn "記憶體 ${mem}GB。可以跑，但要把 .env 的 AI_MEMORY_LIMIT 調低到 2g、POSTGRES_MEMORY_LIMIT 調低到 1g，並避免在考試時段匯入題本。"
 else
   ok "記憶體 ${mem}GB"
 fi

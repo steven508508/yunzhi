@@ -1,19 +1,27 @@
 # 每次推送都跑一次「這一版還能不能裝」。
 #
-# 挑這幾項的原則：**只放不需要外部服務就跑得完的檢查**。
-# 端到端那 91 項要真的 Postgres、Redis、S3 相容儲存與 AI 服務，
-# 在 CI 上維護那一整套的成本遠高於它擋下來的東西——那些在本機用
-# `./tools/e2e-import.sh` 跑，一次三分鐘。
+# 分成兩個層次：
 #
-# 這裡的四項各自擋一種「合併之後才會發現」的事：
-#
+# **check／python** —— 不需要外部服務，一兩分鐘跑完，每次都跑。
 #   typecheck      欄位改名之後還有誰沒跟上
 #   test           計分、放行時機、名冊解析這些純邏輯
 #   rls-check      schema 新增了模型而沒有決定它屬於哪個租戶
 #   deploy-check   Dockerfile 的 COPY 指到不存在的路徑、
 #                  文件裡的版本字串與 VERSION 對不上
+#   最後一項最容易被低估：它擋的是「照著文件做卻裝到舊版」。
 #
-# 最後一項最容易被低估：它擋的是「照著文件做卻裝到舊版」。
+# **e2e** —— 起真的 Postgres、Redis、S3 相容儲存與 AI 服務，跑完
+#   tools/ 底下十三支端到端測試。
+#
+#   這一段原本刻意不放進 CI，理由寫的是「維護那一整套的成本遠高於
+#   它擋下來的東西，那些在本機跑」。實際發生的事是：npm run test:e2e
+#   只呼叫了其中兩支，另外十一支**沒有被任何 shell 或 npm script 引用**，
+#   於是它們只在有人記得手動一支一支跑的時候才會被執行——而文件把
+#   那三百多項寫成「全過」。三百多項沒有人在跑，比多花五分鐘貴得多。
+#
+#   它比上面那組慢（十幾分鐘）也比較容易因為環境而紅。真的擋路時
+#   請去修，不要拿掉——deploy-check 有一項會確認每一支 e2e 都還在
+#   runner 的涵蓋範圍內，那一項擋的是「新增一支卻沒有人跑」。
 
 name: CI
 
@@ -72,6 +80,9 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           find deploy tools -name '*.sh' -print0 | xargs -0 -n1 bash -n
           shellcheck -x -P deploy/scripts deploy/scripts/*.sh
+          # tools/ 底下的也要檢。端到端的總入口（e2e-import.sh）住在這裡，
+          # 它一壞掉的症狀是「所有端到端測試都沒跑」，而不是紅字。
+          shellcheck tools/*.sh
 
   python:
     runs-on: ubuntu-latest
@@ -86,3 +97,61 @@ jobs:
         run: |
           cd apps/ai
           for t in tests/test_*.py; do python3 "$t" || exit 1; done
+
+  # ────────────────────────────────────────────────────────────
+  # 端到端：對真的相依跑完 tools/ 底下每一支 e2e
+  # ────────────────────────────────────────────────────────────
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      # **映像要和 docker-compose.yml 的同一個。** 換成官方 postgres:16
+      # 的話沒有 pgvector，遷移會死在 vector 型別上——而那是正式環境
+      # 一定會遇到、CI 卻剛好驗不到的東西。
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      # 服務容器裡沒有 postgres 這個 OS 使用者，也沒有 unix socket，
+      # 所以建資料庫與擴充功能那幾句要走帳密。e2e-import.sh 看到這個
+      # 變數就改走 TCP，沒看到就退回開發機的 `su postgres`。
+      E2E_SUPERUSER_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      PGHOST: 127.0.0.1
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 用戶端工具
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client redis-tools
+
+      - run: npm ci --ignore-scripts
+
+      # moto 是 S3 相容的假伺服器。用它而不是真的 MinIO：這一層要驗的
+      # 是「程式有沒有把物件放對位置」，不是 MinIO 本身。
+      - name: Python 相依
+        run: pip install -r apps/ai/requirements.txt 'moto[server]'
+
+      - name: 端到端
+        run: ./tools/e2e-import.sh

@@ -1,3 +1,25 @@
+# 雲端智學 — Prometheus 抓取設定
+#
+# **這份檔案目前只抓 Prometheus 自己。** 原因要寫清楚，因為它看起來
+# 像是「還沒設定好」，其實是刻意的。
+#
+# 原本這裡設了兩個抓取目標：
+#   web:3000/api/metrics   —— 這條路由不存在
+#   ai:8000/metrics        —— 同樣不存在
+#
+# 抓一個不存在的目標不是「沒有資料」而已，它會讓 `up` 這個指標**永遠
+# 是 0**，於是 alerts.yml 的「服務不可用」在系統一切正常的時候持續成立。
+# 一條永遠亮著的紅燈，效果等於沒有燈：看的人兩天就學會忽略它，
+# 而真的出事那天它長得一模一樣。
+#
+# 所以在應用真的吐得出 /metrics 之前，這裡寧可什麼都不抓。
+# 現在這台機器的觀測手段是 ./deploy/scripts/doctor.sh（它會實際
+# 連資料庫、數備份年齡、看演練紀錄），以及 Grafana 上的 Loki 日誌。
+#
+# 要接回來的時候，把下面註解掉的那兩段打開就好——但**先確認那兩條
+# 路由真的回得出 Prometheus 文字格式**，用：
+#   docker compose exec prometheus wget -qO- http://web:3000/api/metrics | head
+
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
@@ -6,10 +28,14 @@ rule_files:
   - /etc/prometheus/alerts.yml
 
 scrape_configs:
-  - job_name: yunzhi-web
-    metrics_path: /api/metrics
-    static_configs: [{targets: ['web:3000']}]
-  - job_name: yunzhi-ai
-    static_configs: [{targets: ['ai:8000']}]
+  # 自我監控。留著它是為了讓「Prometheus 本身有沒有在跑」看得出來，
+  # 也讓 Grafana 的資料來源不是空的。
   - job_name: prometheus
     static_configs: [{targets: ['localhost:9090']}]
+
+  # ── 等應用吐得出指標再打開 ────────────────────────────────────
+  # - job_name: yunzhi-web
+  #   metrics_path: /api/metrics
+  #   static_configs: [{targets: ['web:3000']}]
+  # - job_name: yunzhi-ai
+  #   static_configs: [{targets: ['ai:8000']}]

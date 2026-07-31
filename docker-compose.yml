@@ -141,6 +141,28 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
       AI_PRICING: ${AI_PRICING:-}
+      # **這三項漏掉的代價全部是「花錢而且沒有人會知道」。**
+      #
+      # 智慧老師、AI 閱卷（一次「全班一起評」是 30 份 × 3 次呼叫，
+      # 程式註解自己說那是單次最貴的動作）、升學建議，三條路都跑在
+      # 這個 web 行程裡，而三處的守門寫法都是
+      #     const budget = Number(process.env.AI_MONTHLY_TOKEN_BUDGET ?? 0);
+      #     if (!(budget > 0)) return;      // 拿不到 = 不限制
+      # 也就是說，**變數沒傳進來的症狀不是報錯，是「上限消失」**。
+      # 主任在 .env 把上限設成五百萬，題本匯入真的被擋（worker 用
+      # env_file 整份載入），這三條卻一路花到帳單來，而 doctor.sh 的
+      # ai.budget 還會照著 .env 的數字算百分比、顯示得像在管控。
+      #
+      # AI_PROVIDER 與 AI_BASE_URL 不傳的話，這三個模組寫進
+      # ai_usage_logs 的 provider 全是 'unknown'、baseUrl 全是 null——
+      # 「這筆錢是打去哪一家的」這條稽核軌跡就斷了。
+      #
+      # 為什麼不乾脆給 web 也加 env_file：那正是這個清單存在的理由，
+      # 見上面。清單會過期是已知代價，所以 tools/deploy-check.mjs 有一項
+      # 專門掃 apps/web 裡的 process.env.X 有沒有傳到對應的服務。
+      AI_MONTHLY_TOKEN_BUDGET: ${AI_MONTHLY_TOKEN_BUDGET:-0}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      AI_BASE_URL: ${AI_BASE_URL:-}
       # 有預設值，但不傳的話 .env 裡的 LOG_LEVEL=debug 對 web 沒有作用——
       # 而那是出事時第一個會被調的開關，調了沒反應會讓人往錯的方向找。
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -271,8 +293,21 @@ services:
       # 或 openai 就全部連線失敗。
       - egress
     volumes:
-      # 嵌入模型的快取。不掛出來的話每次重建容器都要重新下載 2GB。
+      # 字形對照快取（GLYPH_CACHE_PATH 預設指到 /models/glyphmap.json）。
+      # 這裡原本寫的是「嵌入模型的快取，不掛出來每次重建要重新下載 2GB」
+      # ——沒有嵌入模型在跑，那句話會讓人以為記憶體與磁碟被它吃掉。
+      # 真正要保住的是字形表：重裝後歸零的話，每一家出版社的自製符號
+      # 字型都要重新付費問一次視覺模型。
       - ./data/models:/models
+      # AI 端點預檢。掛進來而不是打包進映像，是因為映像的建置脈絡
+      # 是 ./apps/ai（`COPY . .` 到 /app），tools/ 根本不在裡面——
+      # 文件教的 `docker compose exec ai python3 /app/../tools/ai-preflight.py`
+      # 因此一定是 `can't open file '/tools/ai-preflight.py'`，而這是
+      # 「部署完成後第一件事」。放在 /app 底下，`import providers`
+      # 才找得到（Python 會把腳本所在目錄放進 sys.path）。
+      - ./tools/ai-preflight.py:/app/ai-preflight.py:ro
+      # 同上。準確率量測（拿真實講義跑幾頁）也只能在容器裡跑。
+      - ./tools/verify-ai.py:/app/verify-ai.py:ro
     depends_on:
       # AI 服務直接讀寫物件儲存（題本原稿進、頁面影像出），
       # 所以它必須等 MinIO 起來。少了這一行，重啟後的第一份
@@ -312,6 +347,10 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - postgres-wal:/var/lib/postgresql/wal_archive
       - ./deploy/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # 認證規則。**沒有它就沒有時間點還原**：映像自動產生的那一份
+      # 沒有 replication 規則，pg_basebackup 連不進來，而 WAL 只能重放在
+      # pg_basebackup 產出的實體基礎備份上。理由寫在檔案開頭。
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
     networks:
       - internal

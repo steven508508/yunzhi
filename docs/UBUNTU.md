@@ -225,7 +225,7 @@ sudo chown -R "$(id -un):$(id -gn)" /var/backups/yunzhi
 # 三個端點
 curl localhost:3000/api/healthz    # {"alive":true,...}      行程活著
 curl localhost:3000/api/readyz     # {"ready":true,...}      資料庫與 Redis 都通
-curl localhost:3000/api/version    # {"appVersion":"0.26.0"} 現在跑的是哪一版
+curl localhost:3000/api/version    # {"appVersion":"0.27.0"} 現在跑的是哪一版
 
 # 容器狀態（全部要是 running，web / postgres / redis / minio 要是 healthy）
 docker compose ps
@@ -762,9 +762,20 @@ curl localhost:3000/api/version
 ```bash
 OLD=$(curl -s localhost:3000/api/version | grep -oP '"appVersion":"\K[^"]+')
 mkdir -p /var/backups/yunzhi/images
-docker save "yunzhi/web:${OLD}" "yunzhi/worker:${OLD}" "yunzhi/ai:${OLD}" \
-  | gzip > "/var/backups/yunzhi/images/yunzhi-${OLD}.tar.gz"
+# 只有兩個自家映像。worker 與 migrate 用的是同一個 yunzhi/web 映像，
+# 只是啟動指令不同 —— **沒有 yunzhi/worker 這個標籤**，寫進去的話
+# docker save 會整個失敗。
+docker save "yunzhi/web:${OLD}" "yunzhi/ai:${OLD}" \
+  -o "/var/backups/yunzhi/images/yunzhi-${OLD}.tar"
+gzip -f "/var/backups/yunzhi/images/yunzhi-${OLD}.tar"
+ls -lh "/var/backups/yunzhi/images/yunzhi-${OLD}.tar.gz"
 ```
+
+**最後那一行 `ls -lh` 不是裝飾。** 這個指令原本寫成
+`docker save … | gzip > 檔案`，而 `docker save` 對不存在的映像是整個
+失敗、stdout 一個位元組都不吐——但 `gzip` 照樣會產出一個幾十位元組的
+檔案。看到檔案在，就以為退路備好了，直到升級出事那天才發現它是空的。
+檔案大小應該是好幾百 MB；只有幾十位元組就是上面那句失敗了。
 
 要用的時候 `gunzip -c yunzhi-<版本>.tar.gz | docker load`。
 留最近兩版就夠了，再舊的資料庫 schema 也對不上。

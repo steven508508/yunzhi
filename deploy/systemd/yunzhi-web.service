@@ -24,8 +24,16 @@ RestartSec=5
 StartLimitBurst=5
 StartLimitIntervalSec=120
 
-# 優雅關閉。60 秒讓正在作答的學生把本地暫存同步上來；
-# 直接 SIGKILL 會讓那段作答只留在瀏覽器裡。
+# 優雅關閉。60 秒讓手上的請求做完。
+#
+# 這裡以前寫的是「讓學生把本地暫存同步上來」——**前端沒有本機暫存**
+# （沒有 IndexedDB、localStorage、sessionStorage），答案是每一題即時
+# 送到伺服器的。所以寬限期救不回「還沒送出的那一題」，那一題本來就
+# 只在畫面上。
+#
+# 那為什麼還是要 60 秒：SIGKILL 會切斷正在處理中的請求，也就是
+# 「學生按下送出、伺服器還沒寫進資料庫」的那一瞬間。那才是真正
+# 會掉資料的窗口，而它在交卷尖峰的每一秒都有人在裡面。
 KillSignal=SIGTERM
 TimeoutStopSec=60
 

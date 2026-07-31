@@ -79,8 +79,15 @@ if [[ "${ROLLBACK_MODE}" == "docker" ]]; then
     dim "離線 tarball 部署的目錄裡本來就沒有 .git，所以重建那條路也不通。"
     echo
     dim "三條路，挑一條："
+    # **這一段是在「回滾走不完」的時候印出來的**，也就是最需要它正確
+    # 的一刻。原本這裡列的是 yunzhi/web、yunzhi/worker、yunzhi/ai 三個
+    # 標籤，而 yunzhi/worker **從來沒有被建出來**（worker 用的就是
+    # yunzhi/web 映像，只是啟動指令不同）。docker save 對不存在的
+    # reference 是整個失敗，而如果照原本那樣接一個 `| gzip > 檔案`，
+    # 檔案還是會產生——只是裡面沒東西。所以這裡用 -o 直接寫檔，
+    # 失敗就沒有檔案。
     dim "  1. 把舊版映像找回來（有另一台裝過同版的機器時最快）："
-    dim "       來源機： docker save yunzhi/web:${PREVIOUS_VERSION} yunzhi/worker:${PREVIOUS_VERSION} yunzhi/ai:${PREVIOUS_VERSION} | gzip > yz-${PREVIOUS_VERSION}.tar.gz"
+    dim "       來源機： docker save yunzhi/web:${PREVIOUS_VERSION} yunzhi/ai:${PREVIOUS_VERSION} -o yz-${PREVIOUS_VERSION}.tar && gzip yz-${PREVIOUS_VERSION}.tar"
     dim "       這台機： gunzip -c yz-${PREVIOUS_VERSION}.tar.gz | docker load"
     dim "  2. 取回 v${PREVIOUS_VERSION} 的程式（git clone 或舊的離線 tarball），"
     dim "     解到這個目錄再跑一次本腳本。"
@@ -88,7 +95,8 @@ if [[ "${ROLLBACK_MODE}" == "docker" ]]; then
     dim "       ./deploy/scripts/restore.sh ${BACKUP_PATH:-<升級前備份>}"
     echo
     dim "下一次升級之前，先把舊版映像存成檔案就不會再撞到這件事："
-    dim "  docker save yunzhi/web:\$(cat VERSION) | gzip > ${BACKUP_DIR:-/var/backups/yunzhi}/images/web-\$(cat VERSION).tar.gz"
+    dim "  docker save yunzhi/web:\$(cat VERSION) yunzhi/ai:\$(cat VERSION) -o ${BACKUP_DIR:-/var/backups/yunzhi}/images/yz-\$(cat VERSION).tar"
+    dim "  存完看一眼檔案大小（應該好幾百 MB）：只有幾十位元組表示上面那句失敗了。"
     die "回滾中止 —— 在動資料庫之前停下來，現在的狀態還是完整的。"
   fi
 else

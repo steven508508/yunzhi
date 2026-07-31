@@ -1,63 +1,94 @@
 # 雲端智學 — 告警規則
 #
-# 每一條都對應一種「會讓補習班停止營運」的情況。
-# 刻意不設太多規則：告警疲勞會讓真正重要的那一條被忽略。
+# ⚠ **這個檔案目前沒有任何有效的規則，而且那是刻意的。**
+#
+# 這裡原本有六條規則，讀起來很完整：服務不可用、資料庫連線數逼近
+# 上限、磁碟超過 85%、WAL 歸檔失敗、備份超過 26 小時未執行、還原
+# 演練過期。實際情況是——
+#
+#   · 五條引用的指標**沒有任何東西產生**：pg_stat_activity_count 要
+#     postgres_exporter、node_filesystem_avail_bytes 要 node_exporter、
+#     yunzhi_last_backup_timestamp_seconds 要應用自己吐 /metrics。
+#     compose 裡這三樣都沒有。規則不會報錯，只是永遠不成立。
+#   · 唯一求得出值的 `up{job=~"yunzhi.*"} == 0` **永遠成立**，因為
+#     被抓取的那兩條路由不存在（見 prometheus.yml）。
+#   · 就算某一條成立了，compose 裡沒有 Alertmanager，**沒有任何東西
+#     會被送到任何地方**。.env 的 ALERT_WEBHOOK_URL 標著【尚未實作】。
+#
+# 也就是說，這份檔案先前的作用是讓人以為告警已經涵蓋了那五件事。
+# 一個裝了但什麼都不會通知的監控，比沒有監控更危險：它會讓人不再
+# 自己去看。所以規則全部留在下面當註解，等對應的元件真的裝上去
+# 再一條一條打開，而不是掛著假裝有。
+#
+# **現在真正在做這件事的是 ./deploy/scripts/doctor.sh。**
+# 它會實際連資料庫、數最新備份的年齡、讀備份守護行程留下的失敗原因、
+# 看還原演練紀錄。要「自動」的話，把它排進 cron 並把輸出寄給自己：
+#
+#   # /etc/cron.d/yunzhi-doctor
+#   30 7 * * * root /opt/yunzhi/deploy/scripts/doctor.sh || \
+#     mail -s "雲端智學健康檢查有紅燈" 你的信箱@example.com
+#
+# doctor.sh 有紅燈時回傳非零，所以上面那行只在出事時寄信。
+#
+# ── 要把下面打開之前，需要先有的東西 ──────────────────────────
+#   postgres_exporter   → 資料庫連線數、WAL 歸檔失敗
+#   node_exporter       → 磁碟
+#   web 的 /api/metrics → 備份時間戳、演練時間戳、服務存活
+#   Alertmanager ＋ 一個收件端 → 讓上面任何一條真的送得出去
+#
+# 四樣缺一，那一組規則就不要打開——寧可維持「這裡是空的」這個
+# 誠實的狀態，也不要再有一次「指示燈全綠但其實沒人在看」。
+
 groups:
   - name: yunzhi
-    rules:
-      - alert: 服務不可用
-        expr: up{job=~"yunzhi.*"} == 0
-        for: 2m
-        labels: {severity: critical}
-        annotations:
-          summary: "{{ $labels.job }} 已停止回應超過 2 分鐘"
-          runbook: "docs/DISASTER-RECOVERY.md 情況一"
+    rules: []
 
-      - alert: 資料庫連線數逼近上限
-        expr: sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.85
-        for: 5m
-        labels: {severity: warning}
-        annotations:
-          summary: "連線數已達上限 85%，交卷尖峰會被拒"
-          runbook: "docs/OPERATIONS.md 容量規劃"
-
-      - alert: 磁碟即將寫滿
-        expr: (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 0.85
-        for: 10m
-        labels: {severity: critical}
-        annotations:
-          summary: "根分割區已用超過 85%"
-          description: "磁碟寫滿會讓考試中斷，且 PostgreSQL 無法寫入 WAL。"
-
-      # WAL 歸檔失敗是靜默的，而後果是磁碟被慢慢撐爆。
-      # 沒有這條告警，通常要到磁碟滿了才發現。
-      - alert: WAL歸檔失敗
-        expr: increase(pg_stat_archiver_failed_count[15m]) > 0
-        for: 5m
-        labels: {severity: critical}
-        annotations:
-          summary: "PostgreSQL WAL 歸檔失敗"
-          description: "RPO 承諾失效，且 WAL 會持續累積直到磁碟寫滿。檢查歸檔目錄權限。"
-
-      - alert: 備份未執行
-        expr: time() - yunzhi_last_backup_timestamp_seconds > 93600
-        for: 1h
-        labels: {severity: critical}
-        annotations:
-          summary: "超過 26 小時沒有成功的備份"
-          runbook: "docs/OPERATIONS.md"
-
-      - alert: 還原演練過期
-        expr: time() - yunzhi_last_restore_drill_timestamp_seconds > 7948800
-        labels: {severity: warning}
-        annotations:
-          summary: "超過 92 天未執行還原演練"
-          description: "未驗證的備份等於沒有備份。執行 ./deploy/scripts/verify-restore.sh"
-
-      - alert: AI服務不可用
-        expr: up{job="yunzhi-ai"} == 0
-        for: 15m
-        labels: {severity: warning}
-        annotations:
-          summary: "AI 服務已停止 15 分鐘"
-          description: "考試、客觀題評分、既有解析不受影響（降級設計）。僅 AI 功能不可用。"
+# ── 等元件就位再逐條啟用 ────────────────────────────────────────
+#
+#      - alert: 服務不可用
+#        expr: up{job=~"yunzhi.*"} == 0
+#        for: 2m
+#        labels: {severity: critical}
+#        annotations:
+#          summary: "{{ $labels.job }} 已停止回應超過 2 分鐘"
+#          runbook: "docs/DISASTER-RECOVERY.md 情況一"
+#
+#      - alert: 資料庫連線數逼近上限
+#        expr: sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.85
+#        for: 5m
+#        labels: {severity: warning}
+#        annotations:
+#          summary: "連線數已達上限 85%，交卷尖峰會被拒"
+#          runbook: "docs/OPERATIONS.md 容量規劃"
+#
+#      - alert: 磁碟即將寫滿
+#        expr: (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 0.85
+#        for: 10m
+#        labels: {severity: critical}
+#        annotations:
+#          summary: "根分割區已用超過 85%"
+#          description: "磁碟寫滿會讓考試中斷，且 PostgreSQL 無法寫入 WAL。"
+#
+#      # WAL 歸檔失敗是靜默的，而後果是磁碟被慢慢撐爆。
+#      - alert: WAL歸檔失敗
+#        expr: increase(pg_stat_archiver_failed_count[15m]) > 0
+#        for: 5m
+#        labels: {severity: critical}
+#        annotations:
+#          summary: "PostgreSQL WAL 歸檔失敗"
+#          description: "時間點還原失效，且 WAL 會持續累積直到磁碟寫滿。檢查歸檔目錄權限。"
+#
+#      - alert: 備份未執行
+#        expr: time() - yunzhi_last_backup_timestamp_seconds > 93600
+#        for: 1h
+#        labels: {severity: critical}
+#        annotations:
+#          summary: "超過 26 小時沒有成功的備份"
+#          runbook: "docs/OPERATIONS.md"
+#
+#      - alert: 還原演練過期
+#        expr: time() - yunzhi_last_restore_drill_timestamp_seconds > 7948800
+#        labels: {severity: warning}
+#        annotations:
+#          summary: "超過 92 天未執行還原演練"
+#          description: "未驗證的備份等於沒有備份。執行 ./deploy/scripts/verify-restore.sh"

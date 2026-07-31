@@ -22,8 +22,15 @@ RestartSec=5
 StartLimitBurst=5
 StartLimitIntervalSec=120
 
-# 優雅關閉。60 秒讓正在作答的學生把本地暫存同步上來；
-# 直接 SIGKILL 會讓那段作答只留在瀏覽器裡。
+# 優雅關閉。60 秒讓 worker 把手上的工作收尾。
+#
+# 這裡以前寫的是「讓學生把本地暫存同步上來」——那是錯的，前端沒有
+# 本機暫存，而且 worker 根本不處理作答。
+#
+# 真正的理由是匯入：一份 200 頁的題本要跑一小時，被砍掉的工作會因為
+# BullMQ 的鎖過期而 stalled 重派，從 fromStage 整段重跑——也就是
+# 「同一份題本被解析兩次、付兩次錢」。60 秒讓它至少把目前的階段
+# 結果寫下去。
 KillSignal=SIGTERM
 TimeoutStopSec=60
 

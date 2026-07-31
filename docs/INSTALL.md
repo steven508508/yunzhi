@@ -108,11 +108,25 @@ AI 的部分見下方「AI 設定」。第一次安裝可以保持 `AI_PROVIDER=
 ### 4. 上線前必做
 
 ```bash
-# 驗證備份真的能還原（未驗證的備份等於沒有備份）
+# 一、先手動做一份備份（全新系統約一分鐘）
+#     **順序不能顛倒。** 自動備份要等到凌晨 03:15 才第一次執行，
+#     剛裝好的機器上直接跑演練，只會得到
+#     「在 /var/backups/yunzhi 找不到備份」。
+./deploy/scripts/backup.sh
+
+# 二、驗證那份備份真的能還原（未驗證的備份等於沒有備份）
+#     它會還原到一個暫時的資料庫再刪掉，不會動到正式資料。
 ./deploy/scripts/verify-restore.sh
 
-# 把 .env 備份到密碼管理器或離線儲存
-# 遺失 BACKUP_ENCRYPTION_KEY 等於所有加密備份作廢，沒有救援途徑
+# 三、把 .env 備份到密碼管理器或離線儲存
+#     遺失 BACKUP_ENCRYPTION_KEY 等於所有加密備份作廢，沒有救援途徑
+```
+
+`backup.sh` 若回 Permission denied，是備份目錄的擁有者不對（安裝時
+不是用 `sudo` 跑的、或中途換過操作帳號）：
+
+```bash
+sudo chown -R "$(id -un):$(id -gn)" /var/backups/yunzhi
 ```
 
 ---
@@ -287,18 +301,28 @@ print(json.dumps(json.load(urllib.request.urlopen(req,timeout=120)),ensure_ascii
 `/selftest` 會對三個模型層級各實際打一次，確認 key、Base URL、
 模型名稱三者都對。設定看起來對不等於設定真的對。
 
-### 嵌入模型是分開的
+### 嵌入模型：這一組現在還沒有接上
 
-Anthropic 協定沒有嵌入端點，而題目去重、知識點檢索、文風比對三項
-功能都依賴向量。所以嵌入模型獨立設定，預設本地部署：
+Anthropic 協定沒有嵌入端點，所以 `.env` 裡的 `EMBEDDING_*` 是為了將來
+獨立設定嵌入模型而預留的。**目前這一組完全沒有作用**：題目去重與
+相似題檢索走的是 PostgreSQL 的 `pg_trgm`（字串相似度）退路，
+沒有任何嵌入模型在跑。
+
+所以有一件事要特別講，因為它被誤會過：
+
+> **把 `EMBEDDING_PROVIDER` 改成 `openai` 不會省下任何記憶體。**
+> 本機沒有嵌入模型佔著那 2GB。8GB 的機器上改這一項、重跑安裝、
+> 然後發現記憶體完全沒變，是白花的一個下午。
+
+記憶體真的吃緊（8GB 或以下）時，有效的是這三件事：
 
 ```bash
-EMBEDDING_PROVIDER=local
-EMBEDDING_MODEL=BAAI/bge-m3
-EMBEDDING_DIM=1024
+AI_MEMORY_LIMIT=2g          # 預設 4g，解析大型 PDF 時最吃記憶體的就是它
+POSTGRES_MEMORY_LIMIT=1g    # 預設 2g
 ```
 
-記憶體吃緊（8GB 以下）時可改走 API：`EMBEDDING_PROVIDER=openai`。
+以及**不要在考試時段匯入題本**——那是這台機器一天之中記憶體與 CPU
+同時最緊的時刻，而考試中斷的代價遠高於題本晚一小時入庫。
 
 ### AI 不可用時會怎樣
 
