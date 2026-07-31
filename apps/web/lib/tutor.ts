@@ -66,6 +66,7 @@ import {
   checkTutorReply,
   describeViolations,
   DISTRESS_REPLY,
+  GHOSTWRITE_REPLY,
   INJECTION_REPLY,
   MODE_LABELS,
   pickMode,
@@ -193,6 +194,18 @@ const HISTORY_TURNS = 12;
  * 這一支是冪等的：同一題重複開只會拿到同一段。學生在手機上點兩下、
  * 網路重試、換一個分頁再打開，都不該產生第二段對話（產生了的話，
  * 老師端會看到同一個人對同一題問了五次，而其中四次是空的）。
+ *
+ * # 已經結束的那一段照樣回，**不在這裡自動重開**
+ *
+ * 因為「重開」要是免費的、隱含的，那「結束這一段」就等於沒有這個動作
+ * ——他按了結束、再點一次入口、又開著了。所以這一支照實回一段
+ * `status = CLOSED` 的對話，介面依它顯示結束的樣子並給一顆
+ * 「我還想再問」，按下去才走 `reopenTutorSession`。
+ *
+ * **也不在這裡建第二段。** `TutorSession` 上沒有唯一鍵，多建一段在
+ * 資料層是合法的，但老師端的「這一題有幾個人問」會開始把同一個人
+ * 數成好幾次，而學生點回來時看不到自己上一輪打的字——他回來多半
+ * 正是為了看那幾句。
  */
 export async function openTutorSession(input: {
   attemptId: string;
@@ -514,7 +527,13 @@ export async function sendTutorMessage(input: {
   const session = await loadOwnSession(input.sessionId, input.userId);
 
   if (session.status !== 'OPEN') {
-    throw new TutorError('CLOSED', '這一段對話已經結束了。要再問的話，重新開一段。', 409);
+    // 訊息要說得出「怎麼再開」。原本寫的是「重新開一段」，而系統裡
+    // 當時**不存在**那個動作——學生照著做也做不到，只能放棄這一題。
+    throw new TutorError(
+      'CLOSED',
+      '這一段對話已經結束了。點「我還想再問」就可以接著問。',
+      409,
+    );
   }
   if (session.messageCount >= MAX_MESSAGES) {
     throw new TutorError(
@@ -534,7 +553,17 @@ export async function sendTutorMessage(input: {
 
   // 被擋下來的訊息**仍然存**（schema 註解：刪掉的話事後查不出
   // 「他問了什麼才觸發的」）。存完之後就地回一句，不呼叫模型。
-  if (!check.ok && check.code === 'INJECTION') {
+  //
+  // 提示注入與代寫請求走同一條路，因為要做的事完全一樣：留證據、
+  // 回一句說得出界線在哪裡的話、**不花錢呼叫模型**。差別只在回哪一句。
+  //
+  // 代寫請求為什麼一定要在這裡就擋掉：智慧老師是學習歷程代寫的後門
+  // ——`app/(app)/portfolio/**` 那條路有六條防代寫規則而且每一次呼叫
+  // 都寫 `AiDisclosureLog`，這條路兩樣都沒有。讓模型先寫再由輸出閘門
+  // 攔，攔得住的那幾則不會有記錄、攔不住的那一則更不會有——而學生的
+  // AI 使用揭露聲明是照記錄產生的，於是它會誠實地說出一句假話。
+  if (!check.ok && (check.code === 'INJECTION' || check.code === 'GHOSTWRITE')) {
+    const reply = check.code === 'GHOSTWRITE' ? GHOSTWRITE_REPLY : INJECTION_REPLY;
     await prisma.$transaction([
       prisma.tutorMessage.create({
         data: {
@@ -546,7 +575,7 @@ export async function sendTutorMessage(input: {
         },
       }),
       prisma.tutorMessage.create({
-        data: { sessionId: session.id, role: 'TUTOR', content: INJECTION_REPLY, promptVersion: 'guard' },
+        data: { sessionId: session.id, role: 'TUTOR', content: reply, promptVersion: 'guard' },
       }),
       prisma.tutorSession.update({
         where: { id: session.id },
@@ -633,8 +662,33 @@ export async function sendTutorMessage(input: {
     turn,
   };
 
-  // 學生的訊息先存。模型呼叫失敗時，他打的字不該跟著消失——
-  // 他會以為自己送出去了，然後等一個不會來的回覆。
+  // ── 先確定 AI 真的答得出來，再把學生的訊息寫進去 ─────────
+  //
+  // # 為什麼順序是這樣，而不是「先存訊息再呼叫」
+  //
+  // 先存的版本有一個沒有出口的狀態：訊息已經進資料庫、`messageCount`
+  // 也加了 1，然後第一次呼叫就連不上 AI 往上拋 503，而介面那一側顯示
+  // 「你的訊息沒有送出去」並把原文放回輸入框。學生自然再按一次——
+  // 於是逐字稿裡同一句話出現兩次，`messageCount` 多算一次，
+  // 而上限是 40，數到就 429「這一題我們聊得夠久了」。
+  //
+  // 換句話說：**畫面說的話與資料庫裡的事實不一致，而且是往壞的方向。**
+  // 修的方式有兩個，這裡選了第二個：
+  //
+  // 一、存了之後失敗就回頭刪掉。要多一次寫入、要記得把 `stuckAt`
+  //     一起還原，而刪除本身也可能失敗——一條會在失敗路徑上再失敗
+  //     一次的路。
+  // 二、把第一次呼叫移到寫入之前。失敗時**什麼都還沒發生**，
+  //     介面那句話是真的，重送一次也不會留下第二筆。
+  //
+  // 原本的註解說「模型呼叫失敗時，他打的字不該跟著消失」——那件事
+  // 由介面把原文放回輸入框達成（TutorChat.tsx 的 `setDraft(body)`），
+  // 不需要靠資料庫留一筆學生看不到、也刪不掉的記錄。
+  //
+  // 這一行的例外**故意不接**：它往上拋成 503，而那時候資料庫裡
+  // 一個字都沒有動過。
+  const firstTurn: TurnResponse = await callTutorTurn({ ...payload, retry: 0 });
+
   await prisma.$transaction([
     prisma.tutorMessage.create({
       data: { sessionId: session.id, role: 'STUDENT', content: trimmed },
@@ -659,20 +713,26 @@ export async function sendTutorMessage(input: {
   let tokensOut = 0;
 
   for (let attempt = 0; attempt <= MAX_REGENERATE; attempt += 1) {
-    let turnResult;
-    try {
-      turnResult = await callTutorTurn({ ...payload, retry: attempt });
-    } catch (e) {
-      // 已經重生成過而上游掛了：拿罐頭回應收尾，不要把學生的訊息
-      // 卡在半路。第一次就掛掉才往上拋（那是「AI 服務沒起來」，
-      // 學生要看到的是那句話而不是一句莫名其妙的引導）。
-      if (attempt === 0) throw e;
-      break;
+    let turnResult: TurnResponse;
+    if (attempt === 0) {
+      turnResult = firstTurn;
+    } else {
+      try {
+        turnResult = await callTutorTurn({ ...payload, retry: attempt });
+      } catch {
+        // 重生成的途中上游掛了：拿罐頭回應收尾，不要把學生的訊息
+        // 卡在半路。第一次就掛掉的情況在上面處理掉了（那時候還沒有
+        // 任何東西寫進資料庫）。
+        break;
+      }
     }
     tokensIn += turnResult.input_tokens;
     tokensOut += turnResult.output_tokens;
 
-    const verdict = checkTutorReply(turnResult.text, facts);
+    // **閘門要看得到學生剛剛那一句。** 「那 (3) 對不對」→「對，就是
+    // 這樣」這種洩漏，代號在學生那一句裡而不在回覆裡，只看回覆的話
+    // 每一條規則都落空（見 tutorGuard.mjs 的 `studentProposedSecret`）。
+    const verdict = checkTutorReply(turnResult.text, facts, { studentText: trimmed });
     if (verdict.ok) {
       accepted = {
         text: turnResult.text,
@@ -687,8 +747,13 @@ export async function sendTutorMessage(input: {
 
     // 只剩體例問題（太長、沒問句）而且已經重來過一次，就收下。
     // 為了句子長了 20 個字把一段好的引導丟掉，換來的是學生多等
-    // 三秒看一句罐頭——那個交換是虧的。**洩漏永遠不收。**
-    if (!verdict.leaked && attempt >= 1) {
+    // 三秒看一句罐頭——那個交換是虧的。
+    //
+    // 判斷用 `mustRegenerate` 而不是 `leaked`：**洩漏與代寫都永遠不收**，
+    // 而代寫不是洩漏。只看 `leaked` 的話，一段可以貼進學習歷程的
+    // 第一人稱敘述會在第二次重試之後被當成體例問題收下——而它唯一的
+    // 體例違規正好是「整則沒有問任何問題」。
+    if (!verdict.mustRegenerate && attempt >= 1) {
       accepted = {
         text: turnResult.text,
         model: turnResult.model,
@@ -781,11 +846,19 @@ export async function sendTutorMessage(input: {
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * 學生按了「我懂了」或關掉對話。
+ * 學生按了「我懂了」或「結束這一段」。
  *
  * `resolvedAt` 只在他真的按「我懂了」時寫。schema 註解說得很清楚：
  * **沒有按不代表沒懂，所以不拿它當成效指標的分母。** 這裡照做——
- * 關掉對話寫的是 `CLOSED`，不順手補一個 `resolvedAt`。
+ * 結束對話寫的是 `CLOSED`，不順手補一個 `resolvedAt`。
+ *
+ * # 這一支只該接到一顆真的寫著「結束」的按鈕上
+ *
+ * 曾經接在標題列那顆寫著「收起」的按鈕上，於是學生想把對話摺起來
+ * 回頭看解析，按下去把這一題的智慧老師永久關掉了——而當時沒有任何
+ * 一條路可以重開。**「收起」與「結束這一段」在使用者心裡是兩個不同
+ * 的動作**，所以現在是兩顆按鈕：收起只在瀏覽器裡摺疊、不打 API，
+ * 結束才走這一支。
  */
 export async function closeTutorSession(input: {
   sessionId: string;
@@ -800,6 +873,86 @@ export async function closeTutorSession(input: {
       resolvedAt: input.resolved ? (session.resolvedAt ?? new Date()) : session.resolvedAt,
     },
   });
+  return reload(session.id);
+}
+
+/**
+ * 把一段結束掉的對話重新打開。
+ *
+ * # 為什麼非有這個動作不可
+ *
+ * 因為在它存在之前，一段對話結束了就是永遠結束了：`openTutorSession`
+ * 找既有那一段時完全不看 status，把 `CLOSED` 的原樣回傳，介面判定
+ * 已結束，畫面上只剩一句「這一段對話結束了」——沒有輸入框、沒有開場
+ * 選項。**整份考卷的每一題都可以這樣一去不回**，而學生會以為是壞了。
+ * `sendTutorMessage` 當時回的那句「要再問的話，重新開一段」指的更是
+ * 一個不存在的動作。
+ *
+ * # 為什麼是接回同一段，不是建第二段
+ *
+ * 資料層兩種都合法（`TutorSession` 上沒有 `@@unique`）。選同一段的
+ * 理由是學生點回來時要看得到自己上一輪打的字——他回來多半就是為了
+ * 看那幾句；而且老師端「這一題有幾個人問」不會因為有人開開關關就
+ * 把同一個人數成五個。代價是逐字稿裡看不出中間斷過，所以這裡補一則
+ * `CONTEXT` 把重開這件事記下來。
+ *
+ * # `resolvedAt` 重開之後不清掉
+ *
+ * 他確實按過「我懂了」，那是一個發生過的事件，把它抹掉等於改寫記錄。
+ * 而 schema 註解已經聲明這個欄位不當成效指標的分母，所以「按過我懂了
+ * 又回來問」不會讓任何一個數字說謊。
+ *
+ * # 放行判斷要重跑
+ *
+ * 上一次開對話到現在，老師可能已經把這份任務的檢討收回去、或者作廢
+ * 了這份作答。不重跑的話，重開是一條繞過 `maySeeResult` 的路——
+ * 而那一條規則存在的理由就是洩題。
+ */
+export async function reopenTutorSession(input: {
+  sessionId: string;
+  userId: string;
+}): Promise<TutorSessionView> {
+  const session = await loadOwnSession(input.sessionId, input.userId);
+
+  // 已經開著就直接回。手機上點兩下、或者兩個分頁各按一次，
+  // 都不該變成錯誤訊息。
+  if (session.status === 'OPEN') return reload(session.id);
+
+  if (session.status === 'HALTED') {
+    // HALTED 是觸發安全規則而停止的（schema 註解）。那一種要老師處理，
+    // 不能讓學生自己按一顆按鈕就繞過去。
+    throw new TutorError(
+      'CLOSED',
+      '這一段對話因為安全規則停住了，沒有辦法自己重開。請直接問老師。',
+      409,
+    );
+  }
+  if (!session.attemptId) {
+    throw new TutorError('NOT_FOUND', '這一段對話所屬的作答記錄已經不在了', 404);
+  }
+  if (session.messageCount >= MAX_MESSAGES) {
+    throw new TutorError(
+      'TOO_MANY',
+      '這一題我們聊得夠久了。剩下的部分直接問老師會比較快——把題號抄下來。',
+      429,
+    );
+  }
+
+  await gateForReview(session.attemptId, session.questionId, input.userId);
+
+  await prisma.$transaction([
+    prisma.tutorSession.update({
+      where: { id: session.id },
+      data: { status: 'OPEN' },
+    }),
+    prisma.tutorMessage.create({
+      data: {
+        sessionId: session.id,
+        role: 'CONTEXT',
+        content: '學生把這一段對話重新打開了（上一次的狀態是 CLOSED）。',
+      },
+    }),
+  ]);
   return reload(session.id);
 }
 

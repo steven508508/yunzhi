@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
 import { scopedRoute } from '@/lib/route';
-import { closeTutorSession, loadTutorSession, tutorFailure } from '@/lib/tutor';
+import {
+  closeTutorSession,
+  loadTutorSession,
+  reopenTutorSession,
+  tutorFailure,
+} from '@/lib/tutor';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,26 +28,48 @@ export const GET = scopedRoute<{ sessionId: string }>(async (_req, { user, param
 });
 
 /**
- * 結束對話。
+ * 改一段對話的狀態：結束、或重新打開。
  *
- * `resolved` 為 true 時寫 `resolvedAt`——那是學生按「我懂了」。
- * **只是關掉視窗不寫**：schema 的欄位註解說「沒有按不代表沒懂，
- * 所以不拿它當成效指標的分母」，而把關閉當成理解會讓那個數字說謊，
- * 往好的方向說謊。
+ * # 三個動作，而不是一個布林
+ *
+ * 原本這一支只收 `{resolved: boolean}`，於是「按了我懂了」與
+ * 「把視窗收起來」共用同一個請求——而介面上那顆寫著「收起」的按鈕
+ * 打的就是 `resolved: false`，學生以為在摺疊，實際上把這一題的
+ * 智慧老師永久關掉了，而且當時沒有任何一條路重開。
+ *
+ * 現在分成三個具名的動作，**「收起」不在裡面**：收起是純瀏覽器端的
+ * 摺疊，不打任何 API。一個只在畫面上發生的動作不該產生一個資料庫
+ * 狀態變更，這是那個缺陷的根。
+ *
+ *   · `resolve` 學生按「我懂了」→ CLOSED ＋ 寫 `resolvedAt`
+ *   · `close`   學生按「結束這一段」→ CLOSED，**不寫** `resolvedAt`
+ *                （schema 註解：沒有按不代表沒懂，不拿它當分母）
+ *   · `reopen`  學生按「我還想再問」→ 回到 OPEN，接續同一段
+ *
+ * 舊的 `{resolved}` 仍然收，因為它是同一個部署裡可能還在跑的舊分頁
+ * 會送出來的形狀；對不上任何動作時一律當成 `close`，那是三者裡最
+ * 保守的一個（不會憑空寫出一個「他說他懂了」）。
  */
-const Body = z.object({ resolved: z.boolean().optional() });
+const Body = z.object({
+  action: z.enum(['resolve', 'close', 'reopen']).optional(),
+  resolved: z.boolean().optional(),
+});
 
 export const PATCH = scopedRoute<{ sessionId: string }>(
   async (req: NextRequest, { user, params }) => {
     const parsed = Body.safeParse(await req.json().catch(() => ({})));
-    const resolved = parsed.success ? (parsed.data.resolved ?? false) : false;
+    const data = parsed.success ? parsed.data : {};
+    const action = data.action ?? (data.resolved ? 'resolve' : 'close');
 
     try {
-      const session = await closeTutorSession({
-        sessionId: params.sessionId,
-        userId: user.id,
-        resolved,
-      });
+      const session =
+        action === 'reopen'
+          ? await reopenTutorSession({ sessionId: params.sessionId, userId: user.id })
+          : await closeTutorSession({
+              sessionId: params.sessionId,
+              userId: user.id,
+              resolved: action === 'resolve',
+            });
       return NextResponse.json(session);
     } catch (e) {
       const { status, body } = tutorFailure(e);

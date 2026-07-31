@@ -36,7 +36,23 @@
  *     不是「這段話有沒有教育意義」。
  * 三、**它不能保證重新生成之後就變好。** 所以重試有上限，
  *     用完就退回一句安全的引導問句並記 `blocked`（見 lib/tutor.ts）。
+ *
+ * # 為什麼 `checkTutorReply` 要收學生剛剛那一句
+ *
+ * 因為洩漏有一種形式**只存在於兩句話之間**：學生打「那 (3) 對不對」，
+ * 模型回「對，就是這樣」。回覆裡一個代號、一個數字都沒有，上面每一條
+ * 規則都抓不到，而學生已經拿到答案了。只看模型那一段的簽章在設計上
+ * 就偵測不到這一類。
+ *
+ * 這一條**只在「學生剛剛提出的候選就是正解」時才收緊**。不加這個條件
+ * 的話，「對，就是這樣，你這一步沒有問題」會被擋掉——而肯定學生的
+ * 過程正是引導式教學該做的事，一個不敢說「對」的老師學生不會用。
  */
+
+// 代寫偵測借學習歷程那一層的規則，**不自己再寫一份**（理由見
+// 「這一段可以被貼進學習歷程檔案」那一條）。那個檔案是純函式、
+// 沒有任何 import，所以借過來不會把資料庫或設定拖進這一層。
+import { FIRST_PERSON_MAX_CHARS, firstPersonRuns } from './portfolioGuard.mjs';
 
 // ─────────────────────────────────────────────────────────────────
 // 正規化
@@ -114,13 +130,85 @@ function cnToArabic(s) {
   );
 }
 
+const EN_ONES = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const EN_TEENS = {
+  ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
+  fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+};
+const EN_TENS = {
+  twenty: 20, thirty: 30, forty: 40, fifty: 50,
+  sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+
+/**
+ * 英文數字詞折成阿拉伯數字。
+ *
+ * # 為什麼中文折了英文也一定要折
+ *
+ * 這套系統的引導本來就會夾雜英文（英文科整段都是），而模型被擋掉
+ * 「答案是 24」之後，下一種寫法不一定是國字，也可能是
+ * 「the answer is twenty-four」。中文擋得住、英文擋不住的話，症狀是
+ * **某幾科的閘門形同虛設**——而畫面上看起來只是「AI 在英文科講得
+ * 比較清楚」，沒有人會回報這件事。
+ *
+ * # 折的範圍與中文同一條原則：只在不會誤傷的地方折
+ *
+ * **幾十與十幾一律折。** `twenty-four`、`sixty`、`twelve` 在英文裡
+ * 除了數字沒有別的意思，折了不會傷到任何一句正常的引導。
+ *
+ * **個位數只在數字語境裡折。** `one`／`two` 同時是代名詞與數詞：
+ * 無條件折的話「which one do you think?」會變成「which 1 do you think?」，
+ * 於是一道答案剛好是 1 的題目就再也不能問「which one」——那是英文科
+ * 最常用的一句引導。所以個位數要求前面有一個明確的數字語境
+ * （answer / equals / is / 得 / 等於…），並且排除 `one of`。
+ *
+ * 漏掉的代價（某些句型的 "the answer is one" 擋不到）遠小於誤擋的
+ * 代價（整科的引導都不能用 one），與 `cnToArabic` 是同一個取捨。
+ */
+function enToArabic(s) {
+  // 整段沒有英文字母就不必跑四次 replace——中文題佔多數。
+  if (!/[a-z]/i.test(s)) return s;
+  let t = s;
+
+  // 一、幾十（含 twenty-four / twenty four 這種複合寫法）
+  t = t.replace(
+    /\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s]+(one|two|three|four|five|six|seven|eight|nine))?\b/gi,
+    (_, tens, ones) =>
+      String(EN_TENS[tens.toLowerCase()] + (ones ? EN_ONES[ones.toLowerCase()] : 0)),
+  );
+
+  // 二、十幾
+  t = t.replace(
+    /\b(ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b/gi,
+    (m) => String(EN_TEENS[m.toLowerCase()]),
+  );
+
+  // 三、幾百。排在幾十後面，所以 "one hundred twenty" 到這裡已經是
+  // "one hundred 20"，補上那個尾數就好。
+  t = t.replace(
+    /\b(one|two|three|four|five|six|seven|eight|nine|\d+)\s+hundred(?:\s+(?:and\s+)?(\d+))?\b/gi,
+    (_, a, b) => {
+      const head = EN_ONES[String(a).toLowerCase()] ?? Number(a);
+      return String(head * 100 + (b ? Number(b) : 0));
+    },
+  );
+
+  // 四、個位數，只在數字語境裡
+  t = t.replace(
+    /(?<=\b(?:answer|answers|ans|result|total|option|number|equals|equal to|choose|pick|select|is|are|was|were|get|gets|got|be|得|等於|共|選|是)\s{0,3})(one|two|three|four|five|six|seven|eight|nine)\b(?!\s+of\b)/gi,
+    (m) => String(EN_ONES[m.toLowerCase()]),
+  );
+
+  return t;
+}
+
 /**
  * 比對用的正規化形式。**匯出是給測試用的**：折錯了的症狀是
  * 某一類洩漏永遠擋不到，而那在整合層看不出來。
  */
 export function normalizeForGuard(text) {
   if (!text) return '';
-  return cnToArabic(toHalfWidth(stripLatex(String(text))))
+  return enToArabic(cnToArabic(toHalfWidth(stripLatex(String(text)))))
     .replace(/[ \t ]+/g, ' ')
     .trim();
 }
@@ -145,11 +233,39 @@ function numberTokens(text) {
  * 仍然要擋。
  */
 function stripCounters(text) {
-  return text.replace(
-    /-?\d+(?:\.\d+)?\s*(?:個|題|步|次|種|項|行|條|位|人|句|字|遍|回|分|秒|度|倍|年|月|日)/g,
-    ' ',
+  return (
+    text
+      .replace(
+        /-?\d+(?:\.\d+)?\s*(?:個|題|步|次|種|項|行|條|位|人|句|字|遍|回|分|秒|度|倍|年|月|日)/g,
+        ' ',
+      )
+      // 英文的量詞用法。`enToArabic` 把 "twenty minutes" 折成 "20 minutes"
+      // 之後，一道答案剛好是 20 的題目會被自己的閘門擋在
+      // 「等你想二十分鐘再回來」這種句子上。與中文那一排同一個理由，
+      // 也同樣**只在裸數值那一條前面跑**——「the answer is 20 minutes」
+      // 仍然由「有提示語」那一條擋下來。
+      .replace(
+        /-?\d+(?:\.\d+)?\s*(?:steps?|minutes?|seconds?|hours?|days?|weeks?|months?|years?|options?|choices?|times?|ways?|parts?|questions?|conditions?|numbers?|lines?|words?|letters?|examples?|sentences?|paragraphs?)\b/gi,
+        ' ',
+      )
   );
 }
+
+/**
+ * 「這一串數字是完整的一個數」的前後界。
+ *
+ * 原本各處寫的是 `(?<![\d.\/])…(?![\d.\/])`，而那把**半形句號**一起
+ * 排除掉了：「The answer is 24.」的 24 後面是一個 `.`，於是整句話
+ * 通得過每一條數值規則。中文的「答案是 24。」擋得住（全形句號不在
+ * 排除集裡）而英文的「…is 24.」擋不住——這正是「某幾科的閘門形同
+ * 虛設」那一類缺陷的長相，而畫面上只看得出「AI 在英文科講得比較清楚」。
+ *
+ * 所以界線改成問「它是不是某個更大的數的一部分」而不是「它旁邊有沒有
+ * 小數點」：後面接數字、或接小數點／分數線再接數字才排除。
+ * 24.5 與 3/4 仍然不會被拆開比對，而句末的 `24.` 抓得到。
+ */
+const NUM_BEFORE = '(?<!\\d)(?<!\\d[./])';
+const NUM_AFTER = '(?!\\d)(?![./]\\d)';
 
 /** 量詞與單位。跟在裸數字後面時，那個數字多半不是答案而是計數。 */
 const UNIT_AFTER =
@@ -327,6 +443,52 @@ const NEGATE =
   /(?:不對|不正確|(?<![沒])錯|不成立|排除|不可能|不符合|不行|不是|✗|×|is wrong|incorrect)/;
 
 /**
+ * 廣義的肯定：**不貼著任何代號也算。**
+ *
+ * `AFFIRM` 要求肯定詞出現在代號附近，因為「(3) 是對的」裡的代號才是
+ * 洩漏的載體。但學生自己把代號說出來的時候，載體在**他**那一句話裡，
+ * 模型只要回一個「對」就完成了洩漏——這一組抓的就是那個「對」。
+ *
+ * 它比 `AFFIRM` 寬得多，所以**只在 `studentProposedSecret()` 為真時
+ * 才拿出來用**。無條件套用的話，「對，就是這樣，你這一步沒有問題」
+ * 會被擋掉——而肯定學生走對的那一步正是引導式教學該做的事。
+ */
+const AFFIRM_LOOSE = new RegExp(
+  '(?<![不沒非未])(?:' +
+    '對了|答對|猜對|沒錯|是的|對啊|對呀|對耶|對喔|對唷|' +
+    '就是這樣|就是它|就是那個|就對了|沒有問題|沒問題|很好|太好了|賓果' +
+    ')(?![不嗎呢?？])' +
+    // 「你想的方向是對的」「你猜的那個是對的」——肯定詞離代號很遠，
+    // 但指的就是學生剛剛講的那一個。
+    '|(?<![不沒非未])(?:方向|想法|猜的|說的|寫的|講的)(?:那個)?(?:是)?對' +
+    // 英文。問句形式要放過去（"Is that right?" 是提問不是確認），
+    // 「not right」也要放過去。
+    "|(?<!\\bnot )\\b(?:yes|yeah|yep|exactly|bingo|correct|right|true)\\b(?!\\s*\\?)",
+  'i',
+);
+
+/**
+ * 學生那一句話裡「這是我猜的答案，對不對」的框。
+ *
+ * 只有框不算，只有祕密也不算——**要兩個貼在一起**。學生打
+ * 「我這一步這樣算對嗎」有框沒有祕密，「題目說 2 小時走 120 公里」
+ * 有數字沒有框，兩句都是完全正常的話。
+ */
+const CANDIDATE_CUE = new RegExp(
+  [
+    '對不對', '對嗎', '對吧', '對了嗎', '是不是', '是嗎', '正確嗎', '沒錯吧', '有沒有錯',
+    '可以嗎', '可不可以', '行不行',
+    '我選', '我猜', '我覺得', '我想是', '我寫', '我填', '我答', '應該是', '會不會是',
+    '答案是', '要選', '選了', '選的是', '改成', '換成', '是選', '就是',
+    '如果.{0,8}選', '那.{0,6}呢',
+    'is it', "isn'?t it", 'right\\s*\\?', 'correct\\s*\\?',
+    'i (?:choose|chose|pick|picked|think|guess|said|selected)',
+    'should i (?:choose|pick|select|go)', 'the answer is', 'my answer',
+  ].join('|'),
+  'i',
+);
+
+/**
  * 一則回應裡的「步驟標記」數。三個以上就是把整題講完了，
  * 而那與直接給答案在教學上的後果一樣：學生讀完覺得懂了，
  * 但他一步都沒有自己走過。
@@ -356,7 +518,7 @@ const MAX_REPLY_CHARS = 350;
 function labelPositions(text, label) {
   const L = escapeRe(label);
   const alt = /^\d+$/.test(label)
-    ? `|(?<![\\d.\\/])${L}(?![\\d.\\/])(?!\\s*${UNIT_AFTER})`
+    ? `|${NUM_BEFORE}${L}${NUM_AFTER}(?!\\s*${UNIT_AFTER})`
     : `|(?<![A-Za-z])${L}(?![A-Za-z])`;
   const re = new RegExp(`[(\\[]\\s*${L}\\s*[)\\]]${alt}`, 'g');
   const out = [];
@@ -399,9 +561,87 @@ function around(text, [start, end], back = 14, fwd = 16) {
 /** 祕密值出現在這一段文字裡嗎（避免命中更大的數字的一部分）。 */
 function valueHit(text, value) {
   if (/^-?\d+(?:\.\d+)?(?:\/\d+)?$/.test(value)) {
-    return new RegExp(`(?<![\\d.])${escapeRe(value)}(?![\\d.])`).test(text);
+    return new RegExp(`${NUM_BEFORE}${escapeRe(value)}${NUM_AFTER}`).test(text);
   }
   return text.includes(value);
+}
+
+/** 祕密值在這一段文字裡的每一個出現位置。與 `valueHit` 同一組判斷。 */
+function valuePositions(text, value) {
+  const isNum = /^-?\d+(?:\.\d+)?(?:\/\d+)?$/.test(value);
+  const re = isNum
+    ? new RegExp(`${NUM_BEFORE}${escapeRe(value)}${NUM_AFTER}`, 'g')
+    : new RegExp(escapeRe(value), 'g');
+  const out = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    out.push([m.index, m.index + m[0].length]);
+    if (m[0].length === 0) re.lastIndex += 1;
+  }
+  return out;
+}
+
+/** 這一段文字裡每一個祕密（代號、位置、值、只有正解才有的內容）的位置。 */
+function secretPositions(text, facts) {
+  const out = [];
+  for (const l of facts.correctLabels ?? []) out.push(...labelPositions(text, l));
+  for (const o of facts.correctOrdinals ?? []) out.push(...ordinalPositions(text, o));
+  for (const v of facts.secretValues ?? []) out.push(...valuePositions(text, v));
+  const lower = text.toLowerCase();
+  for (const c of facts.contentSecrets ?? []) {
+    const needle = c.toLowerCase();
+    let from = 0;
+    for (;;) {
+      const i = lower.indexOf(needle, from);
+      if (i < 0) break;
+      out.push([i, i + needle.length]);
+      from = i + needle.length;
+    }
+  }
+  return out;
+}
+
+/**
+ * 學生剛剛那一句，是不是「我猜是正解那一個，對不對」。
+ *
+ * # 為什麼閘門非得看學生那一句不可
+ *
+ * 因為有一種洩漏**只存在於兩句話之間**：學生打「那 (3) 對不對」，
+ * 模型回「對，就是這樣」。回覆裡沒有代號、沒有序數、沒有數值，
+ * 上面每一條規則都是對著回覆比對的，所以全部落空——而學生已經拿到
+ * 答案了，而且他拿到的方式比模型直說更有效（他自己說的，所以他信）。
+ *
+ * # 為什麼是「祕密 ＋ 框」而不是只看其中一個
+ *
+ * 只看框（對不對／我選）的話，「我這一步這樣算對嗎」會被算進來，
+ * 而肯定他的**過程**正是引導該做的事——那條 mustPass 在沒有脈絡時
+ * 是對的，不可以為了這一條規則把它犧牲掉。
+ *
+ * 只看祕密的話，「題目說 2 小時走 120 公里」這種複述會被算進來
+ * （雖然那兩個數不是祕密，但填充題的答案剛好等於題幹某個數的情況
+ * 是有的），於是整段對話裡模型再也不能說「對」。
+ *
+ * # 學生提出的是錯的選項時，這一條不會啟動
+ *
+ * 那時候載體不是祕密，模型說「不對」或「對」都不構成洩漏
+ * （說「對」是教錯，那是另一回事，不歸這一層管）。
+ *
+ * @param {string} studentText 學生這一輪打的那一句
+ * @param {AnswerFacts} facts
+ * @returns {boolean}
+ */
+export function studentProposedSecret(studentText, facts) {
+  const t = normalizeForGuard(studentText ?? '');
+  if (!t || !facts) return false;
+  const hits = secretPositions(t, facts);
+  if (hits.length === 0) return false;
+
+  // 整句話短到只剩那個候選（「(3)」「60」「C?」）。沒有任何框，
+  // 但除了「是不是這個」之外它不可能是別的意思。
+  const bare = t.replace(/[\s，。！？、,.!?()（）[\]:：]/g, '');
+  if (bare.length <= 6) return true;
+
+  return hits.some((pos) => CANDIDATE_CUE.test(around(t, pos, 20, 20)));
 }
 
 /** 這一段文字裡有沒有任何一個祕密（代號、位置、值）。 */
@@ -417,7 +657,10 @@ function anySecret(text, facts) {
 /**
  * @typedef {object} Violation
  * @property {string} code
- * @property {'LEAK'|'STYLE'} severity
+ * @property {'LEAK'|'GHOST'|'STYLE'} severity
+ *   LEAK  洩漏了這一題的答案，永遠不收
+ *   GHOST 產出了一段可以貼進學習歷程的文字，永遠不收（見 lib/portfolioGuard.mjs）
+ *   STYLE 這樣就不是引導了，但重來一次還是這樣就收下
  * @property {string} detail 給老師看的一句話。會寫進 TutorMessage.blockedReason。
  */
 
@@ -426,8 +669,13 @@ function anySecret(text, facts) {
  *
  * @param {string} reply 模型產生的一整段文字
  * @param {AnswerFacts} facts `answerFacts()` 的結果
- * @param {{maxChars?: number}} [opts]
- * @returns {{ok: boolean, violations: Violation[], leaked: boolean}}
+ * @param {{maxChars?: number, studentText?: string}} [opts]
+ *   `studentText` 是**學生這一輪打的那一句**。沒有它的話，
+ *   「學生說出候選、模型回一個對」這種洩漏在設計上偵測不到
+ *   （見 `studentProposedSecret`）。可以不給——不給就少一條規則，
+ *   其餘照常。
+ * @returns {{ok: boolean, violations: Violation[], leaked: boolean,
+ *            ghostwritten: boolean, mustRegenerate: boolean}}
  *
  * **整段一起看，不逐句看。** 「答案很簡單。就是 (3)。」拆成兩句之後
  * 每一句單獨都不構成違規，而合起來是一次完整的洩漏。
@@ -496,6 +744,24 @@ export function checkTutorReply(reply, facts, opts = {}) {
     }
   }
 
+  // ── 二之四、確認學生剛剛提出的候選答案 ──────────────────
+  //
+  // 「那 (3) 對不對」→「對，就是這樣」。代號在**學生**那一句裡，
+  // 所以上面每一條對著回覆比對的規則都落空，而答案已經給出去了。
+  //
+  // 只在學生提出的候選就是正解時才啟動（見 studentProposedSecret），
+  // 所以「我這一步這樣算對嗎」→「對，就是這樣」仍然通得過——
+  // 那是引導該做的事，不可以連它一起擋掉。
+  if (studentProposedSecret(opts.studentText, facts)) {
+    if (AFFIRM_LOOSE.test(text) || AFFIRM.test(text)) {
+      add(
+        'AFFIRM_GUESS',
+        'LEAK',
+        '學生剛剛把正確答案當成候選丟出來問，而這一則等於替他確認了',
+      );
+    }
+  }
+
   // ── 三、序數指認 ──────────────────────────────────────
   for (const o of facts.correctOrdinals) {
     for (const pos of ordinalPositions(text, o)) {
@@ -540,7 +806,7 @@ export function checkTutorReply(reply, facts, opts = {}) {
     const V = escapeRe(val);
     if (
       new RegExp(
-        `(?:=|∴|→|得|共|約|就是|答|等於|equals|is)\\s*[^\\d\\n]{0,6}(?<![\\d.])${V}(?![\\d.])`,
+        `(?:=|∴|→|得|共|約|就是|答|等於|equals|is|get|gets|got)\\s*[^\\d\\n]{0,6}${NUM_BEFORE}${V}${NUM_AFTER}`,
       ).test(text)
     ) {
       add('COMPUTED_TO_END', 'LEAK', `把計算一路算到了最終值（${val}）`);
@@ -562,6 +828,39 @@ export function checkTutorReply(reply, facts, opts = {}) {
         break;
       }
     }
+  }
+
+  // ── 七之二、這一段可以被貼進學習歷程檔案 ─────────────────
+  //
+  // # 智慧老師是學習歷程代寫的後門
+  //
+  // 學生在一個已開放檢討的作答上開對話，然後打「幫我把這段自述改得
+  // 更好：……」。上面每一條規則問的都是「有沒有講出這一題的答案」，
+  // 而一段 87 字的第一人稱自傳一個答案都沒有講——於是它整段通過，
+  // 學生複製、貼上、送出。`MAX_REPLY_CHARS = 350` 放得下一整個段落。
+  //
+  // 規則直接借 `lib/portfolioGuard.mjs` 的第一條（規格書 §13：**連續
+  // 的第一人稱敘述超過 40 字**即判定為代寫）。**不自己寫一份**：
+  // 兩份實作只要有一份先改，症狀就是「從學習歷程那一頁進去擋得住、
+  // 從智慧老師這裡進去擋不住」，而那不會有人回報。
+  //
+  // # 為什麼只借第一條，不借全部六條
+  //
+  // 因為另外幾條是為「回饋一份自述」這個情境調的，套在引導式教學上
+  // 會誤擋：`NARRATIVE_VOICE` 的門檻是 20 字加一個時間詞，而
+  // 「我們高中學過的比例式在這裡用得上」正好命中；`PASTEABLE` 會把
+  // 連續兩句解釋當成可貼走的段落。第一條的 40 字**連續、不對學生
+  // 說話、不是提問**三個條件疊起來，正常的引導幾乎不可能同時滿足
+  // ——引導本來就是對著學生講、而且以提問結尾。
+  for (const run of firstPersonRuns(raw)) {
+    if (run.chars <= FIRST_PERSON_MAX_CHARS) continue;
+    add(
+      'GHOSTWRITE',
+      'GHOST',
+      `有一段 ${run.chars} 字的連續第一人稱敘述（「${run.text.slice(0, 30)}…」）。` +
+        '這不是在引導這一題，這是一段可以被直接貼進學習歷程檔案的文字。',
+    );
+    break;
   }
 
   // ── 八、體例 ────────────────────────────────────────────
@@ -589,7 +888,18 @@ export function checkTutorReply(reply, facts, opts = {}) {
   return {
     ok: v.length === 0,
     violations: v,
+    /** 洩漏了這一題的答案。 */
     leaked: v.some((x) => x.severity === 'LEAK'),
+    /** 產出了一段可以貼進學習歷程的文字。 */
+    ghostwritten: v.some((x) => x.severity === 'GHOST'),
+    /**
+     * 一定要重新生成。
+     *
+     * 呼叫端（lib/tutor.ts）判斷「只剩體例問題就收下」時要用**這一個**
+     * 而不是 `leaked`：代寫不是洩漏，但它一樣不可以收下，而只看
+     * `leaked` 的話它會在第二次重試之後被當成體例問題放行。
+     */
+    mustRegenerate: v.some((x) => x.severity !== 'STYLE'),
   };
 }
 
@@ -647,7 +957,57 @@ const DISTRESS = [
 ];
 
 /**
- * @returns {{ok: boolean, code: 'INJECTION'|'EMPTY'|null, reason: string, distress: boolean}}
+ * 「這不是在問這一題，這是在要一段可以貼上去的文字」。
+ *
+ * # 為什麼這一條要擋在學生那一側，而不是只靠輸出閘門
+ *
+ * 因為智慧老師是**學習歷程代寫的後門**：`app/(app)/portfolio/**` 那一條
+ * 路有六條防代寫規則（`lib/portfolioGuard.mjs`）而且每一次呼叫都寫
+ * `AiDisclosureLog`；智慧老師這條路兩樣都沒有。學生在一個已開放檢討的
+ * 作答上開對話、打「幫我把這段自述改得更好」，拿到的文字在揭露記錄裡
+ * 是零筆——他的 AI 使用揭露聲明會依記錄誠實地說「未使用 AI 生成內容」，
+ * 而那句話是假的。
+ *
+ * 輸出閘門那一條（`GHOSTWRITE`）是第二層，擋的是繞過這裡的寫法。
+ * 擋在這裡的好處是**根本不呼叫模型**：不花錢、不產生任何一段可貼的
+ * 文字、而且回給學生的那句話說得出這個功能的界線在哪裡。
+ *
+ * # 為什麼要「動詞 ＋ 文件」兩個都命中
+ *
+ * 只看動詞的話，「幫我看看我哪裡寫錯」會被擋——那是最正常不過的
+ * 一句話（「幫我」到「寫」之間只有四個字）。只看文件名詞的話，
+ * 「這篇作文的題目我看不懂」也會被擋。兩個都要，而且要在同一句話裡
+ * 靠得夠近。
+ */
+const PROSE_OBJECT =
+  '(?:自述|自傳|讀書計畫|學習歷程|備審|履歷|簡歷|申請(?:動機|理由|表)|動機信|多元表現|' +
+  '課程學習成果|學習心得|反思(?:報告|心得)?|作文|小論文|這一?段(?:話|文字|敘述|自述)|' +
+  'personal statement|statement of purpose|essay|paragraph|cover letter)';
+
+/**
+ * 兩種語序要用兩組動詞，**而且動詞在後面那一組要窄得多。**
+ *
+ * 「寫」放進「文件在前」那一組的話，「我作文寫不完跟這題有關嗎」
+ * 會被擋——那是一句抱怨，不是一個代寫請求，而擋掉它等於告訴學生
+ * 「講到作文兩個字就會被系統警告」。動詞在前的語序沒有這個問題：
+ * 「寫……作文」本來就只有一個意思。
+ */
+const VERB_PRODUCE =
+  '(?:寫|撰寫|草擬|擬|生成|產出|潤飾|潤稿|改寫|重寫|修飾|美化|擴寫|加長)';
+const VERB_POLISH =
+  '(?:潤飾|潤稿|改寫|重寫|修飾|美化|擴寫|加長|寫得更\\S{0,3}|改得更\\S{0,3}|寫好一點|寫漂亮)';
+
+const GHOSTWRITE_ASK = [
+  // 「幫我寫一段自述」——動詞在前
+  new RegExp(`${VERB_PRODUCE}[^。！？\\n]{0,16}${PROSE_OBJECT}`),
+  // 「幫我把這段自述改得更好」——文件在前
+  new RegExp(`${PROSE_OBJECT}[^。！？\\n]{0,16}${VERB_POLISH}`),
+  /(?:write|rewrite|polish|improve|edit|draft|proofread)\s+(?:my|this|the|a|an)\s+[a-z\s]{0,20}(?:essay|statement|paragraph|introduction|bio|resume|r[ée]sum[ée]|application|letter)/i,
+];
+
+/**
+ * @returns {{ok: boolean, code: 'INJECTION'|'GHOSTWRITE'|'EMPTY'|null,
+ *            reason: string, distress: boolean}}
  */
 export function checkStudentMessage(text) {
   const raw = String(text ?? '');
@@ -667,6 +1027,16 @@ export function checkStudentMessage(text) {
       };
     }
   }
+  for (const re of GHOSTWRITE_ASK) {
+    if (re.test(t)) {
+      return {
+        ok: false,
+        code: 'GHOSTWRITE',
+        reason: '這則訊息要的是一段可以貼進學習歷程的文字，不是這一題的引導，沒有送給模型',
+        distress,
+      };
+    }
+  }
   return { ok: true, code: null, reason: '', distress };
 }
 
@@ -676,6 +1046,22 @@ export const DISTRESS_REPLY =
   '你剛剛說的話我看到了，如果現在心裡很難受，先去找你的老師或家人講一講，' +
   '或者打 1925（安心專線，24 小時免付費）。' +
   '題目我隨時都在這裡，等你想看的時候再回來。';
+
+/**
+ * 要求代寫時回的話。
+ *
+ * **要指路，不要只說不行。** 學生會來要這個，是因為他真的寫不出來、
+ * 而且截止日在逼他。只回一句「我不能幫你寫」，他下一步是換一個
+ * 不會拒絕他的工具，那個工具不會留任何記錄。所以這裡把系統裡真的
+ * 存在的那條路講出來——那條路會協助他整理，而且會留下 AI 使用記錄，
+ * 讓他的揭露聲明說得出真話。
+ */
+export const GHOSTWRITE_REPLY =
+  '這一段我不能幫你寫。不是規定不准，是那段文字一旦是我寫的，' +
+  '它就不是你的學習歷程了——而你之後要拿它去面試，講不出來的是你。' +
+  '你如果要整理自述或讀書計畫，系統的「學習歷程」那一區有專門的功能，' +
+  '它會陪你把材料問出來，而且會照實記下你用過 AI。' +
+  '我們回到這一題：你剛剛卡在哪一步？';
 
 /** 提示注入被擋下來時回的話。要說得出擋的是什麼，不要含糊。 */
 export const INJECTION_REPLY =
@@ -849,7 +1235,7 @@ export function safeFallback(mode, turn = 1, facts = null) {
     ...Object.values(FALLBACKS).flat(),
   ];
   for (const c of candidates) {
-    if (!checkTutorReply(c, facts).leaked) return c;
+    if (!checkTutorReply(c, facts).mustRegenerate) return c;
   }
   return LAST_RESORT;
 }

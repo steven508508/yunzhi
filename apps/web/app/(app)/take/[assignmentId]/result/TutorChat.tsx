@@ -106,20 +106,36 @@ export function TutorChat({
     [mode, sending, session.sessionId],
   );
 
-  const finish = useCallback(
-    async (resolved: boolean) => {
+  /**
+   * 改對話的狀態：我懂了／結束這一段／我還想再問。
+   *
+   * **「收起」不走這裡。** 收起只是把這一塊摺起來（`onClose()`），
+   * 不打任何 API、不改任何狀態——理由見下面那顆按鈕上的註解。
+   */
+  const patch = useCallback(
+    async (action: 'resolve' | 'close' | 'reopen') => {
+      setError(null);
       try {
         const res = await fetch(`/api/tutor/${encodeURIComponent(session.sessionId)}`, {
           method: 'PATCH',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ resolved }),
+          body: JSON.stringify({ action }),
         });
-        if (res.ok) setSession(await res.json());
+        const json = await res.json();
+        if (!res.ok) {
+          // 重開失敗一定要說出來：那顆按鈕是他唯一的出路，
+          // 按了沒反應等於這一題的智慧老師壞了。
+          setError(json.error ?? '改不了這一段對話的狀態');
+          return;
+        }
+        setSession(json);
+        // 結束（不是「我懂了」也不是重開）就順手把面板收起來——
+        // 他剛剛表達的就是「不想再看到它」。「我懂了」留著，
+        // 因為那一句「很好，這一題就到這裡」是這段對話的結尾。
+        if (action === 'close') onClose();
       } catch {
-        // 結束失敗不必打擾學生：對話留在 OPEN 的後果只是他下次
-        // 點進來會接續同一段，那本來就是想要的行為。
+        setError('連不上伺服器。等一下再試一次。');
       }
-      if (!resolved) onClose();
     },
     [onClose, session.sessionId],
   );
@@ -137,7 +153,18 @@ export function TutorChat({
           它不會直接給答案——答案跟解析就在上面，你想看隨時看得到。
           它做的是問你問題、陪你想。
         </p>
-        <button type="button" className="yz-tutor__x" onClick={() => finish(false)} aria-label="收起對話">
+        {/* **收起只是收起。**
+            這顆按鈕曾經呼叫 `finish(false)`，也就是把這一段對話寫成
+            CLOSED——學生按它是想把對話摺起來、回頭看上面的解析，結果
+            把這一題的智慧老師永久關掉了，而且當時沒有任何一條路重開。
+            寫著「收起」的東西就必須只做收起；要結束的那顆在下面，
+            上面寫著「結束這一段」。 */}
+        <button
+          type="button"
+          className="yz-tutor__x"
+          onClick={onClose}
+          aria-label="收起對話（不會結束，隨時可以再打開）"
+        >
           收起
         </button>
       </div>
@@ -170,12 +197,29 @@ export function TutorChat({
       </div>
 
       {closed ? (
-        <div className="yz-tutor__done">
-          {session.resolvedAt ? '很好，這一題就到這裡。' : '這一段對話結束了。'}
-          <button type="button" className="yz-tutor__quiet" onClick={onClose}>
-            收起
-          </button>
-        </div>
+        <>
+          <div className="yz-tutor__done">
+            {session.resolvedAt ? '很好，這一題就到這裡。' : '這一段對話結束了。'}
+            {/* 結束不可以是單行道。沒有這一顆的時候，一段結束掉的對話
+                就永遠回不來了——學生再點入口拿到的是同一段 CLOSED 的
+                對話，畫面上只剩這一行字，沒有輸入框、沒有開場選項，
+                而他會以為這個功能壞了。
+                放在「收起」左邊，因為它才是這裡真正要給的出路。 */}
+            <button type="button" className="yz-tutor__quiet" onClick={() => void patch('reopen')}>
+              我還想再問
+            </button>
+            <button type="button" className="yz-tutor__quiet" onClick={onClose}>
+              收起
+            </button>
+          </div>
+          {/* 錯誤訊息放在 `.yz-tutor__done` **外面**：那個 div 是一列
+              baseline 對齊的 flex，塞進去會變成同一列的第三個項目。 */}
+          {error && (
+            <p className="yz-tutor__err" role="alert">
+              {error}
+            </p>
+          )}
+        </>
       ) : (
         <>
           {/* 開場的卡點選項。手機上點一下比打字快得多，而第一句
@@ -250,9 +294,25 @@ export function TutorChat({
               {/* 「我懂了」是這一段對話唯一的成功結局，而且是學生自己
                   宣告的。系統不替他判斷懂了沒——schema 的欄位註解
                   說得很清楚，沒有按不代表沒懂。 */}
-              <Button variant="quiet" onClick={() => finish(true)} disabled={sending}>
+              <Button variant="quiet" onClick={() => void patch('resolve')} disabled={sending}>
                 我懂了
               </Button>
+              {/* 「結束這一段」而不是「收起」。
+                  兩件事在學生心裡本來就不同：收起是「我先看別的」，
+                  結束是「這一題不問了」。共用一顆按鈕的時候，按下去
+                  的人幾乎都以為自己按的是前者。
+                  只在他已經講過卡點之後才出現——第一句都還沒打就
+                  給他一顆結束鍵，是在請他離開。 */}
+              {askedStuck && (
+                <button
+                  type="button"
+                  className="yz-tutor__quiet"
+                  onClick={() => void patch('close')}
+                  disabled={sending}
+                >
+                  結束這一段
+                </button>
+              )}
             </div>
           </div>
 

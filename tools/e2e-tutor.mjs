@@ -48,7 +48,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -255,6 +255,14 @@ async function hydrate(db, model, row, shape) {
 /** 依序回傳的腳本。用完之後重複最後一則。 */
 let script = [];
 let calls = [];
+/**
+ * 假裝 AI 服務掛了。
+ *
+ * 這一格存在的理由是一個真的發生過的缺陷：學生的訊息已經寫進資料庫，
+ * 而畫面上說「你的訊息沒有送出去」——沒有辦法用「一切正常」的替身
+ * 測到，非得讓上游真的失敗一次不可。
+ */
+let aiDown = false;
 
 function startFakeAi() {
   return new Promise((resolve) => {
@@ -264,6 +272,11 @@ function startFakeAi() {
       req.on('end', () => {
         const payload = JSON.parse(body || '{}');
         calls.push(payload);
+        if (aiDown) {
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ detail: '假裝上游掛了' }));
+          return;
+        }
         const text = script[Math.min(calls.length - 1, script.length - 1)] ?? '你覺得呢？';
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
@@ -302,7 +315,17 @@ process.env.AI_SERVICE_URL = `http://127.0.0.1:${port}`;
 // lib/tutor.ts 是 TypeScript 而且用 `@/` 別名。用 esbuild 打包成一份
 // ESM，把 `@/lib/prisma` 換成上面那個替身——**其餘的程式碼一個字
 //都不改**，所以這裡跑的判斷與正式環境跑的是同一份。
-const outDir = mkdtempSync(path.join(tmpdir(), 'yz-tutor-'));
+// **打包產物要落在 repo 裡面，不能落在 /tmp。**
+//
+// `@prisma/client` 是 external（不打包進去），所以 Node 載入這份 bundle
+// 時要自己去解析它——而解析是從 bundle 所在的目錄往上找 node_modules。
+// 放在 /tmp 的話往上找到的是根目錄，於是整支測試在
+// 「Cannot find package '@prisma/client'」上就停住，一個案例都沒跑到。
+// 放在 node_modules 底下，往上一層就是專案的 node_modules。
+//
+// 為什麼不乾脆把 @prisma/client 也打包進去：那會把整個查詢引擎拉進來，
+// 而這支測試的重點正是**不要**真的 Prisma（見檔頭的 pg-shim 說明）。
+const outDir = mkdtempSync(path.join(ROOT, 'node_modules', '.yz-e2e-tutor-'));
 const shimPath = path.join(outDir, 'prisma-shim.mjs');
 writeFileSync(shimPath, 'export const prisma = globalThis.__YZ_TUTOR_PRISMA__;\n');
 
@@ -675,6 +698,157 @@ await test('用量記到 AiUsageLog 與 AiBudgetCounter', async () => {
 
     const s = await raw.tutorSession.findFirst({ where: { id: sessionId } });
     assert.ok(s.tokensIn > 0 && s.tokensOut > 0, 'session 上的用量沒有累計');
+  });
+});
+
+// ── 二之二、收起不是結束，而結束不是死路 ──────────────────────
+
+section('結束掉的對話回得來');
+
+await test('已經結束的對話送不了訊息，而錯誤訊息說得出怎麼再開', async () => {
+  // 上一段測試按過「我懂了」，所以這一段現在是 CLOSED。
+  await as(async () => {
+    await assert.rejects(
+      () => tutor.sendTutorMessage({ sessionId, userId: ctx.student.id, text: '我又想到一件事' }),
+      (e) => e.code === 'CLOSED' && /我還想再問/.test(e.message),
+    );
+  });
+});
+
+await test('再點一次入口拿到的還是同一段，而且照實說它結束了', async () => {
+  // **不自動重開。** 自動重開等於「結束這一段」這個動作不存在。
+  await as(async () => {
+    const again = await tutor.openTutorSession({
+      attemptId: ctx.openAttempt.id,
+      questionId: ctx.question.id,
+      userId: ctx.student.id,
+    });
+    assert.equal(again.sessionId, sessionId, '又建了一段新的，學生看不到自己上一輪打的字');
+    assert.equal(again.status, 'CLOSED');
+    assert.ok(again.messages.length > 0, '歷史不見了');
+  });
+});
+
+await test('「我還想再問」把同一段接回來，歷史還在', async () => {
+  await as(async () => {
+    const before = await tutor.loadTutorSession(sessionId, ctx.student.id);
+    const r = await tutor.reopenTutorSession({ sessionId, userId: ctx.student.id });
+    assert.equal(r.sessionId, sessionId);
+    assert.equal(r.status, 'OPEN');
+    assert.equal(r.messages.length, before.messages.length, '重開把歷史洗掉了');
+    // 他確實按過「我懂了」，那是一個發生過的事件，不可以被抹掉。
+    assert.ok(r.resolvedAt, '重開順手把 resolvedAt 清掉了，那是在改寫記錄');
+  });
+});
+
+await test('重開之後真的可以再送訊息', async () => {
+  script = ['好，那我們接著看。你剛剛卡住的是哪一個數字？'];
+  await as(async () => {
+    const r = await tutor.sendTutorMessage({
+      sessionId,
+      userId: ctx.student.id,
+      text: '我還是不太確定單位',
+    });
+    assert.equal(r.fellBack, false);
+    assert.match(r.session.messages.at(-1).content, /哪一個數字/);
+  });
+});
+
+await test('逐字稿裡看得出這一段被重開過', async () => {
+  await as(async () => {
+    const rows = await raw.tutorMessage.findMany({ where: { sessionId } });
+    assert.ok(
+      rows.some((m) => m.role === 'CONTEXT' && /重新打開/.test(m.content)),
+      '老師端看不出中間斷過，一段對話會讀起來前後不接',
+    );
+  });
+});
+
+await test('重複按「我還想再問」是冪等的', async () => {
+  await as(async () => {
+    const r = await tutor.reopenTutorSession({ sessionId, userId: ctx.student.id });
+    assert.equal(r.status, 'OPEN');
+  });
+});
+
+await test('別人重開不了這一段', async () => {
+  await as(async () => {
+    await assert.rejects(
+      () => tutor.reopenTutorSession({ sessionId, userId: ctx.other.id }),
+      (e) => e.code === 'NOT_FOUND',
+    );
+  });
+});
+
+await test('檢討被收回去之後就重開不了（不然重開是繞過放行判斷的一條路）', async () => {
+  // 上一次開對話到現在，老師可以把這份任務的檢討收回去。重開若不
+  // 重跑 `maySeeResult`，這顆按鈕就是一條繞過洩題判斷的路。
+  await as(async () => {
+    await tutor.closeTutorSession({ sessionId, userId: ctx.student.id, resolved: false });
+    const before = await raw.assignment.findFirst({ where: { id: ctx.openAssignmentId } });
+    await raw.assignment.update({
+      where: { id: ctx.openAssignmentId },
+      data: { releasePolicy: 'ON_DUE', dueAt: new Date(Date.now() + 3600_000) },
+    });
+    try {
+      await assert.rejects(
+        () => tutor.reopenTutorSession({ sessionId, userId: ctx.student.id }),
+        (e) => e.code === 'NOT_RELEASED',
+      );
+    } finally {
+      await raw.assignment.update({
+        where: { id: ctx.openAssignmentId },
+        data: { releasePolicy: before.releasePolicy, dueAt: before.dueAt },
+      });
+    }
+    // 收回去的那段時間過了就要能再開，不然一次暫時的設定會永久卡死。
+    const r = await tutor.reopenTutorSession({ sessionId, userId: ctx.student.id });
+    assert.equal(r.status, 'OPEN');
+  });
+});
+
+// ── 二之三、AI 掛掉的時候 ────────────────────────────────────
+
+section('AI 掛掉時，畫面說的話要是真的');
+
+await test('第一次呼叫就連不上：學生的訊息不會留在資料庫裡', async () => {
+  // 這一條驗的是「畫面上說的」與「資料庫裡的」一致。
+  //
+  // 原本的順序是先把 STUDENT 訊息與 messageCount+1 寫進去、再呼叫
+  // AI，於是第一次就連不上的時候：訊息已經在資料庫裡，而介面顯示
+  // 「你的訊息沒有送出去」並把原文放回輸入框。學生再按一次，
+  // 逐字稿裡同一句話出現兩次，messageCount 多算一次——而上限是 40。
+  await as(async () => {
+    const before = await raw.tutorMessage.findMany({ where: { sessionId } });
+    const s0 = await raw.tutorSession.findFirst({ where: { id: sessionId } });
+
+    aiDown = true;
+    const callsBefore = calls.length;
+    try {
+      await assert.rejects(
+        () =>
+          tutor.sendTutorMessage({
+            sessionId,
+            userId: ctx.student.id,
+            text: '這一句應該完全不留下痕跡',
+          }),
+        (e) => e.code === 'AI_DOWN',
+      );
+    } finally {
+      aiDown = false;
+    }
+
+    assert.equal(calls.length, callsBefore + 1, '第一次呼叫失敗之後不該再重試');
+
+    const after = await raw.tutorMessage.findMany({ where: { sessionId } });
+    assert.equal(after.length, before.length, `多寫了 ${after.length - before.length} 則訊息`);
+    assert.ok(
+      !after.some((m) => m.content.includes('這一句應該完全不留下痕跡')),
+      '學生的訊息留在資料庫裡了，而畫面上跟他說沒有送出去',
+    );
+
+    const s1 = await raw.tutorSession.findFirst({ where: { id: sessionId } });
+    assert.equal(s1.messageCount, s0.messageCount, 'messageCount 多算了一次');
   });
 });
 

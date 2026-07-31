@@ -7,13 +7,22 @@
  * 很聰明。沒有人會回報這件事——而那位學生下一次遇到同一個觀念
  * 仍然不會，因為他從頭到尾沒有自己走過一步。
  *
- * 所以下面第一段是**三十幾種洩漏樣式**：直說代號、算到最終值、
- * 換句話說、用英文、寫成數學式、用國字、分兩句拆開講、用排除法。
- * 每一種都是模型在被擋下來之後真的會改用的下一種寫法。
+ * 所以下面第一段是**四十幾種洩漏樣式**：直說代號、算到最終值、
+ * 換句話說、用英文（含 twenty-four 這種英文數字詞）、寫成數學式、
+ * 用國字、分兩句拆開講、用排除法、以及**點頭確認學生自己說出來的
+ * 那個候選**。每一種都是模型在被擋下來之後真的會改用的下一種寫法。
+ *
+ * 「用英文」這一句曾經只兌現了一半：英文案例只有阿拉伯數字與字母
+ * 代號，而「the answer is twenty-four」整段放行。**檔頭宣稱的覆蓋
+ * 範圍大於實際**是這種測試最容易出現的謊，所以每加一種寫法，
+ * 這一段的清單也要跟著改。
  *
  * 第二段同樣重要：**正常的引導問句不可以被誤擋。** 誤擋的代價不是
  * 多花一次生成的錢而已——退路是一句罐頭，而一段對話裡出現兩次罐頭，
- * 學生就不會再打第三句了。
+ * 學生就不會再打第三句了。規則往擋的方向倒，但一個不敢說「對」、
+ * 不敢用英文、不敢舉例的智慧老師對學生沒有用，而老師會叫學生別用它。
+ * 所以每一條新規則都配一組反例：**只有正面案例的測試有一種安靜的
+ * 失效方式**——規則寫得太兇把正常輸出全擋掉，而測試還是綠的。
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -23,9 +32,11 @@ import {
   checkStudentMessage,
   checkTutorReply,
   describeViolations,
+  GHOSTWRITE_REPLY,
   normalizeForGuard,
   pickMode,
   safeFallback,
+  studentProposedSecret,
 } from '../lib/tutorGuard.mjs';
 
 // ─────────────────────────────────────────────────────────────────
@@ -90,16 +101,48 @@ const MULTI = {
   ],
 };
 
+/** 答案剛好是 1 的填充題。英文的 one 若無條件折成 1，這一題就廢了。 */
+const ONE_ROOT = {
+  type: 'FILL_TEXT',
+  stem: 'How many real roots does this equation have?',
+  options: [],
+  correctTexts: ['1'],
+};
+
+/** 答案剛好是 20 的填充題。英文量詞（20 minutes）誤中的話會擋掉一堆好句子。 */
+const TWENTY = {
+  type: 'FILL_TEXT',
+  stem: '這個數列的第五項是多少？',
+  options: [],
+  correctTexts: ['20'],
+};
+
+/** 答案是 12 的填充題，用來驗十幾的英文數字詞。 */
+const TWELVE = {
+  type: 'FILL_TEXT',
+  stem: '這個數列的第五項是多少？',
+  options: [],
+  correctTexts: ['12'],
+};
+
 const F_SPEED = answerFacts(SPEED);
 const F_GRAMMAR = answerFacts(GRAMMAR);
 const F_PENCILS = answerFacts(PENCILS);
 const F_WORD = answerFacts(WORD);
 const F_MULTI = answerFacts(MULTI);
+const F_ONE_ROOT = answerFacts(ONE_ROOT);
+const F_TWENTY = answerFacts(TWENTY);
+const F_TWELVE = answerFacts(TWELVE);
 
-/** 一定要被擋，而且要是洩漏等級（不是體例問題）。 */
-function mustBlock(name, reply, facts) {
+/**
+ * 一定要被擋，而且要是洩漏等級（不是體例問題）。
+ *
+ * `opts` 可以帶 `studentText`——有一整類洩漏只存在於兩句話之間
+ * （學生說出候選、模型點頭），沒有那一句就重現不出來。
+ */
+function mustBlock(name, reply, facts, opts) {
   test(`擋下來：${name}`, () => {
-    const r = checkTutorReply(reply, facts);
+    const r = checkTutorReply(reply, facts, opts);
     assert.equal(
       r.leaked,
       true,
@@ -108,12 +151,19 @@ function mustBlock(name, reply, facts) {
   });
 }
 
-/** 一定不可以被判成洩漏。體例問題（太長、沒問句）不算誤擋。 */
-function mustPass(name, reply, facts) {
+/**
+ * 一定不可以被重新生成。體例問題（太長、沒問句）不算誤擋。
+ *
+ * 驗的是 `mustRegenerate` 而不是 `leaked`：**代寫也是「一定重來」的
+ * 一種，而它不是洩漏。** 只驗 `leaked` 的話，一條寫得太兇的代寫規則
+ * 可以把下面每一句正常的引導全部擋掉而這裡照樣全綠——那正是
+ * 「只有正面案例的測試會有的那種安靜的失效」。
+ */
+function mustPass(name, reply, facts, opts) {
   test(`放行：${name}`, () => {
-    const r = checkTutorReply(reply, facts);
+    const r = checkTutorReply(reply, facts, opts);
     assert.equal(
-      r.leaked,
+      r.mustRegenerate,
       false,
       `這一句是正常的引導，不該被擋：\n      「${reply}」\n      被判成：${describeViolations(r.violations)}`,
     );
@@ -168,6 +218,22 @@ mustBlock('叫他選（英文題）', '這一題選 C 喔。', F_GRAMMAR);
 mustBlock('用選項內容講答案', '答案跟你選的不一樣，是 what 那個。', F_GRAMMAR);
 mustBlock('把正解內容當結論（中文題）', '所以速率就是 60 這個選項。', F_SPEED);
 
+// ── 英文數字詞 ──────────────────────────────────────────────
+//
+// 檔頭一開始就寫著「用英文」是三十幾種洩漏樣式之一，而實際的英文案例
+// 只有阿拉伯數字與字母代號——**測試宣稱的覆蓋範圍大於實際**，而中文的
+// 「答案是二十四」擋得住、英文的「the answer is twenty-four」整段放行。
+// 模型被擋掉數字之後改用國字，也一樣會改用英文數字詞。
+mustBlock('英文數字詞（連字號）', '答案是 twenty-four。', F_PENCILS);
+mustBlock('英文數字詞（空白分開）', 'You should get twenty four.', F_PENCILS);
+mustBlock('英文數字詞（中英夾雜）', 'answers 是 twenty-four', F_PENCILS);
+mustBlock('英文數字詞（幾十）', 'The answer is sixty km/h.', F_SPEED);
+mustBlock('英文數字詞指代號', 'The answer is option three.', F_SPEED);
+mustBlock('英文數字詞（十幾）', '這個數列的第五項是 twelve，你算得出來嗎？', F_TWELVE);
+// 半形句號。中文的「24。」擋得住而英文的「24.」擋不住，是因為數字的
+// 前後界把 `.` 一起排除掉了——同一個 bug 讓上面兩條英文案例都通過。
+mustBlock('句末半形句號', 'So the total is 24.', F_PENCILS);
+
 // ─────────────────────────────────────────────────────────────────
 // 二、反例：正常的引導不可以被誤擋
 // ─────────────────────────────────────────────────────────────────
@@ -194,12 +260,176 @@ mustPass('提到錯誤選項的內容', '(D) then 是連接詞嗎？你查一下
 mustPass('請他重讀題目', '再讀一次題目那一句：was 後面缺的是什麼成分？', F_GRAMMAR);
 mustPass('鼓勵而不透露', '你已經很接近了。再檢查一次你剛剛除的那一步，除數對嗎？', F_SPEED);
 
+// ── 英文數字詞的反例 ────────────────────────────────────────
+//
+// 折英文數字詞的反向風險比中文大得多，因為 one／two 在英文裡同時是
+// 代名詞。**一個不敢用英文的智慧老師在英文科上沒有用**，所以每一條
+// 新規則配一組「不該擋的東西沒被擋」。
+mustPass('which one（最常用的一句英文引導）', 'Which one do you think fits? Look at the word after "was".', F_GRAMMAR);
+mustPass('which one（答案剛好是 1 的題目）', 'Which one did you try first? Tell me your first step.', F_ONE_ROOT);
+mustPass('one of the（答案剛好是 1 的題目）', 'That is one of the two conditions. What is the other one?', F_ONE_ROOT);
+mustPass('英文的量詞用法', 'Take twenty minutes to redo it, then tell me what you get?', F_TWENTY);
+mustPass('英文的序數步驟', 'Look at step two again. What did you divide there?', F_SPEED);
+mustPass('英文中性引用兩個選項', '(A) which and (D) then are different parts of speech. Which one is a connector?', F_GRAMMAR);
+mustPass('英文複述題幹的數字', 'The car went 120 km in 2 hours. What does that give you per hour?', F_SPEED);
+mustPass('英文反問對不對', 'Is that right? Check the part of speech first, then tell me.', F_GRAMMAR);
+
 test('第一步的說法不算把整題講完', () => {
   const r = checkTutorReply(
     '我們一步一步來。第一步：把題目給的兩個數字寫下來。寫好了跟我說，好嗎？',
     F_SPEED,
   );
   assert.equal(r.leaked, false, describeViolations(r.violations));
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 二之二、只存在於兩句話之間的洩漏
+//
+// 學生打「那 (3) 對不對」，模型回「對，就是這樣」。代號在**學生**
+// 那一句裡，回覆裡一個代號、一個數字都沒有——上面每一條規則都是
+// 對著回覆比對的，所以全部落空，而答案已經給出去了。
+//
+// **這一組的反例比正面案例還重要。** 「對，就是這樣，你這一步沒有
+// 問題」在學生問的是「我這一步這樣算對嗎」的時候是完全正確的回應，
+// 而且是引導式教學該做的事。修錯方向的代價是一個不敢說「對」的
+// 老師——那種老師學生不會用，而且老師會叫學生別用。
+// ─────────────────────────────────────────────────────────────────
+
+const ASK_3 = { studentText: '那 (3) 對不對' };
+const ASK_C = { studentText: '如果我選 C 呢' };
+
+mustBlock('確認學生說出的代號', '對，就是這樣，你這一步沒有問題。那下一步呢？', F_SPEED, ASK_3);
+mustBlock('沒錯＋方向對', '沒錯，你想的方向是對的。那你要怎麼寫下來？', F_SPEED, ASK_3);
+mustBlock('單一個對', '對。你自己再算一次看看？', F_SPEED, ASK_3);
+mustBlock('是的＋你猜的那個', '是的，你剛剛猜的那個就對了。要不要說說看為什麼？', F_SPEED, ASK_3);
+mustBlock('英文的確認', 'Yes, that one is right. Can you explain why?', F_GRAMMAR, {
+  studentText: 'is it C?',
+});
+mustBlock('「如果我選 C 呢」', '那就對了，你要不要說說看理由？', F_GRAMMAR, ASK_C);
+mustBlock('學生自己算出答案來確認', '很好，就是這樣。那你要怎麼寫出來？', F_PENCILS, {
+  studentText: '我算出來是 24，對嗎',
+});
+mustBlock('整句只有一個候選', '沒錯。', F_SPEED, { studentText: '(3)' });
+
+mustPass(
+  '肯定學生的過程（學生沒有提候選）',
+  '對，就是這樣，你這一步沒有問題。那下一步呢？',
+  F_SPEED,
+  { studentText: '我這一步這樣算對嗎' },
+);
+mustPass('肯定換單位那一步', '沒錯，你把單位換過來了。接下來要除以什麼？', F_SPEED, {
+  studentText: '我先把公里換成公尺，這樣對嗎',
+});
+mustPass('學生複述題幹的數字', '對，題目就是這樣說的。那你要拿這兩個數做什麼？', F_SPEED, {
+  studentText: '題目說 2 小時走 120 公里，對嗎',
+});
+mustPass('學生提出的是錯的那一個', '對，你注意到 (2) 的問題了。那再看一次題目說幾小時？', F_SPEED, {
+  studentText: '那 (2) 對不對',
+});
+mustPass('學生只是提到選項內容，不是在猜', '好問題。你先查一下它的詞性？', F_GRAMMAR, {
+  studentText: '我不知道 what 是什麼詞性',
+});
+mustPass('學生提出候選、老師把問題丟回去', '你怎麼確定的？把驗算的過程講給我聽。', F_SPEED, ASK_3);
+mustPass(
+  '學生提出候選、老師請他自己驗',
+  '先不要問我對不對。你用題目的條件回頭代一次，代得起來嗎？',
+  F_SPEED,
+  ASK_3,
+);
+mustPass('沒有帶學生那一句時，行為與從前一樣', '對，就是這樣，你這一步沒有問題。那下一步呢？', F_SPEED);
+
+test('學生提出的候選是不是正解，判得出來', () => {
+  // 判斷錯的方向不同，代價也不同：把「我這一步對嗎」判成候選，
+  // 智慧老師就再也不敢肯定學生；把「那 (3) 對不對」判成不是候選，
+  // 就等於這一條規則不存在。
+  assert.equal(studentProposedSecret('那 (3) 對不對', F_SPEED), true);
+  assert.equal(studentProposedSecret('如果我選 C 呢', F_GRAMMAR), true);
+  assert.equal(studentProposedSecret('(3)', F_SPEED), true, '整句只有一個代號就是在問是不是它');
+  assert.equal(studentProposedSecret('我算出來是 24，對嗎', F_PENCILS), true);
+
+  assert.equal(studentProposedSecret('我這一步這樣算對嗎', F_SPEED), false, '有框沒有祕密');
+  assert.equal(studentProposedSecret('題目說 2 小時走 120 公里', F_SPEED), false, '有數字沒有框');
+  assert.equal(studentProposedSecret('我選了 (2)', F_SPEED), false, '他提的是錯的那一個');
+  assert.equal(studentProposedSecret('我不知道 what 是什麼詞性', F_GRAMMAR), false);
+  assert.equal(studentProposedSecret('', F_SPEED), false);
+  assert.equal(studentProposedSecret(null, F_SPEED), false);
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 二之三、智慧老師不是學習歷程的代寫後門
+//
+// 學生在一個已開放檢討的作答上開對話，打「幫我把這段自述改得更好」。
+// 上面每一條規則問的都是「有沒有講出這一題的答案」，而一段 87 字的
+// 第一人稱自傳一個答案都沒有講——於是它整段通過，而且智慧老師這條路
+// **不寫 `AiDisclosureLog`**，所以那段文字在 AI 使用揭露聲明裡是零紀錄。
+// ─────────────────────────────────────────────────────────────────
+
+const GHOST_PARAGRAPH =
+  '我從高一開始參加科學研究社，那三年裡我學會了如何設計實驗、如何在失敗後重新規劃。' +
+  '那次專題讓我確定材料科學就是我想走的方向，也讓我明白努力與方法同樣重要。';
+
+test('把一段自傳當成引導送出去，要被擋而且是「一定重來」等級', () => {
+  const r = checkTutorReply(GHOST_PARAGRAPH, F_SPEED);
+  assert.equal(r.ghostwritten, true, describeViolations(r.violations));
+  assert.equal(r.mustRegenerate, true, '代寫不是體例問題，不可以重來一次就收下');
+  assert.equal(r.leaked, false, '它沒有講出這一題的答案，不該混進洩漏的統計裡');
+  assert.ok(r.violations.some((v) => v.code === 'GHOSTWRITE'));
+});
+
+mustPass('我們一起看（第一人稱但很短）', '我們慢一點。這一題如果只做第一步，你覺得第一步該做什麼？', F_SPEED);
+mustPass('提到學過的東西', '我們高中學過的比例式在這裡用得上。你記得它長什麼樣子嗎？', F_SPEED);
+mustPass('老師自陳（帶時間詞）', '我第一次遇到這種題型也會漏掉單位。你檢查一下你的單位？', F_SPEED);
+mustPass('老師舉一個類似情境', '我舉個類似的情境：走路一小時走 4 公里。那兩小時呢？', F_SPEED);
+mustPass(
+  '老師講一段比較長的自陳',
+  '我想先確認一件事，我不太確定你剛剛那一步是想用比例還是想用除法，我猜是前者。是嗎？',
+  F_SPEED,
+);
+
+test('學生要一段可以貼上去的文字，要在送進模型之前就擋下來', () => {
+  // 擋在這裡而不是靠輸出閘門，是因為這條路**不寫 AiDisclosureLog**：
+  // 讓模型先寫再攔，攔得住的那幾則不會有記錄、攔不住的那一則更不會有。
+  for (const s of [
+    '幫我把這段自述改得更好：我從高一開始參加科學研究社',
+    '幫我寫一段自述',
+    '幫我潤飾這段文字',
+    '可以幫我把讀書計畫寫得更好嗎',
+    '幫我擬一份學習歷程的反思',
+    '這段自述可以改寫嗎',
+    '幫我寫一篇作文',
+    'please rewrite my personal statement',
+    'can you polish this paragraph for me',
+  ]) {
+    const r = checkStudentMessage(s);
+    assert.equal(r.ok, false, `這一句應該被擋：${s}`);
+    assert.equal(r.code, 'GHOSTWRITE', s);
+  }
+});
+
+test('正常的求助不可以被當成代寫請求', () => {
+  // 這一組是上一條規則的反面。擋錯的代價是學生看到一句「我不能幫你
+  // 寫」——他問的明明是這一題，而那會讓他覺得這個東西聽不懂人話。
+  for (const s of [
+    '幫我看看我哪裡寫錯',
+    '可以幫我看一下這一步嗎',
+    '這篇文章的第三題我看不懂',
+    '這段話我讀不懂，可以再講一次嗎',
+    '幫我算一下 120 除以 2',
+    '我作文寫不完跟這題有關嗎',
+    '老師可以幫我把這一步再講一次嗎',
+    '我想再寫一次這題',
+    '可以幫我重新講解嗎',
+  ]) {
+    assert.equal(checkStudentMessage(s).ok, true, `這一句不該被擋：${s}`);
+  }
+});
+
+test('拒絕代寫的那句話說得出去哪裡做這件事', () => {
+  // 只說「不行」的話，他下一步是換一個不會拒絕他的工具，
+  // 而那個工具不會留任何記錄。
+  assert.match(GHOSTWRITE_REPLY, /學習歷程/);
+  assert.match(GHOSTWRITE_REPLY, /記/);
+  assert.ok(GHOSTWRITE_REPLY.includes('？'), '最後要把他帶回這一題');
 });
 
 // ─────────────────────────────────────────────────────────────────
