@@ -1210,5 +1210,78 @@ check('容器映像都釘了版本，沒有 latest', () => {
   assert(bad.length === 0, `這些沒有釘版本：\n       ${bad.join('\n       ')}`);
 });
 
+// ── 腳本進入點的相依有沒有進得了映像 ──────────────────────────
+//
+// **這一條擋的是「安裝到一半才死」那一類。** Next 的 standalone 只帶
+// 從 Next 應用追蹤得到的模組；scripts/*.mjs 是獨立的 Node 進入點，
+// Next 既不打包也不追蹤，所以它們 import 的東西必須由 Dockerfile
+// 明確搬進去。漏掉的症狀不是建置失敗（那還好查），而是：
+//
+//   migrate  → 安裝腳本停在 5／7，ERR_MODULE_NOT_FOUND
+//   worker   → 容器 crash loop，網頁看起來正常但匯入永遠不動
+//
+// v0.27.0 就是這樣漏掉 bcryptjs、bullmq、ioredis 的。
+check('scripts/*.mjs 的相依都有搬進映像', () => {
+  const ENTRIES = ['apps/web/scripts/migrate-and-seed.mjs', 'apps/web/scripts/worker.mjs'];
+  const df = read('apps/web/Dockerfile');
+
+  // 從進入點沿相對 import 走完，收集所有 bare specifier。
+  const seen = new Set();
+  const bare = new Set();
+  const visit = (f) => {
+    if (seen.has(f) || !existsSync(join(ROOT, f))) return;
+    seen.add(f);
+    for (const m of read(f).matchAll(/from\s*['"]([^'"]+)['"]/g)) {
+      const s = m[1];
+      if (s.startsWith('node:')) continue;
+      if (s.startsWith('.')) {
+        visit(join(dirname(f), s).replace(/\\/g, '/'));
+      } else {
+        bare.add(s.startsWith('@') ? s.split('/').slice(0, 2).join('/') : s.split('/')[0]);
+      }
+    }
+  };
+  ENTRIES.forEach(visit);
+
+  // 「有沒有搬」要看真的指令，不能用 df.includes(p) —— 那樣的話
+  // 註解裡提到一次套件名就算過，改個措辭就開始誤報。
+  const body = df.replace(/^\s*#.*$/gm, '');
+  const covered = new Set();
+  // builder 階段 /script-modules 的 `for p in …` 清單
+  const loop = body.match(/for\s+p\s+in\s+([\s\S]*?);\s*do/);
+  if (loop) loop[1].split(/[\s\\]+/).filter(Boolean).forEach((p) => covered.add(p));
+  // 個別 COPY 進 node_modules 的（@prisma、prisma、.bin…）
+  for (const m of body.matchAll(/node_modules\/([@\w.-]+(?:\/[\w.-]+)?)/g)) covered.add(m[1]);
+  // @prisma 整個 scope 被搬走時，@prisma/client 也就在裡面了
+  const isCovered = (p) => covered.has(p) || covered.has(p.split('/')[0]);
+
+  const missing = [...bare].filter((p) => !isCovered(p));
+  assert(
+    missing.length === 0,
+    `這些套件被 scripts/*.mjs 載入，但 apps/web/Dockerfile 沒有搬進 runner：\n` +
+      `       ${missing.join('、')}\n` +
+      `       加到 builder 階段 /script-modules 的清單裡（連同它們的相依閉包）。`,
+  );
+
+  // 有 node_modules 時順便驗閉包 —— 只搬頂層目錄會在
+  // ioredis 的 @ioredis/commands 這種二層相依上再死一次。
+  if (existsSync(join(ROOT, 'node_modules'))) {
+    const closure = new Set();
+    const expand = (p) => {
+      if (closure.has(p)) return;
+      const pj = join(ROOT, 'node_modules', p, 'package.json');
+      if (!existsSync(pj)) return;
+      closure.add(p);
+      Object.keys(JSON.parse(readFileSync(pj, 'utf8')).dependencies ?? {}).forEach(expand);
+    };
+    bare.forEach(expand);
+    const gaps = [...closure].filter((p) => !isCovered(p));
+    assert(
+      gaps.length === 0,
+      `相依閉包沒搬齊，執行期會在二層相依上失敗：\n       ${gaps.join('、')}`,
+    );
+  }
+});
+
 console.log(`\n${passed}/${passed + failed} 通過\n`);
 process.exit(failed ? 1 : 0);

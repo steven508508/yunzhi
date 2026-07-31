@@ -58,6 +58,34 @@ RUN npx prisma generate --schema packages/db/schema.prisma \
  && npm run build --workspace=apps/web \
  && mkdir -p apps/web/public
 
+# ── 腳本進入點的執行期相依 ─────────────────────────────────────
+#
+# **Next 的 standalone 只帶「從 Next 應用追蹤得到」的模組。**
+# scripts/migrate-and-seed.mjs 與 scripts/worker.mjs 是獨立的 Node
+# 進入點，Next 既不打包也不追蹤它們，於是它們 import 的東西一個都
+# 不在 standalone 裡：
+#
+#   migrate  → bcryptjs        安裝停在 5／7「資料庫遷移」
+#   worker   → bullmq, ioredis 容器起來就 crash loop
+#
+# bcryptjs 之所以「看起來應該被追蹤到」卻沒有：lib/password.ts 確實
+# 用了它，但它是純 JS，Next 直接把它**打包進路由的編譯產物**，於是
+# 追蹤器判定 node_modules 裡不需要它。@prisma/client 因為帶原生引擎
+# 被標為 external 才留了下來——這也是下面那幾行 COPY 存在的原因。
+#
+# 這裡收的是三個進入點的**完整相依閉包**（17 個套件、約 13MB），
+# 只複製頂層目錄會在 ioredis 的 @ioredis/commands 上再死一次。
+#
+# 另外 semver 必須在清單裡而且**不能只當它不存在**：standalone 帶了
+# 一份殘缺的 semver（只有 Next 用到的那幾個檔，沒有 index.js），
+# runner 的 COPY 會把缺的檔案補回去。
+RUN mkdir -p /script-modules && \
+    for p in @ioredis/commands bcryptjs bullmq cluster-key-slot cron-parser \
+             debug denque ioredis luxon ms msgpackr node-abort-controller \
+             redis-errors redis-parser semver standard-as-callback tslib; do \
+      mkdir -p "/script-modules/$p" && cp -R "node_modules/$p/." "/script-modules/$p/"; \
+    done
+
 # ── 執行 ───────────────────────────────────────────────────────
 FROM node:22-alpine AS runner
 RUN apk add --no-cache openssl curl tini
@@ -93,6 +121,9 @@ COPY --from=builder --chown=yunzhi:yunzhi /app/node_modules/prisma ./node_module
 # 則靜默換成另一個版本的 Prisma 去動 schema。standalone 產物只帶
 # 被追蹤到的 .js，不含 .bin，所以這一行不能省。
 COPY --from=builder --chown=yunzhi:yunzhi /app/node_modules/.bin ./node_modules/.bin
+# 見 builder 階段「腳本進入點的執行期相依」的說明。目錄合併，
+# 會順便把 standalone 那份殘缺的 semver 補齊。
+COPY --from=builder --chown=yunzhi:yunzhi /script-modules ./node_modules
 COPY --from=builder --chown=yunzhi:yunzhi /app/packages/db ./packages/db
 COPY --chown=yunzhi:yunzhi apps/web/scripts ./scripts
 # **scripts 與 lib 的相對位置在映像裡必須跟 repo 裡一樣。**
