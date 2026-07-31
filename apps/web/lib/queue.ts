@@ -18,6 +18,8 @@
  *      AI 費用再付一次。
  */
 import { Queue, type JobsOptions } from 'bullmq';
+// 冒號會被 BullMQ 拒絕；理由與測試見 lib/queueKey.mjs
+import { importJobKey } from './queueKey.mjs';
 import { redis } from '@/lib/redis';
 
 export const IMPORT_QUEUE = 'import';
@@ -67,7 +69,7 @@ if (process.env.NODE_ENV !== 'production') globalForQueue.importQueue = importQu
  */
 export async function enqueueImport(payload: ImportJobPayload, opts?: JobsOptions) {
   return importQueue.add('run', payload, {
-    jobId: `import:${payload.jobId}`,
+    jobId: importJobKey(payload.jobId),
     ...opts,
   });
 }
@@ -79,7 +81,7 @@ export async function enqueueImport(payload: ImportJobPayload, opts?: JobsOption
  * 而續跑必然是同一個 jobId。先移除舊記錄再入列。
  */
 export async function requeueImport(payload: ImportJobPayload) {
-  const existing = await importQueue.getJob(`import:${payload.jobId}`);
+  const existing = await importQueue.getJob(importJobKey(payload.jobId));
   // remove() 對執行中的工作會拋錯 —— 那正是我們要的：
   // 還在跑的工作不該被「續跑」擠掉。
   if (existing) await existing.remove();
