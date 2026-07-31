@@ -1,9 +1,14 @@
 # 雲端智學 — AI 服務映像
 FROM python:3.12-slim AS base
 
-ARG APP_VERSION=dev
-ENV APP_VERSION=${APP_VERSION} \
-    PYTHONUNBUFFERED=1 \
+# **APP_VERSION 不能放在這裡。** 它每次發版都變，而 Docker 的層快取
+# 是鏈式的：上面任何一層變了，下面全部失效。放在 apt 之前的話，光是
+# 版本號從 0.27.1 跳到 0.27.4 就會讓下面那個要下載約 500MB
+# （LibreOffice ＋ 兩份 Noto CJK 字型）、實測三十分鐘的 apt 層整個重來——
+# 而 apps/ai/ 可能一行都沒改。
+#
+# 所以這裡只放「幾乎不變」的環境變數，版本號挪到檔案後段。
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/models
@@ -28,6 +33,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# 版本號放在這裡：它在 `COPY . .` 之後，而原始碼本來就是每次發版都變的
+# 東西，所以這一層失效不會多付任何代價。放在檔案開頭則會拖著 apt 與
+# pip 兩個昂貴的層一起重跑。
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
 
 # 非 root 執行。容器逃逸的風險本來就存在，用 root 跑只是把
 # 「逃出來之後能做什麼」這個問題的答案變成「什麼都能做」。

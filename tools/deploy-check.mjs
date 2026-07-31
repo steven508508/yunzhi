@@ -1317,5 +1317,38 @@ if (compose) {
   });
 }
 
+// ── APP_VERSION 不能擋在昂貴的安裝層前面 ──────────────────────
+//
+// Docker 的層快取是鏈式的：上面任何一層變了，下面全部失效。APP_VERSION
+// 每次發版都變，所以它出現的位置決定了「改一個版本號要重建多少東西」。
+//
+// v0.27.4 之前 apps/ai/Dockerfile 把它放在第 5 行，而第 20 行是要下載
+// 約 500MB（LibreOffice ＋ 兩份 Noto CJK 字型）、實測三十分鐘的 apt 層。
+// 於是 apps/ai/ 一行都沒改的版本號更新，也要付那三十分鐘。
+check('APP_VERSION 沒有擋在套件安裝層前面', () => {
+  const EXPENSIVE = /^RUN\s+.*(apt-get\s+install|apk\s+add|pip\s+install|npm\s+ci)/;
+  const bad = [];
+  for (const f of ['apps/web/Dockerfile', 'apps/ai/Dockerfile', 'deploy/backup/Dockerfile']) {
+    if (!existsSync(join(ROOT, f))) continue;
+    let sawVersion = false;
+    let lineNo = 0;
+    for (const raw of read(f).split('\n')) {
+      lineNo++;
+      const line = raw.trim();
+      if (/^FROM\s/i.test(line)) { sawVersion = false; continue; }  // 每個階段各自計算
+      if (/^(ARG|ENV)\s+.*APP_VERSION/i.test(line)) { sawVersion = true; continue; }
+      if (sawVersion && EXPENSIVE.test(line)) {
+        bad.push(`${f}:${lineNo} 的安裝指令排在 APP_VERSION 之後`);
+        sawVersion = false; // 一個階段報一次就夠
+      }
+    }
+  }
+  assert(
+    bad.length === 0,
+    `版本號一變，這些安裝層的快取就會失效：\n       ${bad.join('\n       ')}\n` +
+      `       把 ARG/ENV APP_VERSION 移到那些 RUN 之後。`,
+  );
+});
+
 console.log(`\n${passed}/${passed + failed} 通過\n`);
 process.exit(failed ? 1 : 0);
