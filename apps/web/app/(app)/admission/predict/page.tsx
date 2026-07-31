@@ -32,11 +32,12 @@
  */
 import Link from 'next/link';
 
-import { GRADE_SOURCES, admissionYearOf, myPredictionHistory, predictionsFor } from '@/lib/predictDb';
+import { GRADE_SOURCES, myPredictionHistory, predictTargetOf, predictionsFor } from '@/lib/predictDb';
 import { GSAT_SUBJECT_CODES, SUBJECT_LABELS } from '@/lib/placement.mjs';
 import { DEFAULT_CONFIDENCE, THIN_MIN_RECORDS } from '@/lib/predict.mjs';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 
 import { Emph } from '../Emph';
 import GradeForm from './GradeForm';
@@ -78,7 +79,28 @@ export default async function PredictPage({
   searchParams: Promise<{ confidence?: string }>;
 }) {
   return scopedPage(async (user) => {
-    const year = admissionYearOf() as number;
+    // 角色判定走 `lib/nav.ts` 那一份唯一的對照表。自己手寫一份的話，
+    // 改角色時沒有人會記得跟著改——而這一區共有六頁。
+    if (!mayUse(user.systemRole, '/admission')) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="級分預測"
+            why={
+              <>
+                這一區是學生與老師的。孩子的成績與作業狀況在
+                <Link href="/guardian">孩子的狀況</Link>那一頁。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
+    // **預測的目標是下一場還沒考的學測**，不是現在這個學年度：學年度
+    // 自 8 月起算而學測在 1 月，所以 1/20 到 7/31 之間那兩者差一年。
+    const { targetYear, schoolYear, schoolYearExamPassed, schoolYearExamDate } = predictTargetOf();
+    const year = targetYear;
     const sp = await searchParams;
     const wanted = Number(sp?.confidence);
     const confidence = CONFIDENCES.includes(wanted) ? wanted : DEFAULT_CONFIDENCE;
@@ -103,10 +125,17 @@ export default async function PredictPage({
       );
     }
 
+    // 歷史要連**上一場**（可能剛考完）的一起查：那幾份還在等實際成績，
+    // 而它們只在這一頁上看得到。少查那一年的話，「去輸入正式級分」
+    // 這個動作沒有任何地方提醒得了他。
     const [data, history] = await Promise.all([
       predictionsFor(user.id, year, confidence),
-      myPredictionHistory(user.id, year),
+      myPredictionHistory(user.id, [year, schoolYear]),
     ]);
+    /** 上一場考完了、而那幾份預測還在等答案。 */
+    const waitingForOfficial = schoolYearExamPassed
+      ? history.filter((h) => h.targetYear === schoolYear && h.actualGrade === null).length
+      : 0;
 
     const subjects = (GSAT_SUBJECT_CODES as readonly string[]).map((code) => ({
       code,
@@ -125,6 +154,31 @@ export default async function PredictPage({
             預測建立在<strong>你手上那幾張模考成績單</strong>上
           </p>
         </div>
+
+        {/*
+          1 月到 7 月之間，「現在的學年度」與「下一場學測」差一年。
+          不講清楚的話，剛考完的高三生會以為下面這一份是他那一場的預測。
+        */}
+        {schoolYearExamPassed && schoolYear !== year && (
+          <Note tone="warn">
+            <strong>
+              {schoolYear} 學年度的學測已經在
+              {schoolYearExamDate ? ` ${schoolYearExamDate.slice(0, 10)} ` : '今年 1 月 '}
+              考完了。
+            </strong>
+            下面這一份預測的目標是<strong>下一場</strong>（{year} 學年度）。
+            <br />
+            如果你剛考完：
+            <strong>去上面加一筆級分，「這是哪一種考試」選「真正的學測」</strong>
+            ——你之前存下來的預測會補上實際成績，而那是校準曲線唯一的資料來源。
+            <strong>系統不會自己去拿那個數字</strong>，成績單只在你手上。
+            {waitingForOfficial > 0 && (
+              <>
+                　你有 <b>{waitingForOfficial}</b> 份 {schoolYear} 學年度的預測正在等這一筆。
+              </>
+            )}
+          </Note>
+        )}
 
         <Note tone="info">
           這裡收的是<strong>模考成績單上印的級分</strong>，不是從你的作答記錄反推的。
@@ -212,8 +266,16 @@ export default async function PredictPage({
                     )}
                     <span className="yz-pred__n">
                       {p.basis.records} 次記錄
-                      {p.basis.monthsToExam !== null &&
-                        `　距學測約 ${Math.max(0, Math.round(p.basis.monthsToExam))} 個月`}
+                      {/*
+                        顯示的是**夾過的**剩餘時間，而考完了的那一場直接
+                        說「已經考完」。印帶號的那一個再 `Math.max(0, …)`
+                        會把「這場考完了」偽裝成「距學測約 0 個月」——
+                        讀起來像「就快考了」，方向剛好相反。
+                      */}
+                      {p.basis.examPassed
+                        ? '　這一場已經考完了'
+                        : p.basis.monthsAhead !== null &&
+                          `　距學測約 ${Math.round(p.basis.monthsAhead)} 個月`}
                     </span>
                   </div>
 
@@ -343,13 +405,20 @@ export default async function PredictPage({
                 <li key={h.id}>
                   <span className="yz-pred__histwhen">{h.predictedAt.slice(0, 10)}</span>
                   <span className="yz-pred__histsub">{h.subjectLabel}</span>
+                  {/* 兩個學年度混在同一條時間軸上，所以每一列要說得出
+                      它預測的是哪一場。 */}
+                  <span className="yz-pred__histsub">{h.targetYear} 學年度</span>
                   <span className="yz-pred__histrange">
                     {h.intervalLow} 至 {h.intervalHigh} 級分
                   </span>
                   <span className="yz-pred__histconf">信心 {pct(h.confidence)}</span>
                   <span className="yz-pred__histn">{h.records} 次記錄</span>
                   {h.actualGrade === null ? (
-                    <span className="yz-pred__histpend">等學測成績</span>
+                    <span className="yz-pred__histpend">
+                      {h.targetYear === schoolYear && schoolYearExamPassed
+                        ? '等你輸入正式級分'
+                        : '等學測成績'}
+                    </span>
                   ) : (
                     <span className={`yz-pred__histhit${h.hit ? '' : ' yz-warn'}`}>
                       實際 {h.actualGrade} 級分 · {h.hit ? '落在區間內' : '落在區間外'}
@@ -363,6 +432,13 @@ export default async function PredictPage({
               <strong>校準曲線</strong>——所有標著「信心 70%」的區間裡，實際落在區間內的比例
               是不是接近 70%。偏離就代表這套預測過度自信或過度保守，而那是老師端看得到的
               品質訊號。<strong>一個不追蹤自己準確度的預測系統只是在製造好看的數字。</strong>
+              <br />
+              而「對答案」這一步<strong>需要你回來做一件事</strong>：學測成績公布後，
+              把正式級分當成一筆「真正的學測」的成績記錄輸入進來。
+              <strong>系統沒有辦法自己去拿那個數字</strong>——它只在你的成績單上。
+              <br />
+              考完之後才存下來的預測<strong>不會被拿去對答案</strong>：那時候正式級分已經是
+              它的輸入，它必然命中，放進曲線等於自己給自己打分數。
             </p>
           </>
         )}

@@ -816,6 +816,86 @@ async function main() {
       assert.equal(aiCalls[0].body.references.length, 4, '只有他自己那四筆');
     });
 
+    await test('★ 打錯的數字改得動，不必刪掉重打（1.8% 打成 18%）', async () => {
+      // 這是這張表最常見的打錯法，而它會被 AI 老師拿去跟學生自己的
+      // 百分比比較——18% 與 1.8% 是一位前 20% 學生與一位頂標學生的差別。
+      // 只有「刪掉」的話，修一個小數點要重打校名、學年度、來源與日期
+      // 五個欄位，而其中四個原本就是對的。
+      const row = (
+        await prisma.admissionReference.findMany({
+          where: { userId: jiayi.id, kind: 'STAR_ROUND1' },
+        })
+      )[0];
+      const r = await callAs(
+        asUser(jiayi),
+        routes.ref.PATCH,
+        `/api/admission/refs/${row.id}?year=${YEAR}`,
+        {
+          method: 'PATCH',
+          params: { refId: row.id },
+          json: { raw: { percentile: '1.8' }, note: '小數點打錯了，回官方 PDF 對過' },
+        },
+      );
+      assert.equal(r.status, 200, r.text);
+      const after = await prisma.admissionReference.findFirst({ where: { id: row.id } });
+      assert.equal(after.value.percentile, 1.8);
+      // **其他欄位一個字都沒變**——那正是「改」與「刪掉重加」的差別。
+      assert.equal(after.year, row.year);
+      assert.equal(after.institutionName, row.institutionName);
+      assert.equal(after.kind, row.kind);
+      assert.equal(after.sourceKind, row.sourceKind);
+      // 回應是重算後的完整基礎，改完立刻看得到新的判斷。
+      assert.ok(Array.isArray(r.body.references));
+      const changed = r.body.references.find((x) => x.id === row.id);
+      assert.equal(changed.describe, '1.8%');
+
+      // 改回去，後面幾條測試吃的是原本那組數字。
+      await callAs(asUser(jiayi), routes.ref.PATCH, `/api/admission/refs/${row.id}?year=${YEAR}`, {
+        method: 'PATCH',
+        params: { refId: row.id },
+        json: { raw: { percentile: String(row.value.percentile) } },
+      });
+    });
+
+    await test('改的時候一樣擋得住 PR 值與未來的日期', async () => {
+      const row = (
+        await prisma.admissionReference.findMany({
+          where: { userId: jiayi.id, kind: 'STAR_ROUND1' },
+        })
+      )[0];
+      const bad = await callAs(
+        asUser(jiayi),
+        routes.ref.PATCH,
+        `/api/admission/refs/${row.id}?year=${YEAR}`,
+        { method: 'PATCH', params: { refId: row.id }, json: { raw: { percentile: '120' } } },
+      );
+      assert.equal(bad.status, 400);
+      assert.match(bad.body.error, /PR 值/);
+
+      const future = new Date(Date.now() + 40 * 86_400_000).toISOString().slice(0, 10);
+      const later = await callAs(
+        asUser(jiayi),
+        routes.ref.PATCH,
+        `/api/admission/refs/${row.id}?year=${YEAR}`,
+        { method: 'PATCH', params: { refId: row.id }, json: { lookedUpAt: future } },
+      );
+      assert.equal(later.status, 400);
+      assert.match(later.body.error, /未來/);
+    });
+
+    await test('學生改不動別人的資料（404，與「不存在」同一個回應）', async () => {
+      const mine = await prisma.admissionReference.findMany({ where: { userId: jiayi.id } });
+      const r = await callAs(
+        asUser(yier),
+        routes.ref.PATCH,
+        `/api/admission/refs/${mine[0].id}?year=${YEAR}`,
+        { method: 'PATCH', params: { refId: mine[0].id }, json: { raw: { percentile: '99' } } },
+      );
+      assert.equal(r.status, 404);
+      const still = await prisma.admissionReference.findFirst({ where: { id: mine[0].id } });
+      assert.notEqual(still.value.percentile, 99);
+    });
+
     await test('學生刪不掉別人的資料（404，與「不存在」同一個回應）', async () => {
       const mine = await prisma.admissionReference.findMany({ where: { userId: jiayi.id } });
       assert.ok(mine.length > 0);

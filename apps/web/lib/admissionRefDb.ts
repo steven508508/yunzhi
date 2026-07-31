@@ -273,6 +273,89 @@ export async function addReference(userId: string, input: ReferenceInput) {
   });
 }
 
+/**
+ * 改一筆已經輸入的資料：**數字、來源、查詢日期、備註。**
+ *
+ * # 為什麼需要這一支
+ *
+ * 因為在它之前，一筆打錯的資料只能刪掉再輸入一次。而這裡最常見的
+ * 打錯法是**小數點**：門檻 1.8% 打成 18%——那是一位頂標學生與一位
+ * 前 20% 學生的差別，而它會被 AI 老師拿去跟他自己的百分比比較。
+ * 「刪掉再加一次」要重打校名、學年度、來源與日期五個欄位，而其中
+ * 四個原本是對的。
+ *
+ * # 為什麼不能改校名、學年度與資料種類
+ *
+ * 因為那三個是**這筆資料是關於什麼的**。改掉它們等於把這一列搬到另一
+ * 個校系或另一個年度的趨勢裡去，而畫面上看起來只是改了一個欄位——
+ * 「近三年」那條規則是逐校系數年份的（`adviceBasis` 的 `targets`），
+ * 一次無聲的搬家會讓兩邊的年數同時算錯。
+ *
+ * 要改那三個就是刪掉重加，而那一次刪除是有意義的：它讓學生看見自己
+ * 換掉的是**哪一筆資料**，而不是修正它。
+ *
+ * **不驗證那個數字對不對**，理由與 `addReference()` 相同。
+ *
+ * @returns `null` 代表不是他的（或不存在）。
+ */
+export type ReferencePatch = {
+  raw?: Record<string, unknown>;
+  sourceKind?: string;
+  sourceRef?: string;
+  lookedUpAt?: string;
+  note?: string | null;
+};
+
+export async function updateReference(userId: string, refId: string, patch: ReferencePatch) {
+  const mine = await prisma.admissionReference.findFirst({
+    where: { id: refId, userId },
+    select: { id: true, kind: true },
+  });
+  if (!mine) return null;
+
+  const data: Record<string, unknown> = {};
+
+  if (patch.raw !== undefined) {
+    const built = buildRefValue(mine.kind, patch.raw) as {
+      ok: boolean;
+      value: unknown;
+      error: string;
+    };
+    if (!built.ok) throw new ReferenceError(built.error);
+    data.value = built.value;
+  }
+  if (patch.sourceKind !== undefined) {
+    if (!SOURCE_VALUES.has(patch.sourceKind)) {
+      throw new ReferenceError('請選一個來源。「聽同學說的」也是一個可以選的選項。');
+    }
+    data.sourceKind = patch.sourceKind;
+  }
+  if (patch.sourceRef !== undefined) {
+    const sourceRef = String(patch.sourceRef).trim();
+    if (!sourceRef) {
+      throw new ReferenceError(
+        '請填「從哪裡查到的」。一個沒有來源的數字，三個月後與一個有來源的長得一模一樣。',
+      );
+    }
+    data.sourceRef = sourceRef;
+  }
+  if (patch.lookedUpAt !== undefined) {
+    const lookedUpAt = new Date(patch.lookedUpAt);
+    if (Number.isNaN(lookedUpAt.getTime())) throw new ReferenceError('請填查到這筆資料的日期。');
+    // 與新增那一支同一條：未來的日期會讓這筆資料永遠是「剛剛才查的」，
+    // 永遠不會被提醒該重新確認。
+    if (lookedUpAt.getTime() > Date.now() + 86_400_000) {
+      throw new ReferenceError('查詢日期在未來。是不是年份打錯了？');
+    }
+    data.lookedUpAt = lookedUpAt;
+  }
+  if (patch.note !== undefined) data.note = patch.note;
+
+  if (Object.keys(data).length === 0) return { id: mine.id, changed: false };
+  await prisma.admissionReference.update({ where: { id: mine.id }, data });
+  return { id: mine.id, changed: true };
+}
+
 /** 刪一筆。回 false 代表不是他的（或不存在）——兩者的回應要一樣。 */
 export async function deleteReference(userId: string, refId: string) {
   const hit = await prisma.admissionReference.findFirst({

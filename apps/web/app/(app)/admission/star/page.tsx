@@ -27,6 +27,7 @@
 import Link from 'next/link';
 
 import { admissionYearOf, isStarCoordinator, starCoordinatorReport } from '@/lib/admissionDb';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { Denied, Note } from '@/components/Feedback';
 
@@ -36,6 +37,23 @@ export const dynamic = 'force-dynamic';
 
 export default async function StarSchoolPage() {
   return scopedPage(async (user) => {
+    // 角色判定走 `lib/nav.ts` 那一份唯一的對照表（見那個檔案的檔頭）。
+    if (!mayUse(user.systemRole, '/admission')) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="繁星全校檢視"
+            why={
+              <>
+                這一區是學生與老師的。孩子的成績與作業狀況在
+                <Link href="/guardian">孩子的狀況</Link>那一頁。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
     if (!isStarCoordinator(user)) {
       return (
         <main className="yz-panel">
@@ -43,9 +61,18 @@ export default async function StarSchoolPage() {
             what="繁星全校檢視"
             why={
               <>
-                這一頁一次就露出全校每一位學生的相對名次，所以只有校務管理員（繁星承辦）
-                進得來。<strong>系統管理員刻意也不在名單裡</strong>——那個角色的用途是維運
-                而不是業務，而規格書把在校成績百分比列為全校最敏感的資料。
+                這一頁一次就露出全校每一位學生的相對名次，所以只有
+                <strong>繁星承辦</strong>進得來——也就是校務管理員與系統管理員。
+                <br />
+                規格書原本把系統管理員排除在外，理由是「那個角色的用途是維運而不是業務」。
+                <strong>那條規則的前提是學校有分職</strong>（資訊組管系統、教務處管繁星，
+                兩個人），而這套系統的實際部署是單一機構自架、
+                <strong>全新安裝之後機器上只有一個系統管理員帳號</strong>——照著排除的話，
+                業主裝好系統、匯完在校百分比，然後被告知「你不是繁星承辦人」。
+                所以這裡收他，而<strong>每一次進入都寫一筆稽核記錄</strong>：
+                真正擋得住的是「看了留得下紀錄」，不是角色名單。
+                分職真的存在的機構要縮回去，就為教務處開一個校務管理員帳號、
+                改掉 <code>lib/admissionDb.ts</code> 的那一行——那是一個明確的決定。
                 {user.systemRole === 'STUDENT' && (
                   <>
                     　你自己在繁星的校內位置在<Link href="/admission">升學規劃</Link>那一頁。

@@ -30,7 +30,7 @@
  *   · 學生自己那一列的百分比由 `myAcademicRank()` 另外給，
  *     **與賽局結果走兩條路**。合成一條的話，遲早有人為了畫面方便
  *     把整份 `sim` 傳到前端去。
- *   · 全校檢視（`starCoordinatorReport`）只有校務管理員做得到，
+ *   · 全校檢視（`starCoordinatorReport`）只有繁星承辦做得到，
  *     而且每一次都寫稽核。
  *
  * # 繁星承辦人的權限掛在校務管理員身上，這是簡化
@@ -40,11 +40,14 @@
  * 動 schema、動權限矩陣、動稽核設計，所以第一階段用既有的六種角色
  * 承載：**繁星承辦 = 校務管理員**。
  *
- * 系統管理員刻意**不在**這個名單裡。規格書 §3 明說系統管理員在本模組
- * 沒有任何資料存取權，只有稽核記錄——因為 `AcademicRank` 是全校最
- * 敏感的一張表，而系統管理員這個角色的用途是維運而不是業務。
- * 這一條會讓只有系統管理員帳號的新機器暫時用不了繁星模擬，
- * 所以 403 的訊息要說得出原因（見 `app/api/admission/star/route.ts`）。
+ * 系統管理員**在**這個名單裡，而規格書 §3 說他不該在。那條規則的前提
+ * 是學校有分職，而這套系統的實際部署不是那樣——完整的理由寫在下面
+ * `STAR_COORDINATOR` 那個常數的註解上，那是它該待的地方。
+ *
+ * **畫面與 API 的文案必須跟著這個決定走。** 這裡以前寫「系統管理員刻意
+ * 不在名單裡」，而程式碼收他，於是 `/admission/star` 的 Denied、
+ * 兩支 API 的 403 與 e2e 的檔頭都跟著寫了一句系統做不到的隔離——
+ * 採購方會據此相信一件不存在的事，而那比少一個功能嚴重。
  */
 import { decodeCsv, matchColumns, parseCsv } from '@/lib/csv.mjs';
 import { nextStep, weakestFirst } from '@/lib/ability.mjs';
@@ -235,6 +238,79 @@ export async function addWish(userId: string, year: number, input: WishInput) {
   });
 }
 
+/**
+ * 改一個志願：志願序、校系、學群、興趣理由。
+ *
+ * # 「改一個打錯的字」與「系統替你排志願」是兩件事
+ *
+ * `WishList` 的檔頭寫著「系統不替他刪、不替他排」，而那個設計不動：
+ * 填了注定衝突的組合照樣存得進去，順序永遠由學生自己決定。這一支
+ * 做的是另一件事——**他自己要把第 3 志願提到第 1**，或者發現校名打錯。
+ *
+ * 在這一支之前，那兩件事都只能「刪掉再加一次」，而移動志願序還會先
+ * 撞上 409（第 1 志願已經有了）：他得先刪掉原本的第 1、再刪要移動的
+ * 那一個、再依序加回去。三次刪除只為了換一個順序，而中途離開畫面的話
+ * 他的志願就少了兩個——**這是一條會弄丟資料的路徑**。
+ *
+ * # 撞號時「對調」而不是「整串往後推」
+ *
+ * 整串推是**系統在替他排序**（他只動了一個，卻有五個跟著變），那正是
+ * 上面那句設計要避免的事。對調只動兩個，而且兩個都是他指名的：
+ * 「把第 3 提到第 1」的結果就是原本的第 1 去第 3。
+ *
+ * 中間值是因為 `[userId, year, channel, rank]` 有唯一鍵而它不是 deferrable
+ * ——A 與 B 直接互換的中途必然撞號。`TEMP_RANK` 取一個 API 不可能收到
+ * 的值（志願序上限 100），而整段在同一個交易裡，中途失敗會整個回滾。
+ *
+ * @returns `null` 代表不是他的（或不存在）——與 `deleteWish` 一樣，
+ *   「不存在」與「不是你的」不能分辨得出來。
+ */
+export type WishPatch = {
+  rank?: number;
+  institutionName?: string;
+  programName?: string | null;
+  starGroup?: number | null;
+  interestTag?: string | null;
+  note?: string | null;
+};
+
+const TEMP_RANK = 9999;
+
+export async function updateWish(userId: string, wishId: string, patch: WishPatch) {
+  const mine = await prisma.wish.findFirst({
+    where: { id: wishId, userId },
+    select: { id: true, year: true, channel: true, rank: true },
+  });
+  if (!mine) return null;
+
+  const nextRank = Number.isFinite(patch.rank as number) ? (patch.rank as number) : mine.rank;
+  const data = {
+    ...(patch.institutionName !== undefined ? { institutionName: patch.institutionName } : {}),
+    ...(patch.programName !== undefined ? { programName: patch.programName } : {}),
+    ...(patch.starGroup !== undefined ? { starGroup: patch.starGroup } : {}),
+    ...(patch.interestTag !== undefined ? { interestTag: patch.interestTag } : {}),
+    ...(patch.note !== undefined ? { note: patch.note } : {}),
+  };
+
+  const other =
+    nextRank === mine.rank
+      ? null
+      : await prisma.wish.findFirst({
+          where: { userId, year: mine.year, channel: mine.channel, rank: nextRank },
+          select: { id: true },
+        });
+
+  await prisma.$transaction(async (tx) => {
+    if (other) {
+      await tx.wish.update({ where: { id: mine.id }, data: { rank: TEMP_RANK } });
+      await tx.wish.update({ where: { id: other.id }, data: { rank: mine.rank } });
+    }
+    await tx.wish.update({ where: { id: mine.id }, data: { ...data, rank: nextRank } });
+  });
+
+  return { swappedWith: other?.id ?? null };
+}
+
 /** 刪一個志願。回 false 代表不是他的（或不存在）——兩者的回應要一樣。 */
 export async function deleteWish(userId: string, wishId: string) {
   const hit = await prisma.wish.findFirst({ where: { id: wishId, userId }, select: { id: true } });
@@ -421,7 +497,10 @@ async function runSchoolSimulation(year: number) {
  */
 export async function myStarPosition(userId: string, year: number) {
   const sim = await runSchoolSimulation(year);
-  return studentView(sim, userId) as ReturnType<typeof studentView>;
+  // 學年度要傳下去：第二輪的說明裡有一個**逐年公告的缺額數**，而它
+  // 不能被掛上一個它不屬於的年份（見 `lib/admission.mjs` 的
+  // `starVacancySentence`）。
+  return studentView(sim, userId, year) as ReturnType<typeof studentView>;
 }
 
 /**

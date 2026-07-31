@@ -182,7 +182,19 @@ export type AdviceBasis = {
   selfPercentileRef: ScoredReference | null;
   starWishes: unknown[];
   gaps: AdviceGap[];
+  /** 全部門檻資料涵蓋的年份（跨校系合計）。**不要拿它驗「近三年」。** */
   yearsWithThreshold: number[];
+  /** 逐校系的年份。「近三年」講的一定是其中一個校系。 */
+  targets: {
+    key: string;
+    institutionName: string;
+    programName: string | null;
+    starGroup: number | null;
+    label: string;
+    years: number[];
+  }[];
+  /** 任何**單一校系**最多有幾年。 */
+  maxYearsPerTarget: number;
   numbers: string[];
   hasOfficialDoc: boolean;
   hasSchoolOffice: boolean;

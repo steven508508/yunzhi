@@ -57,6 +57,9 @@
  * 「若有一位百分比更好的同學改推這裡會怎樣」。兩個方向都要說——
  * 只說對自己有利的那一邊，那叫推銷不叫輔導。
  */
+// 相對路徑而不是 `@/lib/...`：這個檔案要能被 `node --test` 直接載入。
+// 同一個理由見 lib/admissionSources.mjs 檔尾的說明。
+import { starVacancySentence } from './admission.mjs';
 
 // ═════════════════════════════════════════════════════════════════
 // §1 制度常數
@@ -283,13 +286,24 @@ export function simulate({ participants = [], quota = PER_POSITION_QUOTA, now = 
  *
  * 缺額取決於全國有多少人放棄或未達標，沒有直接資料。把第二輪當成零
  * 是系統性的悲觀偏誤——它會讓推薦序 2 的學生誤以為自己完全沒機會，
- * 而 115 學年度繁星的缺額有 922 名，第二輪一點都不罕見。
+ * 而繁星的缺額多到值得講出一個數字，第二輪一點都不罕見。
+ *
+ * # 為什麼那個數字要從 `admission.mjs` 拿，而不是寫在這一行
+ *
+ * 因為它是**逐年公告的統計量**，而這一句話掛在每一位學生的每一個繁星
+ * 位置底下。寫死在這裡的後果不是「數字舊了」——是那句話會**把舊數字
+ * 掛上新年份**（或者根本不提年份），而讀者分不出來。集中在
+ * `STAR_VACANCY_FACT` 之後，每年改一處，全站跟著對。
+ *
+ * @param {number} [year] 現在在談的學年度。
  */
-const SECOND_ROUND_NOTE =
-  '若第一輪沒有錄取，或你是推薦序 2，該校系有缺額時還有第二輪，' +
-  '第二輪不受「一校一名」限制。**本系統不估第二輪的機率**——' +
-  '缺額取決於全國有多少人放棄，沒有這份資料。但它絕對不是零：' +
-  '115 學年度繁星全國缺額 922 名。';
+function secondRoundNoteFor(year) {
+  return (
+    '若第一輪沒有錄取，或你是推薦序 2，該校系有缺額時還有第二輪，' +
+    '第二輪不受「一校一名」限制。**本系統不估第二輪的機率**——' +
+    `缺額取決於全國有多少人放棄，沒有這份資料。但它絕對不是零：${starVacancySentence(year)}。`
+  );
+}
 
 /**
  * 把全校模擬切出一位學生看得到的那一片。
@@ -297,9 +311,17 @@ const SECOND_ROUND_NOTE =
  * **輸出裡不會有任何其他學生的 id、姓名、百分比或人數。**
  * 這不是靠呼叫端記得過濾，是靠這個函式只組得出這些欄位——
  * 它從 `sim` 讀進去的每一項都在下面明確列出來，多一項就要多寫一行。
+ *
+ * @param {ReturnType<typeof simulate>} sim
+ * @param {string} userId
+ * @param {number} [year] 現在在談的學年度。只用在第二輪那句說明裡的
+ *   缺額數上——沒傳的話那句話會退回那個數字自己的年份，而不是假裝
+ *   它是今年的。
  */
-export function studentView(sim, userId) {
+export function studentView(sim, userId, year = undefined) {
   const out = [];
+  // 一次算好。它與位置無關，而每一個位置都要帶著同一句話。
+  const secondRoundNote = secondRoundNoteFor(year);
 
   for (const pos of sim.positions) {
     const meIndex = pos.entries.findIndex((e) => e.userId === userId);
@@ -322,7 +344,7 @@ export function studentView(sim, userId) {
       tied: me.tied,
       firstRound: me.firstRound,
       secondRound: me.secondRound,
-      secondRoundNote: SECOND_ROUND_NOTE,
+      secondRoundNote,
       sensitivity: sensitivityOf(me.order, pos.quota, hidden),
       /**
        * 結果端的跨學群限制。**只講制度，不講校內事實。**
@@ -473,7 +495,7 @@ export function coordinatorReport(sim, { allGroups = [1, 2, 3, 4, 5, 6, 7, 8] } 
 
 /**
  * 兩層競爭的說明。**這段文字要跟著資料一起走**，理由與
- * `SECOND_ROUND_NOTE` 相同：它是規則的一部分，不是版面的一部分。
+ * `secondRoundNoteFor()` 相同：它是規則的一部分，不是版面的一部分。
  */
 export const TWO_LAYER_NOTE =
   '繁星有兩層競爭，而它們的資料來源完全不同。**第一層是校內**：' +

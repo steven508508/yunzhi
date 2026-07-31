@@ -32,7 +32,7 @@ import {
   GRADE_SOURCES,
   PredictError,
   addGradeRecord,
-  admissionYearOf,
+  predictTargetOf,
   predictionsFor,
 } from '@/lib/predictDb';
 import { scopedRoute } from '@/lib/route';
@@ -59,7 +59,10 @@ export const GET = scopedRoute(async (req: NextRequest, { user }) => {
     return NextResponse.json({ error: STUDENT_ONLY }, { status: 403 });
   }
   const url = new URL(req.url);
-  const year = Number(url.searchParams.get('year')) || admissionYearOf();
+  // 預測的目標是**下一場還沒考的學測**（見 lib/predictDb.ts 的
+  // predictTargetOf）。用學年度的話，1 月到 7 月之間這一支回的是對著
+  // 一場已經考完的考試算出來的區間。
+  const year = Number(url.searchParams.get('year')) || predictTargetOf().targetYear;
   const confidence = Number(url.searchParams.get('confidence'));
   return NextResponse.json(
     await predictionsFor(user.id, year, Number.isFinite(confidence) ? confidence : undefined),
@@ -100,9 +103,11 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
   }
 
   let backfilled = 0;
+  let afterExam = 0;
   try {
     const out = await addGradeRecord(user.id, parsed.data, user);
     backfilled = out.backfilled;
+    afterExam = out.afterExam;
   } catch (e) {
     if (e instanceof PredictError) {
       return NextResponse.json({ error: e.message }, { status: e.status });
@@ -110,7 +115,7 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
     throw e;
   }
 
-  const year = admissionYearOf();
+  const year = predictTargetOf().targetYear;
   return NextResponse.json({
     ...(await predictionsFor(user.id, year)),
     /**
@@ -119,5 +124,11 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
      * 自己剛剛做了一件對整個機構有用的事。
      */
     backfilled,
+    /**
+     * 考試之後才存下來的預測有幾份。**這幾份刻意不回填**——它們把正式
+     * 成績當成輸入，必然命中，進了校準曲線就等於在自己給自己打分數。
+     * 數字要回給畫面，否則學生會以為系統漏掉了幾份。
+     */
+    afterExam,
   });
 });

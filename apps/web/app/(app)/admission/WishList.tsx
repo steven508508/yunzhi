@@ -42,9 +42,125 @@ const CHANNEL_LABEL: Record<string, string> = Object.fromEntries(
  *
  * 填了注定衝突的組合照樣存得進去，後果由上方的「規劃的後果」說明。
  * 理由見 `app/api/admission/wishes/route.ts`。
+ *
+ * # 「改」不牴觸上面那一條
+ *
+ * 上面那句話說的是**系統**不替他排。這裡的「改」是**他自己**把第 3
+ * 志願提到第 1，或是把打錯的校名改掉——那兩件事以前只能「刪掉再加
+ * 一次」，而移動志願序還會先撞上 409（第 1 志願已經有了）：他得先刪掉
+ * 原本的第 1、再刪要移動的那一個、再依序加回去。三次刪除只為了換一個
+ * 順序，中途離開畫面的話志願就少了兩個。
+ *
+ * 撞號時**只對調那兩個**，不整串往後推。整串推才是系統在替他排序
+ * （他動一個，五個跟著變）。
  */
+/**
+ * 一個志願的修改表單。志願序、校系、學群、興趣理由。
+ *
+ * **管道不在裡面**：改管道等於換一件事（繁星要學群、個申至多 6 個、
+ * 繁星錄取會封鎖個申），那要刪掉重加，而那一次刪除讓學生看見自己
+ * 在做一個換管道的決定。
+ */
+function EditWish({ year, row, onDone }: { year: number; row: Wish; onDone: () => void }) {
+  const router = useRouter();
+  const [rank, setRank] = useState(String(row.rank));
+  const [institutionName, setInstitutionName] = useState(row.institutionName);
+  const [programName, setProgramName] = useState(row.programName ?? '');
+  const [starGroup, setStarGroup] = useState(String(row.starGroup ?? 1));
+  const [interestTag, setInterestTag] = useState(row.interestTag ?? '');
+
+  return (
+    <div className="yz-card" style={{ marginTop: 10 }}>
+      <Form
+        onSubmit={async () => {
+          await submitJson(`/api/admission/wishes/${row.id}?year=${year}`, {
+            method: 'PATCH',
+            json: {
+              year,
+              rank: Number(rank),
+              institutionName,
+              programName: programName || null,
+              starGroup: row.channel === 'STAR' ? Number(starGroup) : null,
+              interestTag: interestTag || null,
+            },
+          });
+          onDone();
+          router.refresh();
+        }}
+      >
+        {({ busy }) => (
+          <>
+            <h3 className="yz-card__title">改這一個志願（{CHANNEL_LABEL[row.channel]}）</h3>
+            <p className="yz-hint">
+              管道<strong>不在這裡改</strong>——換管道是換一件事（規則完全不同），
+              那要刪掉重加。
+            </p>
+            <div className="yz-row">
+              <TextField
+                label="志願序"
+                type="number"
+                min={1}
+                max={100}
+                required
+                value={rank}
+                onChange={(e) => setRank(e.currentTarget.value)}
+                // `hint` 是純字串，不走 `<Emph>`——所以這裡不能寫 `**`，
+                // 那會在畫面上變成兩顆星號（升學這一區踩過一次）。
+                hint="這個志願序已經有別的志願的話，兩個直接對調。系統不會把整串往後推——那是它在替你排序。"
+                autoFocus
+              />
+              <TextField
+                label="大學"
+                required
+                value={institutionName}
+                onChange={(e) => setInstitutionName(e.currentTarget.value)}
+              />
+            </div>
+            <div className="yz-row">
+              <TextField
+                label="系（可以空著）"
+                value={programName}
+                onChange={(e) => setProgramName(e.currentTarget.value)}
+              />
+              {row.channel === 'STAR' && (
+                <SelectField
+                  label="學群"
+                  value={starGroup}
+                  onChange={(e) => setStarGroup(e.currentTarget.value)}
+                  hint="沒有學群就算不出你在校內的位置。"
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8].map((g) => (
+                    <option key={g} value={g}>
+                      第 {g} 類學群{g === 8 ? '（醫學、牙醫）' : ''}
+                    </option>
+                  ))}
+                </SelectField>
+              )}
+            </div>
+            <TextField
+              label="為什麼想讀這個"
+              value={interestTag}
+              onChange={(e) => setInterestTag(e.currentTarget.value)}
+            />
+            <div className="yz-actions">
+              <span className="yz-actions__spacer" />
+              <Button variant="quiet" onClick={onDone} disabled={busy}>
+                取消
+              </Button>
+              <Button type="submit" variant="primary" busy={busy} busyLabel="存起來…">
+                存起來
+              </Button>
+            </div>
+          </>
+        )}
+      </Form>
+    </div>
+  );
+}
+
 export default function WishList({ year, wishes }: { year: number; wishes: Wish[] }) {
   const router = useRouter();
+  const [editing, setEditing] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [channel, setChannel] = useState('STAR');
   const [rank, setRank] = useState('1');
@@ -84,6 +200,14 @@ export default function WishList({ year, wishes }: { year: number; wishes: Wish[
                   </span>
                   {w.interestTag && <span className="yz-adm__wtag">{w.interestTag}</span>}
                   <span className="yz-rowacts">
+                    {/* 「改」在前面：換順序與改校名都比刪掉常見得多，
+                        而它們以前都得走一趟刪除。 */}
+                    <Button
+                      variant="quiet"
+                      onClick={() => setEditing(editing === w.id ? null : w.id)}
+                    >
+                      {editing === w.id ? '不改了' : '改'}
+                    </Button>
                     <Button
                       variant="quiet"
                       busy={del.busy}
@@ -100,6 +224,9 @@ export default function WishList({ year, wishes }: { year: number; wishes: Wish[
                       刪掉
                     </Button>
                   </span>
+                  {editing === w.id && (
+                    <EditWish year={year} row={w} onDone={() => setEditing(null)} />
+                  )}
                 </li>
               ))}
             </ul>

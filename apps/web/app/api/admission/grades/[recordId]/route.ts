@@ -16,7 +16,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 
-import { admissionYearOf, deleteGradeRecord, predictionsFor } from '@/lib/predictDb';
+import { deleteGradeRecord, predictTargetOf, predictionsFor } from '@/lib/predictDb';
 import { scopedRoute } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
@@ -29,7 +29,8 @@ export const DELETE = scopedRoute<{ recordId: string }>(
     const ok = await deleteGradeRecord(user.id, params.recordId);
     if (!ok) return NextResponse.json({ error: '找不到這一筆級分記錄' }, { status: 404 });
 
-    const year = Number(new URL(req.url).searchParams.get('year')) || admissionYearOf();
+    // 與 grades/route.ts 同一條：預測的目標是下一場還沒考的學測。
+    const year = Number(new URL(req.url).searchParams.get('year')) || predictTargetOf().targetYear;
     return NextResponse.json(await predictionsFor(user.id, year));
   },
 );

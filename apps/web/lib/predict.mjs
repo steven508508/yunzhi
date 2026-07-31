@@ -328,6 +328,53 @@ export function gsatDateOf(year) {
   return new Date(Date.UTC(1911 + y + 1, 0, 20));
 }
 
+/**
+ * **還沒考的那一場**學測是哪一個學年度的。
+ *
+ * # 為什麼不能用 `admissionYearOf()` 當預測的目標
+ *
+ * 因為那一支回的是**學年度**（自 8 月起算），而學測在 1 月——所以
+ * 每年 1/20 到 7/31 之間，`admissionYearOf()` 指的那一場學測**已經
+ * 考完了**。半年的長度，不是一個邊界日的差一天。
+ *
+ * 在那個窗裡拿它當目標的後果不是「日期顯示錯了」：
+ *
+ *   · 剩餘時間變成負數，於是進步幅度被**往回外插**（一位正在進步的
+ *     學生，預測比他最近一次成績還低），
+ *   · 同時 `drift` 與 `skew` 歸零，區間又窄又低，
+ *   · 而畫面上只寫「距學測約 0 個月」。
+ *
+ * 兩件事該分開：**志願、參考資料、繁星名單屬於「學年度」**（那是簡章
+ * 的單位，`admissionYearOf()` 是對的）；**級分預測的目標是「下一場
+ * 考試」**，而那是這一支。
+ *
+ * 高三生在 2 月看到的不該是「114 學測預測」——他已經考完了，該做的是
+ * 把正式級分輸入進來（`predictGrade()` 會把考完的那一場標成
+ * `examPassed`，畫面據此改寫）。高二生在 7 月看到的就該是 115。
+ *
+ * @param {Date|string} [now]
+ * @returns {number} 民國學年度
+ */
+export function upcomingGsatYear(now = new Date()) {
+  const d = now instanceof Date ? now : new Date(now);
+  const t = d.getTime();
+  // 從今年 1 月的那一場開始往後找第一場還沒考的。用 `gsatDateOf` 而不是
+  // 自己再算一次月份，是為了讓「學測是哪一天」永遠只有一份定義——
+  // 兩份的話，改了近似日期只會改到其中一邊。
+  const thisJanYear = d.getUTCFullYear() - 1911 - 1;
+  const thisJan = gsatDateOf(thisJanYear);
+  if (thisJan && t <= thisJan.getTime()) return thisJanYear;
+  return thisJanYear + 1;
+}
+
+/** 這一場學測考完了嗎。`year` 不合法時回 false——不知道就不要宣稱。 */
+export function gsatPassed(year, now = new Date()) {
+  const at = gsatDateOf(year);
+  if (!at) return false;
+  const d = now instanceof Date ? now : new Date(now);
+  return d.getTime() > at.getTime();
+}
+
 // ═════════════════════════════════════════════════════════════════
 // §4 一科的預測
 // ═════════════════════════════════════════════════════════════════
@@ -434,7 +481,31 @@ export function predictGrade({
   const weightedMean = rows.reduce((acc, r, i) => acc + weights[i] * r.grade, 0) / sumW;
 
   const monthsToExam = target ? (target.getTime() - anchorMs) / DAY_MS / DAYS_PER_MONTH : 0;
+  /**
+   * 夾成非負的剩餘時間。**下面每一處都用這一個，不要用帶號的那一個。**
+   *
+   * 目標日落在資料錨點**之前**時（考完了才來看、或最近一次模考在
+   * 考試日之後），帶號的月數是負的，而三個地方會各自往錯的方向跑：
+   *
+   *   · `improvement` 把斜率乘上負月數 → 把一位正在進步的學生**往回
+   *     外插**，預測比他最近一次成績低。
+   *   · `varDrift` 歸零 → 區間變窄。
+   *   · `skew` 歸零 → 右尾也沒了。
+   *
+   * 三個加起來的方向一致：更確定、而且更低。那是這一段最不該有的
+   * 組合，因為它讀起來像一個很有把握的壞消息。
+   *
+   * 夾成 0 的意思是「對一個已經過去的時點，最好的估計就是加權平均
+   * 本身」——加權平均估的正是錨點那個時刻的水準。反向外插不是更保守
+   * 的做法，它只是把同一條線往另一邊延長，而那條線的斜率本來就估不準。
+   */
   const monthsAhead = Math.max(0, monthsToExam);
+  /**
+   * 這一場考完了嗎。比的是**今天**與考試日，不是錨點與考試日——
+   * 「他最近一次模考在考試日之後」與「這場學測已經考完」是兩件事，
+   * 而只有後者該讓畫面改口。
+   */
+  const examPassed = target ? nowAt.getTime() > target.getTime() : false;
 
   // ── 樣本不足：標成 thin，**不給區間** ─────────────────────
   //
@@ -460,6 +531,8 @@ export function predictGrade({
         weightedMean: round(weightedMean, 3),
         anchorDate: anchorDate.toISOString(),
         monthsToExam: round(monthsToExam, 2),
+        monthsAhead: round(monthsAhead, 2),
+        examPassed,
         sources: sourceMix(rows, weights, sumW),
       },
       notes: [],
@@ -502,7 +575,8 @@ export function predictGrade({
     PRIOR_DRIFT_PER_MONTH *
     (Number.isFinite(abilityTrend) ? clamp(1 + Number(abilityTrend), 0.5, 1.5) : 1);
   const perMonth = slope === null ? prior : k * slope + (1 - k) * prior;
-  const improvement = clamp(perMonth * monthsToExam, -MAX_IMPROVEMENT, MAX_IMPROVEMENT);
+  // **夾過的月數。** 用帶號的那一個等於把斜率往回外插，見 `monthsAhead`。
+  const improvement = clamp(perMonth * monthsAhead, -MAX_IMPROVEMENT, MAX_IMPROVEMENT);
 
   const center = clamp(weightedMean + improvement, GRADE_MIN, GRADE_MAX);
 
@@ -510,6 +584,18 @@ export function predictGrade({
   const interval = intervalOf(distribution, confidence);
 
   const notes = [];
+  if (examPassed) {
+    // 這一句要排在最前面。少了它，一位二月的高三生會看到一個沒有
+    // 剩餘時間、沒有右尾的區間，而畫面上唯一的線索是「距學測約 0 個月」
+    // ——讀起來像「就快考了」，實際上是「已經考完了」。
+    notes.push(
+      `${targetYear ? `${targetYear} 學年度的` : '這一場'}學測**已經考完了**` +
+        `（${target.toISOString().slice(0, 10)} 前後）。` +
+        '所以下面這個區間是你**目前水準**的估計，不是對一場還沒發生的考試的預測——' +
+        '剩餘時間那一項是 0。真正的級分在成績單上，' +
+        '把它輸入進來（來源選「真正的學測」），你之前存下來的預測就會補上實際成績。',
+    );
+  }
   if (monthsAhead >= 3) {
     notes.push(
       `距學測還有約 ${Math.round(monthsAhead)} 個月，所以這個區間比較寬，` +
@@ -553,7 +639,12 @@ export function predictGrade({
       center: round(center, 3),
       weightedMean: round(weightedMean, 3),
       anchorDate: anchorDate.toISOString(),
+      /** 帶號。負的代表目標日在資料錨點之前——**稽核要看得出這件事**。 */
       monthsToExam: round(monthsToExam, 2),
+      /** 真正進到公式裡的那一個（夾成非負）。畫面顯示的也是它。 */
+      monthsAhead: round(monthsAhead, 2),
+      /** 這一場學測已經考完了。畫面要據此改寫，不能只顯示「約 0 個月」。 */
+      examPassed,
       improvement: round(improvement, 3),
       slopePerMonth: slope === null ? null : round(slope, 4),
       slopeWeight: round(k, 3),

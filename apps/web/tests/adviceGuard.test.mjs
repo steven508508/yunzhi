@@ -36,12 +36,14 @@ import { test } from 'node:test';
 import {
   INSTITUTION_NUMBERS,
   adviceFacts,
+  cnNumber,
   checkAdvice,
   describeAdviceViolations,
   normalizeForAdvice,
   safeAdvice,
 } from '../lib/adviceGuard.mjs';
 import { adviceBasis } from '../lib/admissionRef.mjs';
+import { STAR_VACANCY_FACT } from '../lib/admission.mjs';
 
 // ─────────────────────────────────────────────────────────────────
 // 事實：一位學生查到三年的門檻（18%、15%、16%），自己是 12%
@@ -231,7 +233,98 @@ test('制度常數不必對回參考資料，但白名單很小而且逐項說�
     facts,
   );
   assert.equal(ok.ok, true, describeAdviceViolations(ok.violations));
-  assert.deepEqual(INSTITUTION_NUMBERS, ['1', '2', '3', '4', '5', '6', '7', '8', '922']);
+  // **單位是白名單的一部分。** 1 至 8「名」是名額與推薦序，1 至 8「%」
+  // 是繁星頂標學生的在校百分比——同一組數字，兩種完全不同的東西。
+  assert.deepEqual(Object.keys(INSTITUTION_NUMBERS).sort(), ['人', '名']);
+  assert.deepEqual(INSTITUTION_NUMBERS['名'], [
+    '1',
+    '2',
+    '3',
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    String(STAR_VACANCY_FACT.count),
+  ]);
+  // 那個缺額數字不可以在這裡再寫一次：白名單與說明文字寫死同一個統計值
+  // 兩次的話，改了一邊另一邊會繼續放行舊的那個。
+  assert.equal(INSTITUTION_NUMBERS['名'].includes('922'), true);
+  for (const unit of Object.keys(INSTITUTION_NUMBERS)) {
+    assert.ok(!['%', '級分'].includes(unit), `${unit} 不可以進制度常數的白名單`);
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════
+// §2.5 白名單的單位：1 至 8 同時是最危險的百分比區間
+//
+// 繁星頂標學生的在校百分比與各科的門檻級分**大量落在 1 至 8**，
+// 而白名單放進 1 至 8 的理由是「學群編號、名額 1 至 3 名」。
+// 單位被丟掉的話，一位什麼都還沒輸入的學生照樣拿得到一段有具體
+// 百分比的建議——而那兩個數字都是編的。
+// ═════════════════════════════════════════════════════════════════
+
+test('★ 什麼都還沒輸入的學生，拿不到一段有具體百分比的建議', () => {
+  const { facts } = emptyFacts();
+  assert.equal(facts.thresholdCount, 0);
+
+  const r = blocked(
+    '臺灣大學第 2 類去年第一輪最後一名錄取者的在校百分比大約是 5%，' +
+      '而你自己是 3%，你在門檻之上。',
+    facts,
+  );
+  assert.ok(
+    r.violations.some((v) => v.code === 'UNSOURCED_NUMBER'),
+    `期望 UNSOURCED_NUMBER，實際是 ${r.violations.map((v) => v.code).join('、')}`,
+  );
+  assert.equal(r.fabricated, true);
+});
+
+test('★ 個位數的門檻級分也對不回來源', () => {
+  const { facts } = emptyFacts();
+  const r = blocked('這個校系的門檻是數學 A 8 級分，你應該過得了。', facts);
+  assert.ok(r.violations.some((v) => v.code === 'UNSOURCED_NUMBER'));
+});
+
+test('學生自己查到的個位數百分比可以出現（不可以矯枉過正）', () => {
+  const basis = adviceBasis({
+    year: 115,
+    officialPercentile: 3,
+    wishes: [{ channel: 'STAR', institutionName: '臺灣大學', starGroup: 2, rank: 1 }],
+    references: [
+      ref({ year: 114, value: { percentile: 5 }, describe: '5%', staleAfterYear: 115 }),
+    ],
+    now: new Date('2026-03-10T00:00:00.000Z'),
+  });
+  const r = checkAdvice(
+    '你查到 114 學年度最後一名錄取者是 5%，而你自己是 3%。' +
+      '這是每年僅一個極值資料點的估計，年際波動可能很大。',
+    adviceFacts(basis),
+  );
+  assert.equal(r.ok, true, describeAdviceViolations(r.violations));
+});
+
+test('沒有任何資料時，一段不帶數字的建議照樣通得過', () => {
+  const { facts } = emptyFacts();
+  const r = checkAdvice(
+    '你還沒有輸入任何一筆錄取標準，所以現在沒有辦法說你落在哪裡。' +
+      '先去委員會的簡章頁把去年的門檻查出來，一年一筆輸入進來。',
+    facts,
+  );
+  assert.equal(r.ok, true, describeAdviceViolations(r.violations));
+});
+
+test('★ 完全沒有資料時，引用百分比也要交代資料基礎', () => {
+  // 舊的條件是「有門檻資料時才要求」，於是資料**最薄**的那一次
+  // 反而不必寫。
+  const { facts } = emptyFacts();
+  const r = checkAdvice('你自己的在校百分比是 12%，這個位置可以考慮。', {
+    ...facts,
+    numbers: [...facts.numbers, '12'],
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.violations.some((v) => v.code === 'NO_UNCERTAINTY'));
+  assert.equal(r.fabricated, false, '這一條是體例，不是假精確度');
 });
 
 test('自己編的來源會被擋，但「去哪裡查」的建議不會', () => {
@@ -272,6 +365,168 @@ test('真的有三年資料時，「近三年」是可以說的', () => {
     facts,
   );
   assert.equal(ok.ok, true, describeAdviceViolations(ok.violations));
+});
+
+test('★ 三個校系各一年，湊不出「近三年」', () => {
+  // 三筆資料、三個不同的年份，但**沒有任何一個校系看得出趨勢**。
+  // 合起來數年份的話，這一段會通過閘門——而臺大只有一年。
+  const basis = adviceBasis({
+    year: 115,
+    officialPercentile: 12,
+    wishes: [{ channel: 'STAR', institutionName: '臺灣大學', starGroup: 2, rank: 1 }],
+    references: [
+      ref({ year: 114, institutionName: '臺灣大學', value: { percentile: 18 }, describe: '18%', staleAfterYear: 115 }),
+      ref({ year: 113, institutionName: '清華大學', value: { percentile: 15 }, describe: '15%', staleAfterYear: 115 }),
+      ref({ year: 112, institutionName: '成功大學', value: { percentile: 16 }, describe: '16%', staleAfterYear: 115 }),
+    ],
+    now: new Date('2026-03-10T00:00:00.000Z'),
+  });
+  const facts = adviceFacts(basis);
+  assert.deepEqual(basis.yearsWithThreshold, [114, 113, 112], '跨校系合計仍然是三個年份');
+  assert.equal(basis.maxYearsPerTarget, 1, '但沒有任何一個校系超過一年');
+  assert.equal(facts.yearCount, 1);
+
+  const r = blocked(`你查到臺灣大學第 2 類近三年的門檻相當穩定。${BASIS_TAIL}`, facts);
+  assert.ok(r.violations.some((v) => v.code === 'FAKE_YEAR_SPAN'));
+
+  // 同一個錯誤還會關掉最有用的那句提示：三個校系各缺兩年，一句都沒出現。
+  const oneYear = basis.gaps.filter((g) => g.code === 'ONE_YEAR_ONLY');
+  assert.equal(oneYear.length, 3, '三個校系都該被提醒去補前兩年');
+  assert.ok(oneYear.some((g) => /臺灣大學/.test(g.text)));
+  assert.ok(oneYear.some((g) => /清華大學/.test(g.text)));
+});
+
+test('同一個校系真的有三年時，「近三年」照樣可以說', () => {
+  // 反例：上面那條規則不可以把「同一個校系三年」也擋掉。
+  const { facts } = richFacts();
+  assert.equal(facts.yearCount, 3, '三筆都是臺灣大學第 2 類');
+  const ok = checkAdvice(
+    `臺灣大學第 2 類近三年的門檻是 18%、15%、16%，看起來相當穩定。${BASIS_TAIL}`,
+    facts,
+  );
+  assert.equal(ok.ok, true, describeAdviceViolations(ok.violations));
+});
+
+test('同一所大學的兩個系分開算年份', () => {
+  const basis = adviceBasis({
+    year: 115,
+    references: [
+      ref({ year: 114, programName: '電機工程學系', value: { percentile: 3 }, describe: '3%', staleAfterYear: 115 }),
+      ref({ year: 113, programName: '財務金融學系', value: { percentile: 8 }, describe: '8%', staleAfterYear: 115 }),
+    ],
+    wishes: [],
+  });
+  assert.equal(basis.maxYearsPerTarget, 1, '兩個系是兩條趨勢，不是同一條的兩年');
+  assert.equal(basis.targets.length, 2);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// §2.9 讓步句：「不是 X，但 Y」
+//
+// 這一組是這個檔案最容易被繞過的一種句型，而且**它正是提示詞重試時
+// 給模型的指令最容易誘發的**：我們叫它「不要說『一定』『穩』『有把握』」，
+// 它會先照做否定一次，再把結論接在「但」後面。
+//
+// 舊的判斷是「命中點前面八個字裡有沒有否定詞」，於是一句讓步句
+// 同時把三條規則關掉——三條各自都命中了，三條都被跳過。
+// ═════════════════════════════════════════════════════════════════
+
+const CONCESSIVE = [
+  ['不是保證，但機會很大', '這不是保證，但你的機會很大。', 'ODDS_PREDICTION'],
+  ['不敢說一定，但八成會上', '不敢說一定，但你八成會上。', 'ODDS_IN_WORDS'],
+  ['沒有把握，可是你穩上', '我沒有把握，可是這個志願你穩上。', 'CERTAINTY'],
+  ['不確定，然而機率很高', '我不確定，然而你的錄取機率很高。', 'ODDS_PREDICTION'],
+];
+
+for (const [name, text, code] of CONCESSIVE) {
+  test(`★ 讓步句擋得住：${name}`, () => {
+    const { facts } = richFacts();
+    const r = blocked(`${text}${BASIS_TAIL}`, facts);
+    assert.ok(
+      r.violations.some((v) => v.code === code),
+      `期望命中 ${code}，實際是 ${r.violations.map((v) => v.code).join('、')}`,
+    );
+    assert.equal(r.fabricated, true);
+  });
+}
+
+const NEGATION_MUST_PASS = [
+  ['否定詞在轉折之後', '這個志願我不敢說一定會上，也不保證。你手上是三年的極值。'],
+  ['轉折之後又一個否定', '我不保證會上，但也不敢說你穩上——沒有人算得出那件事。'],
+  ['「不過」是連接詞不是否定', '你查到的是最後一名錄取者的百分比，不過那只有一個資料點，年際波動可能很大。'],
+  ['誠實地說沒有把握（轉折在前）', '雖然你的百分比比門檻好，但我沒有把握，也不會給你一個數字。年際波動可能很大。'],
+];
+
+for (const [name, text] of NEGATION_MUST_PASS) {
+  test(`不可以誤擋（否定）：${name}`, () => {
+    const r = checkAdvice(text, richFacts().facts);
+    assert.equal(r.ok, true, describeAdviceViolations(r.violations));
+  });
+}
+
+// ═════════════════════════════════════════════════════════════════
+// §2.95 中文數字寫的機率與門檻
+//
+// 「百分之七十」「十分之七」「門檻是十八」對三條要 `\d` 的規則
+// **同時是透明的**，而它們是模型被擋掉阿拉伯數字之後最自然的下一種
+// 寫法。正規化那一層仍然不折中文數字（折了就對不上成數那一條），
+// 所以要在規則這一層讀。
+// ═════════════════════════════════════════════════════════════════
+
+const CN_FAKE = [
+  ['百分之七十的可能性', '你錄取的可能性是百分之七十。', 'ODDS_PREDICTION'],
+  ['百分之六十八的機率', '你通過第一輪的機率是百分之六十八。', 'ODDS_PREDICTION'],
+  ['十分之七', '這個志願十分之七會上。', 'UNSOURCED_NUMBER'],
+  // 二十一對不回這位學生查到的 18／15／16，而它一個 `\d` 都沒有。
+  ['中文寫的門檻', '這個校系的門檻是二十一，你是十二，你在門檻之上。', 'UNSOURCED_NUMBER'],
+  ['中文寫的級分門檻', '這個校系的門檻是十四級分。', 'UNSOURCED_NUMBER'],
+  ['英文的程度詞', 'Your chance of getting in is very high.', 'ODDS_PREDICTION'],
+  ['勝率', '你的勝率很高。', 'ODDS_PREDICTION'],
+  ['希望很大', '你上這個校系的希望很大。', 'ODDS_PREDICTION'],
+];
+
+for (const [name, text, code] of CN_FAKE) {
+  test(`★ 中文數字與漏掉的詞：${name}`, () => {
+    const { facts } = richFacts();
+    const r = blocked(`${text}${BASIS_TAIL}`, facts);
+    assert.ok(
+      r.violations.some((v) => v.code === code),
+      `期望命中 ${code}，實際是 ${r.violations.map((v) => v.code).join('、')}`,
+    );
+    assert.equal(r.fabricated, true);
+  });
+}
+
+const CN_MUST_PASS = [
+  [
+    '中文寫的數字對得回來源',
+    '你查到 114 學年度最後一名錄取者是百分之十八，而你自己是百分之十二。' +
+      '這是每年僅一個極值資料點的估計，年際波動可能很大。',
+  ],
+  ['「十分」是程度不是分數', '這一筆資料十分可靠，因為它來自官方文件。'],
+  ['三年、兩次這類計量詞不是門檻', '這個校系的標準是三年來都很接近，而你只查到一年，看不出趨勢。'],
+  ['「希望」當動詞不算機率詞', '我希望你去把 113 學年度也查一下，一年看不出趨勢。'],
+  ['最後一名、第一輪這些序數不受影響', '官方公布的只有第一輪最後一名錄取者的百分比，而名額常常只有 1 至 3 名。'],
+];
+
+for (const [name, text] of CN_MUST_PASS) {
+  test(`不可以誤擋（中文數字）：${name}`, () => {
+    const r = checkAdvice(text, richFacts().facts);
+    assert.equal(r.ok, true, describeAdviceViolations(r.violations));
+  });
+}
+
+test('中文數字讀得出值，讀不出來的一律回 null（往擋的方向倒）', () => {
+  assert.equal(cnNumber('十八'), 18);
+  assert.equal(cnNumber('二十'), 20);
+  assert.equal(cnNumber('六十八'), 68);
+  assert.equal(cnNumber('一百'), 100);
+  assert.equal(cnNumber('一百零五'), 105);
+  assert.equal(cnNumber('三'), 3);
+  assert.equal(cnNumber('兩'), 2);
+  assert.equal(cnNumber('七成'), null, '成數不是這一支的事，它有自己的規則');
+  assert.equal(cnNumber(''), null);
+  assert.equal(cnNumber('18'), null);
 });
 
 // ═════════════════════════════════════════════════════════════════

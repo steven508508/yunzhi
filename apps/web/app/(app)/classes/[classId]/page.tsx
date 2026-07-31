@@ -186,6 +186,15 @@ export default async function ClassPage({
             {/* 成績回答「誰在退步」，能力分析回答「下一堂課要重講哪一個章節」。
                 兩個問題不同，資料來源也不同，所以是兩頁。 */}
             <Link href={`/classes/${classId}/ability`}>能力分析</Link>
+            {' '}·{' '}
+            {/*
+              升學總覽的入口**只有這裡**。導覽列的「升學」對老師是一段
+              空畫面（那一頁是學生規劃自己的志願），而 `/admission`、
+              `/admission/refs`、落點、預測與五支 API 的 403 訊息全都把
+              老師指向「班級頁的升學總覽」——在這一行加上之前，全站
+              沒有任何一個連結進得去那一頁，那一頁做完了但接不到入口。
+            */}
+            <Link href={`/admission/class/${classId}`}>升學總覽</Link>
           </p>
         </div>
 

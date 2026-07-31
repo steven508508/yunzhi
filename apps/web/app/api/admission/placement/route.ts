@@ -51,7 +51,7 @@ const Body = z.object({
 
 const STUDENT_ONLY =
   '落點模擬是學生自己的東西——它吃他自己的級分記錄與他自己查來的門檻。' +
-  '老師要看班上的狀況在班級頁的升學總覽。';
+  '老師要看班上的狀況：進「班級」點一個班，那一頁上有「升學總覽」。';
 
 export const GET = scopedRoute(async (req: NextRequest, { user }) => {
   if (user.systemRole !== 'STUDENT') {

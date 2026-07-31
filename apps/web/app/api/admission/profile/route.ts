@@ -41,7 +41,7 @@ const Body = z.object({
 export const POST = scopedRoute(async (req: NextRequest, { user }) => {
   if (user.systemRole !== 'STUDENT') {
     return NextResponse.json(
-      { error: '升學狀態由學生本人維護。老師要看班上的狀況在班級的升學總覽。' },
+      { error: '升學狀態由學生本人維護。老師要看班上的狀況：進「班級」點一個班，那一頁上有「升學總覽」。' },
       { status: 403 },
     );
   }

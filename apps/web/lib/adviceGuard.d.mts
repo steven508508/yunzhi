@@ -8,14 +8,23 @@
 
 import type { AdviceBasis } from './admissionRef.d.mts';
 
-export declare const INSTITUTION_NUMBERS: string[];
+/**
+ * 單位 → 那個單位下可以出現的制度常數。**單位是白名單的一部分**：
+ * 1 至 8「名」是名額與推薦序，1 至 8「%」是繁星頂標學生的在校百分比。
+ */
+export declare const INSTITUTION_NUMBERS: Readonly<Record<string, readonly string[]>>;
+
+/** 中文數字讀成數值。讀不出來回 `null`（一律當成「對不回來源」）。 */
+export declare function cnNumber(text: unknown): number | null;
 
 export declare function normalizeForAdvice(text: unknown): string;
 
 export type AdviceFacts = {
-  /** 可以出現的數字（正規化成 `String(Number(x))`）。 */
+  /** 這位學生**真的查到**的數字（正規化成 `String(Number(x))`）。 */
   numbers: string[];
-  /** 有錄取標準資料的學年度數。「近三年」要靠它驗。 */
+  /** 制度常數。單位 → 值。 */
+  institutionNumbers: Readonly<Record<string, readonly string[]>>;
+  /** 可以說「近三年」的年數：**同一個校系**最多有幾年。 */
   yearCount: number;
   thresholdCount: number;
   hasOfficialDoc: boolean;

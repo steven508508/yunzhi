@@ -25,8 +25,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
 import {
-  admissionYearOf,
   myPredictionHistory,
+  predictTargetOf,
   predictionsFor,
   savePredictions,
 } from '@/lib/predictDb';
@@ -51,7 +51,10 @@ export const GET = scopedRoute(async (req: NextRequest, { user }) => {
     return NextResponse.json({ error: STUDENT_ONLY }, { status: 403 });
   }
   const url = new URL(req.url);
-  const year = Number(url.searchParams.get('year')) || admissionYearOf();
+  // 沒帶 year 時預設**下一場還沒考的學測**，不是現在這個學年度：
+  // 兩者在 1/20 到 7/31 之間差一年，而那半年裡用學年度等於對著一場
+  // 已經考完的考試在預測（見 lib/predict.mjs 的 upcomingGsatYear）。
+  const year = Number(url.searchParams.get('year')) || predictTargetOf().targetYear;
   const confidence = Number(url.searchParams.get('confidence'));
   const [now, history] = await Promise.all([
     predictionsFor(user.id, year, Number.isFinite(confidence) ? confidence : undefined),
@@ -67,7 +70,7 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
   const parsed = Body.safeParse((await req.json().catch(() => null)) ?? {});
   if (!parsed.success) return NextResponse.json({ error: '參數不正確' }, { status: 400 });
 
-  const year = parsed.data.year ?? admissionYearOf();
+  const year = parsed.data.year ?? predictTargetOf().targetYear;
   const saved = await savePredictions(user.id, year, parsed.data.confidence);
   const [now, history] = await Promise.all([
     predictionsFor(user.id, year, parsed.data.confidence),

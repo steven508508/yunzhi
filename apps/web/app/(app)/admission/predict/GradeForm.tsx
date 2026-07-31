@@ -56,6 +56,13 @@ export default function GradeForm({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  /**
+   * 剛剛回填的結果。**這個要說出來**：輸入正式級分是校準曲線唯一的
+   * 資料來源，而學生不知道自己做了一件對整個機構有用的事。
+   * `afterExam` 也要說——考完之後才存的那幾份刻意不對答案，不講的話
+   * 學生會以為系統漏了幾份。
+   */
+  const [filled, setFilled] = useState<{ backfilled: number; afterExam: number } | null>(null);
   const [subjectCode, setSubjectCode] = useState(subjects[0]?.code ?? 'MATH_A');
   const [examName, setExamName] = useState('');
   const [examDate, setExamDate] = useState(new Date().toISOString().slice(0, 10));
@@ -103,6 +110,30 @@ export default function GradeForm({
       )}
       {del.error && <Note tone="warn">{del.error}</Note>}
 
+      {filled && (
+        <Note tone="info">
+          {filled.backfilled > 0 ? (
+            <>
+              這一筆把 <b>{filled.backfilled}</b> 份<strong>考試之前</strong>做的預測補上了
+              實際級分。<strong>校準曲線就是靠這一步</strong>——沒有它，沒有人知道這套預測
+              到底準不準。
+            </>
+          ) : (
+            <>
+              目前沒有可以對答案的預測（你在這一科的學測之前沒有存過預測，或是已經對過了）。
+              這一筆仍然會被算進之後的預測裡。
+            </>
+          )}
+          {filled.afterExam > 0 && (
+            <>
+              　另有 <b>{filled.afterExam}</b> 份是<strong>考完之後</strong>才存的，
+              <strong>刻意不對答案</strong>：那時候正式級分已經是它的輸入，它必然命中，
+              放進校準曲線等於自己給自己打分數。
+            </>
+          )}
+        </Note>
+      )}
+
       {!open ? (
         <div style={{ marginTop: 12 }}>
           <Button variant="primary" onClick={() => setOpen(true)}>
@@ -113,16 +144,24 @@ export default function GradeForm({
         <div className="yz-card" style={{ marginTop: 14 }}>
           <Form
             onSubmit={async () => {
-              await submitJson('/api/admission/grades', {
-                json: {
-                  subjectCode,
-                  examName,
-                  examDate,
-                  grade: Number(grade),
-                  percentile: percentile === '' ? null : Number(percentile),
-                  source,
+              const res = await submitJson<{ backfilled?: number; afterExam?: number }>(
+                '/api/admission/grades',
+                {
+                  json: {
+                    subjectCode,
+                    examName,
+                    examDate,
+                    grade: Number(grade),
+                    percentile: percentile === '' ? null : Number(percentile),
+                    source,
+                  },
                 },
-              });
+              );
+              setFilled(
+                source === 'OFFICIAL_GSAT'
+                  ? { backfilled: res.backfilled ?? 0, afterExam: res.afterExam ?? 0 }
+                  : null,
+              );
               setExamName('');
               setGrade('');
               setPercentile('');

@@ -36,9 +36,10 @@ import Link from 'next/link';
 
 import { TIER_LABELS } from '@/lib/placement.mjs';
 import { admissionYearOf, latestPlacement, placementRuns } from '@/lib/predictDb';
+import { mayUse } from '@/lib/nav';
 import { prisma } from '@/lib/prisma';
 import { scopedPage } from '@/lib/page';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 
 import { Emph } from '../Emph';
 import RunButton from './RunButton';
@@ -130,6 +131,27 @@ const CORR_LABEL: Record<string, string> = {
 
 export default async function PlacementPage() {
   return scopedPage(async (user) => {
+    // 角色判定走 `lib/nav.ts` 那一份唯一的對照表（見那個檔案的檔頭）。
+    // 各頁自己手寫一份的話，改角色時沒有人會記得跟著改。
+    if (!mayUse(user.systemRole, '/admission')) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="個申落點模擬"
+            why={
+              <>
+                這一區是學生與老師的。孩子的成績與作業狀況在
+                <Link href="/guardian">孩子的狀況</Link>那一頁。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
+    // 落點吃的是**志願**，而志願屬於學年度（4 月填的個申志願是這一個
+    // 學年度的）。所以這裡照舊用 `admissionYearOf()`，不是「下一場學測」
+    // ——那兩者在 1 月到 7 月之間差一年，而用錯的症狀是志願一個都撈不到。
     const year = admissionYearOf() as number;
 
     if (user.systemRole !== 'STUDENT') {
@@ -141,7 +163,7 @@ export default async function PlacementPage() {
           </div>
           <Empty
             title="這一頁吃學生自己的級分記錄與他自己查來的歷年門檻"
-            hint="老師要看班上的狀況在班級頁的升學總覽。落點的機率是逐人算的，而它的輸入有一半是學生自己去官方網頁查來的。"
+            hint="老師要看班上的狀況：進「班級」點一個班，那一頁上有「升學總覽」。落點的機率是逐人算的，而它的輸入有一半是學生自己去官方網頁查來的。"
             action={<Link href="/admission">回升學規劃</Link>}
           />
         </main>
@@ -225,7 +247,7 @@ export default async function PlacementPage() {
                   <strong>從抽樣直接數出來的</strong>，不是把六個機率相乘。六個志願共用同一組
                   級分——數學考壞的那一天，用到數學的志願會一起失手。假設它們互相獨立會算成{' '}
                   {result.combo.independentAtLeastOne.toFixed(2)}，
-                  而那個數字是**高估**。
+                  而那個數字是<strong>高估</strong>。
                 </span>
               </div>
               <div className="yz-plc__stat">

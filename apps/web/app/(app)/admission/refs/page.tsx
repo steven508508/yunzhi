@@ -37,8 +37,9 @@ import { admissionYearOf, isStarCoordinator, myAcademicRank, myStarPosition } fr
 import { referenceBasis, aiDisclosure } from '@/lib/admissionRefDb';
 import { sourceChecklist } from '@/lib/admissionSources.mjs';
 import { withNationalThresholds } from '@/lib/star.mjs';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 
 import { Emph } from '../Emph';
 import AdvicePanel from './AdvicePanel';
@@ -50,6 +51,23 @@ export const dynamic = 'force-dynamic';
 
 export default async function AdmissionRefsPage() {
   return scopedPage(async (user) => {
+    // 角色判定走 `lib/nav.ts` 那一份唯一的對照表（見那個檔案的檔頭）。
+    if (!mayUse(user.systemRole, '/admission')) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="升學資料查詢"
+            why={
+              <>
+                這一區是學生與老師的。孩子的成績與作業狀況在
+                <Link href="/guardian">孩子的狀況</Link>那一頁。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
     const year = admissionYearOf();
 
     if (user.systemRole !== 'STUDENT') {
@@ -64,7 +82,7 @@ export default async function AdmissionRefsPage() {
             hint={
               isStarCoordinator(user)
                 ? '學生輸入的資料只用於他自己的建議，不會進入你那邊的全校模擬——模擬只吃教務處匯入的在校百分比。'
-                : '學生查到的錄取標準與來源記在這裡。老師要看班上的狀況在班級頁的升學總覽。'
+                : '學生查到的錄取標準與來源記在這裡。老師要看班上的狀況：進「班級」點一個班，那一頁上有「升學總覽」。'
             }
             action={<Link href="/admission">回升學規劃</Link>}
           />

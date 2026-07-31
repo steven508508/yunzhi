@@ -22,20 +22,26 @@
  * 那段文字在 `lib/admission.mjs` 的 `NOT_OFFERED`，與規則同一個檔案，
  * 有測試釘著它不能被改成「暫不支援」。
  *
- * # 那份清單裡有兩條已經過時了，而這一頁的處理方式是「移走而不是刪掉」
+ * # 那份清單裡有幾條已經過時了，而這一頁的處理方式是「移走而不是刪掉」
  *
- * `NOT_OFFERED` 裡的 `GRADE_PREDICTION` 與 `APPLY_ODDS` 記的是兩個
- * **當時成立、現在不成立**的判斷：
+ * `NOT_OFFERED` 裡有三條記的是**當時成立、現在不成立**的判斷：
  *
  *   · 級分預測卡在「需要 IRT 能力估計」。那個判斷忽略了一件現成的事
  *     ——補習班的模擬考本來就會公布級分，而那是直接觀測值。
  *   · 落點卡在「歷年篩選標準禁止爬取」。禁止的是**機器**：學生自己去
  *     官方網頁查完輸入進來，那條路一直是通的。
+ *   · 學習歷程與面試準備寫的是「這一階段還沒做」。那句話當時是對的，
+ *     而它已經做完了——兩者都在導覽列上。
  *
- * 那兩段文字**留在 `admission.mjs` 裡不動**（它們是判斷的歷史，而且
+ * 那幾段文字**留在 `admission.mjs` 裡不動**（它們是判斷的歷史，而且
  * 有測試釘著），這一頁改的只是「哪幾條要印出來」加上一段說明它們搬到
- * 哪裡去了。理由是刪掉那兩段的話，下一個人會重新推導出同樣的結論然後
- * 再關掉這兩個功能一次——**被推翻的判斷比沒有判斷有價值**。
+ * 哪裡去了。理由是刪掉那幾段的話，下一個人會重新推導出同樣的結論然後
+ * 再關掉這些功能一次——**被推翻的判斷比沒有判斷有價值**。
+ *
+ * **這一份清單與 `NOW_OFFERED` 的對照要靠 key，數量要用算的。** 上一次
+ * 漏掉學習歷程那一條的方式很簡單：`NOW_OFFERED` 只補了兩個 key，而
+ * 標題寫死「兩件」——於是這一頁一邊在講「被推翻的判斷要說清楚錯在哪」，
+ * 一邊在導覽列上有那個功能的同時說它不存在。
  */
 import Link from 'next/link';
 
@@ -48,8 +54,9 @@ import {
   myStarPosition,
   studyPlan,
 } from '@/lib/admissionDb';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 
 import { Emph } from './Emph';
 import StatusEditor from './StatusEditor';
@@ -73,6 +80,25 @@ const REMEDY_TAG: Record<string, string> = {
  * 不會讓人以為這個系統的「不做」是隨時會改口的。
  */
 const NOW_OFFERED: Record<string, { href: string; label: string; why: string }> = {
+  /**
+   * 這一條與另外兩條不同：它記的**不是一個被推翻的判斷**，是一件
+   * 「還沒做」的事，而它已經做完了。兩種都要從下面那份「不做的幾件事」
+   * 移上來，因為讀者的疑問是同一個——他上次來看到這裡寫著沒有，
+   * 現在導覽列上有一個「學習歷程」。
+   *
+   * 少了這一條的後果，比少了另外兩條更難看：那一頁就在導覽列上，
+   * 而這一頁在同一個畫面上說它不存在。
+   */
+  PORTFOLIO: {
+    href: '/portfolio',
+    label: '學習歷程輔助',
+    why:
+      '當初寫的是「這一階段還沒做，它需要另一批資料表」。**那句話是對的，只是它已經過期了**' +
+      '——素材、自述草稿與 AI 使用揭露記錄三張表都建好了，面試準備也上線了' +
+      '（導覽列上有自己的一項，因為它是四月通過第一階段之後那兩個星期的事）。' +
+      '這裡的 AI **只協助整理與回饋，絕不代寫**，而每一次使用都留下揭露記錄——' +
+      '那不是限制功能，那是這個功能可以存在的條件。',
+  },
   GRADE_PREDICTION: {
     href: '/admission/predict',
     label: '級分預測',
@@ -96,6 +122,30 @@ const NOW_OFFERED: Record<string, { href: string; label: string; why: string }> 
 
 export default async function AdmissionPage() {
   return scopedPage(async (user) => {
+    // ── 誰進得來：走 `lib/nav.ts` 那一份唯一的對照表 ──────────────
+    //
+    // 這一區以前六頁各自手寫 `user.systemRole !== 'STUDENT'`，於是家長
+    // 打開這一頁會看到一段寫給老師的文字與一個對她是 Denied 的按鈕。
+    // 沒有資料外洩（每一頁另有自己的角色判定），但「看得到連結」與
+    // 「進得去」必須是同一份規則，而那份規則只有一個地方。
+    if (!mayUse(user.systemRole, '/admission')) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="升學輔導"
+            why={
+              <>
+                這一區是學生規劃自己的升學、老師看所帶班級的狀況。
+                孩子的成績與作業狀況在<Link href="/guardian">孩子的狀況</Link>那一頁——
+                志願與升學時程之後會做在那裡，<strong>不會是這一頁加一個唯讀旗標</strong>
+                （欄位只減不加的投影與這一頁共用一條路徑的話，遲早有人在錯的那邊加一欄）。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
     const year = admissionYearOf();
 
     // ── 老師與管理員：這一頁對他們永遠是空的 ────────────────────
@@ -114,8 +164,11 @@ export default async function AdmissionPage() {
             hint={
               <>
                 {isStarCoordinator(user)
-                  ? '你是繁星承辦（校務管理員）。全校的繁星校內競爭分布與在校成績百分比的匯入在下一頁。'
-                  : '老師要看的是所帶班級的升學狀況，那在班級頁的升學總覽裡。'}
+                  ? '你是繁星承辦（校務管理員或系統管理員）。全校的繁星校內競爭分布與在校成績百分比的匯入在下一頁，而每一次進入都會寫一筆稽核。'
+                  : // 「在班級頁」不夠具體：升學總覽是**一個班一頁**，
+                    // 入口在班級名稱點進去之後的那一頁上，不在班級列表。
+                    // 少了這半句，老師會在班級列表上找一個不存在的連結。
+                    '老師要看的是所帶班級的升學狀況：先進「班級」點一個班，那一頁的標題列上有「升學總覽」。'}
                 {/*
                   校準報告在這裡出現一次，因為老師找不到它的話它就等於不存在
                   ——而它是級分預測唯一的品質訊號。學生的預測頁對老師是空的，
@@ -150,6 +203,12 @@ export default async function AdmissionPage() {
       myAcademicRank(user.id, year),
       studyPlan(user.id),
     ]);
+
+    // 兩份清單由**同一份資料**切出來，而且下面的標題數量也從這裡算。
+    // 分別寫死「兩件」與手打 filter 的後果就是上一次那一次：清單移了
+    // 一條過來，標題還停在舊的數字。
+    const nowOffered = NOT_OFFERED.filter((n) => NOW_OFFERED[n.key]);
+    const stillNotOffered = NOT_OFFERED.filter((n) => !NOW_OFFERED[n.key]);
 
     return (
       <main className="yz-panel">
@@ -397,17 +456,23 @@ export default async function AdmissionPage() {
           </>
         )}
 
-        {/* ── 原本不做、現在做得到的兩件 ───────────────────── */}
+        {/* ── 原本不做、現在做得到的那幾件 ─────────────────── */}
+        {/*
+          數量寫成 `nowOffered.length` 而不是「兩件」。寫死一個數字的
+          後果就是上一次的那一次：清單多了一條，標題還停在「兩件」，
+          而這一段本身講的就是「被推翻的判斷要說清楚」。
+        */}
         <h2 className="yz-card__title" style={{ marginTop: 30 }}>
-          原本記著「不做」，而那個判斷已經過時的兩件
+          原本記著「不做」，而那個判斷已經過時的 {nowOffered.length} 件
         </h2>
         <p className="yz-hint">
-          這兩件曾經寫在下面那份「不做的幾件事」裡，理由是資料取不到。
-          <strong>那個理由錯了</strong>，而錯在哪裡值得寫清楚——不然下一次有人會重新推導出
-          同樣的結論，然後再把它關掉一次。
+          這 {nowOffered.length} 件曾經寫在下面那份「不做的幾件事」裡。
+          兩種過期方式都在：有的是<strong>當時的理由本身就錯了</strong>（資料其實取得到），
+          有的是<strong>當時還沒做，而現在做完了</strong>。錯在哪裡值得寫清楚——
+          不然下一次有人會重新推導出同樣的結論，然後再把它關掉一次。
         </p>
         <dl className="yz-adm__nope">
-          {NOT_OFFERED.filter((n) => NOW_OFFERED[n.key]).map((n) => {
+          {nowOffered.map((n) => {
             const now = NOW_OFFERED[n.key];
             return (
               <div key={n.key}>
@@ -434,7 +499,7 @@ export default async function AdmissionPage() {
           給一個沒有根據的百分比比不給更糟，因為你會照著它做決定。
         </p>
         <dl className="yz-adm__nope">
-          {NOT_OFFERED.filter((n) => !NOW_OFFERED[n.key]).map((n) => (
+          {stillNotOffered.map((n) => (
             <div key={n.key}>
               <dt>{n.title}</dt>
               <dd>{n.body}</dd>

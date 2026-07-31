@@ -55,8 +55,10 @@ import {
   DEFAULT_CONFIDENCE,
   calibrationCurve,
   gsatDateOf,
+  gsatPassed,
   marginalsFor,
   predictAll,
+  upcomingGsatYear,
 } from '@/lib/predict.mjs';
 import {
   DEFAULT_DRAWS,
@@ -72,6 +74,32 @@ import { requireTenant } from '@/lib/tenant';
 import type { SessionUser } from '@/lib/auth';
 
 export { admissionYearOf };
+
+/**
+ * **級分預測與落點要用哪一個學年度，是兩個不同的問題。**
+ *
+ *   · 落點模擬吃的是**志願**，而志願屬於學年度（4 月填的個申志願是
+ *     114 學年度的）。所以那一邊照樣用 `admissionYearOf()`。
+ *   · 級分預測的目標是**下一場還沒考的學測**。1/20 到 7/31 之間這兩者
+ *     差一年，而那半年裡拿學年度當目標的話，預測是對著一場已經考完的
+ *     考試在算（見 `lib/predict.mjs` 的 `upcomingGsatYear`）。
+ *
+ * 這一支把兩個都算出來給頁面用，順便回答「那一場考完了沒有」。
+ */
+export function predictTargetOf(now = new Date()) {
+  const target = upcomingGsatYear(now) as number;
+  const school = admissionYearOf(now) as number;
+  return {
+    /** 預測的目標學年度：下一場還沒考的學測。 */
+    targetYear: target,
+    /** 現在的學年度。志願與參考資料用這一個。 */
+    schoolYear: school,
+    /** 學年度那一場已經考完了（每年 1/20 至 7/31 都是 true）。 */
+    schoolYearExamPassed: gsatPassed(school, now) as boolean,
+    examDate: (gsatDateOf(target) as Date | null)?.toISOString() ?? null,
+    schoolYearExamDate: (gsatDateOf(school) as Date | null)?.toISOString() ?? null,
+  };
+}
 
 /** 成績記錄的三種來源。與遷移裡的 CHECK 約束一字不差。 */
 export const GRADE_SOURCES = [
@@ -159,7 +187,7 @@ export async function addGradeRecord(
   userId: string,
   input: GradeRecordInput,
   actor: SessionUser,
-): Promise<{ id: string; backfilled: number }> {
+): Promise<{ id: string; backfilled: number; afterExam: number }> {
   const tenantId = requireTenant();
 
   const subjectCode = String(input.subjectCode ?? '').trim();
@@ -222,10 +250,12 @@ export async function addGradeRecord(
     },
   });
 
-  const backfilled =
-    input.source === 'OFFICIAL_GSAT' ? await backfillActual(userId, subjectCode, examDate, grade) : 0;
+  const filled =
+    input.source === 'OFFICIAL_GSAT'
+      ? await backfillActual(userId, subjectCode, examDate, grade)
+      : { backfilled: 0, afterExam: 0 };
 
-  return { id: row.id, backfilled };
+  return { id: row.id, ...filled };
 }
 
 /**
@@ -235,19 +265,49 @@ export async function addGradeRecord(
  * 起算，所以民國 116 年 1 月的學測屬於 115 學年度——這正是
  * `admissionYearOf` 已經在做的事，不必再寫一份。差一年的後果是
  * 回填掛到隔一個學年度的預測上，於是校準曲線永遠是空的。
+ *
+ * # 只回填**考試之前**做的預測
+ *
+ * 這一條不是潔癖，它決定校準曲線是不是一份假報告。
+ *
+ * 學生 2 月輸入正式級分（回填當時已存在的那幾份預測，正確），之後他
+ * 回到預測頁按「把現在的預測存一份」——**那一次的預測把正式成績當成
+ * 輸入**（`OFFICIAL_GSAT` 的難度與級距誤差都是 0，而它是最近的一筆），
+ * 區間會緊緊包住實際級分。接著他照系統自己的指示刪掉舊記錄再輸入一次
+ * （`addGradeRecord` 的重複訊息就是這樣寫的），回填再跑一次，那份
+ * **知道答案的預測**也被填上 `actualGrade`：穩穩命中、信心 0.99，
+ * 進了校準曲線。
+ *
+ * 同一個檔案很小心地不讓 `thin` 的預測進表（怕曲線看起來太健康），
+ * 卻讓一個知道答案的預測進得去——那比 thin 更糟，因為它必然命中。
+ *
+ * 界線用 `predictedAt < examDate`（考試那天的零時）而不是「今天」：
+ * 我們要問的是「這份預測做的時候，這場考試考完了沒有」，而那個時點
+ * 是考試日，不是回填日。
  */
 async function backfillActual(
   userId: string,
   subjectCode: string,
   examDate: Date,
   grade: number,
-): Promise<number> {
+): Promise<{ backfilled: number; afterExam: number }> {
   const targetYear = admissionYearOf(examDate) as number;
-  const res = await prisma.gradePrediction.updateMany({
-    where: { userId, subjectCode, targetYear },
-    data: { actualGrade: grade },
-  });
-  return res.count;
+  const where = { userId, subjectCode, targetYear };
+
+  const [res, total] = await Promise.all([
+    prisma.gradePrediction.updateMany({
+      where: { ...where, predictedAt: { lt: examDate } },
+      data: { actualGrade: grade },
+    }),
+    prisma.gradePrediction.count({ where }),
+  ]);
+  // 事後才存下來的那幾份要數出來。靜靜跳過的話，學生會問「我明明存了
+  // 五份，怎麼只有三份對到答案」，而那時沒有人答得出來。
+  //
+  // 用相減而不是再查一次 `predictedAt >= examDate`：兩個條件寫成兩份
+  // 就多一次它們對不起來的機會（漏掉邊界那一份的話，那一份會在兩邊
+  // 都不出現），而這裡的兩個集合本來就是互補的。
+  return { backfilled: res.count, afterExam: Math.max(0, total - res.count) };
 }
 
 /** 刪一筆。回 false 代表不是他的（或不存在）——兩者的回應要一樣。 */
@@ -332,6 +392,8 @@ function studentView(p: Prediction) {
     records?: number;
     nEff?: number;
     monthsToExam?: number;
+    monthsAhead?: number;
+    examPassed?: boolean;
     sdDown?: number;
     sdUp?: number;
     variance?: Record<string, number>;
@@ -353,6 +415,13 @@ function studentView(p: Prediction) {
       records: b.records ?? 0,
       nEff: b.nEff ?? 0,
       monthsToExam: b.monthsToExam ?? null,
+      /**
+       * 真正進到公式裡的剩餘時間（夾成非負）。**畫面要顯示這一個。**
+       * 顯示帶號的那一個然後在頁面上 `Math.max(0, …)`，等於把「這場
+       * 考試已經考完了」偽裝成「距學測約 0 個月」。
+       */
+      monthsAhead: b.monthsAhead ?? null,
+      examPassed: b.examPassed === true,
       /** 四個不確定性來源各自的份量。畫面上畫成一條堆疊的線。 */
       variance: b.variance ?? null,
       spread: b.sdDown ?? null,
@@ -437,14 +506,23 @@ export async function savePredictions(userId: string, year: number, confidence =
   return { saved, unchanged, skipped };
 }
 
-/** 這位學生落地過的預測（最新在前）。畫面上是一條「預測怎麼變的」時間軸。 */
-export async function myPredictionHistory(userId: string, year: number) {
+/**
+ * 這位學生落地過的預測（最新在前）。畫面上是一條「預測怎麼變的」時間軸。
+ *
+ * `year` 收一個或一組學年度。**要收得下一組**，因為 1 月到 7 月之間
+ * 學生看的是「下一場」的預測，而他上一場的那幾份還在等實際成績——
+ * 只查一年的話，那幾份在畫面上消失，於是「去輸入正式級分」這個動作
+ * 沒有任何地方提醒得了他。
+ */
+export async function myPredictionHistory(userId: string, year: number | number[]) {
+  const years = (Array.isArray(year) ? year : [year]).filter((y) => Number.isFinite(y));
   const rows = await prisma.gradePrediction.findMany({
-    where: { userId, targetYear: year },
+    where: { userId, targetYear: { in: years } },
     orderBy: { predictedAt: 'desc' },
     select: {
       id: true,
       subjectCode: true,
+      targetYear: true,
       intervalLow: true,
       intervalHigh: true,
       confidence: true,
@@ -456,6 +534,7 @@ export async function myPredictionHistory(userId: string, year: number) {
   return rows.map((r) => ({
     id: r.id,
     subjectCode: r.subjectCode,
+    targetYear: r.targetYear,
     subjectLabel: (SUBJECT_LABELS as Record<string, string>)[r.subjectCode] ?? r.subjectCode,
     intervalLow: r.intervalLow,
     intervalHigh: r.intervalHigh,

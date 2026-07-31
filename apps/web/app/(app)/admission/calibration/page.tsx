@@ -31,8 +31,9 @@ import Link from 'next/link';
 
 import { CALIB_ALERT_MARGIN, CALIB_MIN_N } from '@/lib/predict.mjs';
 import { calibrationReport, canSeeCalibration } from '@/lib/predictDb';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 
 export const dynamic = 'force-dynamic';
 
@@ -139,6 +140,23 @@ export default async function CalibrationPage({
   searchParams: Promise<{ year?: string }>;
 }) {
   return scopedPage(async (user) => {
+    // 角色判定走 `lib/nav.ts` 那一份唯一的對照表（見那個檔案的檔頭）。
+    if (!mayUse(user.systemRole, '/admission')) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="級分預測的校準"
+            why={
+              <>
+                這一區是學生與老師的。孩子的成績與作業狀況在
+                <Link href="/guardian">孩子的狀況</Link>那一頁。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
     if (!canSeeCalibration(user)) {
       return (
         <main className="yz-panel">
@@ -212,11 +230,20 @@ export default async function CalibrationPage({
           <Empty
             title="還沒有可以對答案的預測"
             hint={
-              overall.pending > 0
-                ? `已經有 ${overall.pending} 份預測存下來了，但還沒有任何一份回填實際成績。` +
-                  '回填是自動的：學生把真正的學測級分當成一筆 source = 真正的學測 的成績記錄' +
-                  '輸入之後，同一科的歷次預測就會補上實際級分。'
-                : '學生要先在級分預測那一頁按「把現在的預測存一份」。沒有存下來的預測沒有辦法事後對答案。'
+              overall.pending > 0 ? (
+                <>
+                  已經有 {overall.pending} 份預測存下來了，但還沒有任何一份回填實際成績。
+                  <strong>回填不會自己發生。</strong>
+                  它掛在學生輸入正式級分那個動作上：學生要回到級分預測那一頁，
+                  把成績單上的級分當成一筆「真正的學測」的成績記錄輸入進來，
+                  同一科<strong>考試之前</strong>做的預測才會補上實際級分。
+                  系統沒有辦法自己去拿那個數字（成績單只在學生手上），而且目前
+                  <strong>也沒有任何提醒或任務會去催他</strong>——所以這一頁遲遲是空的時候，
+                  要做的是去提醒學生回來輸入，不是等。
+                </>
+              ) : (
+                '學生要先在級分預測那一頁按「把現在的預測存一份」。沒有存下來的預測沒有辦法事後對答案。'
+              )
             }
           />
         ) : (

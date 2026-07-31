@@ -12,8 +12,12 @@
  *     ——這一項是這個功能能不能上線的關鍵，所以它比對的是
  *     序列化後的整個 JSON 字串，而不是逐欄檢查
  *   · 在校成績百分比沒有任何一條學生走得到的路徑
- *   · 繁星承辦（校務管理員）看得到全校，而且每次都寫稽核
- *   · 老師與系統管理員進不去全校檢視
+ *   · 繁星承辦看得到全校，而且每次都寫稽核。**承辦包含系統管理員**
+ *     ——規格書 §3 排除他，而那條規則的前提是學校有分職；單一機構
+ *     自架時承辦人就是他（理由見 lib/admissionDb.ts 的 STAR_COORDINATOR）。
+ *     擋得住的是「看了留得下紀錄」，不是角色名單，所以下面那條斷言
+ *     驗的是**進得去而且寫得出稽核**。
+ *   · 老師、學科召集人與學生進不去全校檢視
  *   · RLS：隔壁補習班的學生不會出現在這家的校內排序裡
  *   · 放棄繁星之後個申資格**不會**恢復（跨越 upsert 之後類別還在）
  *
@@ -693,7 +697,13 @@ async function main() {
           '/api/admission/star?scope=school',
         );
         assert.equal(r.status, 403, `${actor.systemRole} 應該被擋`);
-        assert.match(r.body.error, /校務管理員/);
+        assert.match(r.body.error, /繁星承辦/);
+        // 訊息不可以宣稱一個系統沒有做的隔離：系統管理員**進得去**
+        // （下一條測試就在驗它），所以這裡不能寫「連系統管理員都不在」。
+        assert.ok(
+          !/系統管理員(刻意)?不在|連系統管理員都不在/.test(r.body.error),
+          `403 的訊息宣稱了一個不存在的隔離：${r.body.error}`,
+        );
       }
     });
 
@@ -819,6 +829,99 @@ async function main() {
       const rows = await prisma.wish.findMany({ where: { userId: bingsan.id, year: YEAR } });
       assert.equal(rows.filter((w) => w.channel === 'APPLY').length, 6);
       assert.equal(rows.filter((w) => w.channel === 'STAR').length, 1);
+    });
+
+    await test('★ 改志願序：撞號時兩個對調，不是整串往後推', async () => {
+      // 在這一支之前，「把第 3 志願提到第 1」只能刪掉再加，而且會先撞上
+      // 409（第 1 志願已經有了）：要先刪原本的第 1、再刪要移動的那一個、
+      // 再依序加回去。三次刪除只為了換一個順序，而中途離開畫面的話
+      // 他的志願就少了兩個。
+      const bingsan = home.students[2];
+      const before = await prisma.wish.findMany({
+        where: { userId: bingsan.id, year: YEAR, channel: 'APPLY' },
+      });
+      const first = before.find((w) => w.rank === 1);
+      const third = before.find((w) => w.rank === 3);
+      assert.ok(first && third);
+
+      const r = await callAs(
+        asUser(bingsan),
+        routes.wish.PATCH,
+        `/api/admission/wishes/${third.id}?year=${YEAR}`,
+        { method: 'PATCH', params: { wishId: third.id }, json: { year: YEAR, rank: 1 } },
+      );
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.body.swappedWith, first.id, '應該與原本的第 1 對調');
+
+      const after = await prisma.wish.findMany({
+        where: { userId: bingsan.id, year: YEAR, channel: 'APPLY' },
+      });
+      assert.equal(after.find((w) => w.id === third.id).rank, 1);
+      assert.equal(after.find((w) => w.id === first.id).rank, 3, '原本的第 1 去第 3');
+      assert.equal(after.length, before.length, '不可以在過程中弄丟任何一個志願');
+      // **只動那兩個。** 整串往後推是系統在替他排序，而那正是這個模組
+      // 明說不做的事（見 WishList 的檔頭）。
+      for (const w of before) {
+        if (w.id === first.id || w.id === third.id) continue;
+        assert.equal(after.find((x) => x.id === w.id).rank, w.rank, `第 ${w.rank} 志願被動到了`);
+      }
+    });
+
+    await test('改校名不必刪掉重加，而且不會動到志願序', async () => {
+      const bingsan = home.students[2];
+      const mine = (
+        await prisma.wish.findMany({
+          where: { userId: bingsan.id, year: YEAR, channel: 'APPLY' },
+        })
+      ).find((w) => w.rank === 2);
+      const r = await callAs(
+        asUser(bingsan),
+        routes.wish.PATCH,
+        `/api/admission/wishes/${mine.id}?year=${YEAR}`,
+        {
+          method: 'PATCH',
+          params: { wishId: mine.id },
+          json: { year: YEAR, institutionName: '國立成功大學', programName: '資訊工程學系' },
+        },
+      );
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.body.swappedWith, null);
+      const after = await prisma.wish.findFirst({ where: { id: mine.id } });
+      assert.equal(after.institutionName, '國立成功大學');
+      assert.equal(after.programName, '資訊工程學系');
+      assert.equal(after.rank, 2);
+    });
+
+    await test('學生改不動別人的志願（404，與「不存在」同一個回應）', async () => {
+      const victim = home.students[4];
+      const theirs = await prisma.wish.findMany({ where: { userId: victim.id, year: YEAR } });
+      assert.ok(theirs.length > 0);
+      const r = await callAs(
+        asUser(home.students[0]),
+        routes.wish.PATCH,
+        `/api/admission/wishes/${theirs[0].id}?year=${YEAR}`,
+        {
+          method: 'PATCH',
+          params: { wishId: theirs[0].id },
+          json: { year: YEAR, institutionName: '被改掉的大學' },
+        },
+      );
+      assert.equal(r.status, 404);
+      const still = await prisma.wish.findFirst({ where: { id: theirs[0].id } });
+      assert.notEqual(still.institutionName, '被改掉的大學');
+    });
+
+    await test('繁星志願的學群改不成無效值', async () => {
+      const mine = await prisma.wish.findFirst({
+        where: { userId: home.students[0].id, year: YEAR, channel: 'STAR' },
+      });
+      const r = await callAs(
+        asUser(home.students[0]),
+        routes.wish.PATCH,
+        `/api/admission/wishes/${mine.id}?year=${YEAR}`,
+        { method: 'PATCH', params: { wishId: mine.id }, json: { year: YEAR, starGroup: 12 } },
+      );
+      assert.equal(r.status, 400);
     });
 
     await test('學生刪不掉別人的志願（404，與「不存在」同一個回應）', async () => {

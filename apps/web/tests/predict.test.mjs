@@ -32,12 +32,14 @@ import {
   calibrationCurve,
   discretize,
   gsatDateOf,
+  gsatPassed,
   intervalOf,
   marginalsFor,
   normalCdf,
   predictAll,
   predictGrade,
   splitNormalCdf,
+  upcomingGsatYear,
   wilsonInterval,
 } from '../lib/predict.mjs';
 
@@ -380,6 +382,94 @@ test('學測日期：115 學年度的學測在西元 2027 年 1 月', () => {
   // 於是整份預測的區間寬度差一倍，而畫面上只是一個偏寬的區間。
   assert.equal(gsatDateOf(2026), null);
   assert.equal(gsatDateOf(null), null);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// §4.5 已經考完的那一場
+//
+// 學年度自 8 月起算而學測在 1 月，所以**每年 1/20 到 7/31**，
+// `admissionYearOf()` 指的那一場學測已經考完了——半年的長度。
+// 那半年裡若拿它當預測目標，剩餘時間是負的，而三個地方會一起
+// 往錯的方向跑（進步幅度往回外插、drift 歸零、skew 歸零）：
+// 區間同時**往下移**又**變窄**。
+//
+// 這一組是那半年的護欄。
+// ═════════════════════════════════════════════════════════════════
+
+/** 2026-07-30：114 學年度的學測（2026-01-20）已經過去半年。 */
+const AFTER_GSAT = new Date('2026-07-30T00:00:00.000Z');
+
+/** 三次模考 10 → 11 → 12，都在 114 那場學測之後。 */
+const RISING_AFTER_EXAM = [
+  { subjectCode: 'MATH_A', examName: '3 月', examDate: new Date('2026-03-10T00:00:00.000Z'), grade: 10, source: 'EXTERNAL_MOCK' },
+  { subjectCode: 'MATH_A', examName: '4 月', examDate: new Date('2026-04-15T00:00:00.000Z'), grade: 11, source: 'EXTERNAL_MOCK' },
+  { subjectCode: 'MATH_A', examName: '6 月', examDate: new Date('2026-06-10T00:00:00.000Z'), grade: 12, source: 'EXTERNAL_MOCK' },
+];
+
+test('★ 目標日在資料之前時，進步幅度不可以被往回外插', () => {
+  const p = predictGrade({
+    subjectCode: 'MATH_A',
+    records: RISING_AFTER_EXAM,
+    targetYear: 114, // 這一場在 2026-01-20，已經考完
+    now: AFTER_GSAT,
+  });
+
+  // 帶號的月數仍然留在 basis 裡（稽核要看得出目標日在錨點之前），
+  // 但真正進到公式裡的是夾成 0 的那一個。
+  assert.ok(p.basis.monthsToExam < 0, '這個情境的前提就是剩餘時間為負');
+  assert.equal(p.basis.monthsAhead, 0);
+  assert.equal(p.basis.improvement, 0, '負月數乘上斜率就是往回外插，那不是更保守，是方向錯了');
+
+  // 一位**正在進步**的學生，預測不可以低於他的加權平均。
+  assert.ok(
+    p.interval.low <= p.basis.weightedMean && p.basis.weightedMean <= p.interval.high,
+    `加權平均 ${p.basis.weightedMean} 要落在區間 ${p.interval.low}–${p.interval.high} 裡`,
+  );
+  assert.ok(p.interval.high >= 12, '最近一次考 12 級分，區間上緣不該低於它');
+});
+
+test('★ 考完了的那一場要說「已經考完」，不是只顯示「約 0 個月」', () => {
+  const p = predictGrade({
+    subjectCode: 'MATH_A',
+    records: RISING_AFTER_EXAM,
+    targetYear: 114,
+    now: AFTER_GSAT,
+  });
+  assert.equal(p.basis.examPassed, true);
+  assert.ok(
+    p.notes.some((n) => /已經考完/.test(n)),
+    '畫面唯一的線索是這句話——少了它，「距學測約 0 個月」讀起來像「就快考了」',
+  );
+  assert.ok(p.notes.some((n) => /真正的學測/.test(n)), '要接到「去輸入正式級分」那個動作');
+});
+
+test('還沒考的那一場不會被誤標成考完了', () => {
+  const p = predictGrade({
+    subjectCode: 'MATH_A',
+    records: RISING_AFTER_EXAM,
+    targetYear: 115, // 2027-01-20
+    now: AFTER_GSAT,
+  });
+  assert.equal(p.basis.examPassed, false);
+  assert.ok(p.basis.monthsAhead > 8);
+  assert.ok(p.basis.improvement > 0, '真的還有時間時，進步幅度照樣要往上');
+  assert.ok(!p.notes.some((n) => /已經考完/.test(n)));
+});
+
+test('★ 預測的目標是「下一場還沒考的學測」，不是當下的學年度', () => {
+  // 這一條就是那半年的窗：2026-07-30 的學年度是 114，而 114 那場
+  // 學測在 2026-01-20 已經考完，所以還沒考的是 115。
+  assert.equal(upcomingGsatYear(AFTER_GSAT), 115);
+  assert.equal(gsatPassed(114, AFTER_GSAT), true);
+  assert.equal(gsatPassed(115, AFTER_GSAT), false);
+
+  // 窗外的每一個時點都要對：
+  assert.equal(upcomingGsatYear(new Date('2026-01-10T00:00:00.000Z')), 114, '學測前十天還是這一場');
+  assert.equal(upcomingGsatYear(new Date('2026-01-20T00:00:00.000Z')), 114, '考試當天仍算這一場');
+  assert.equal(upcomingGsatYear(new Date('2026-09-01T00:00:00.000Z')), 115, '八月之後學年度與下一場一致');
+  assert.equal(upcomingGsatYear(new Date('2027-02-01T00:00:00.000Z')), 116);
+
+  assert.equal(gsatPassed(2026, AFTER_GSAT), false, '西元年不合法時不要宣稱它考完了');
 });
 
 // ═════════════════════════════════════════════════════════════════

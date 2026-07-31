@@ -65,7 +65,7 @@ const Body = z.object({
 export const GET = scopedRoute(async (req: NextRequest, { user }) => {
   if (user.systemRole !== 'STUDENT') {
     return NextResponse.json(
-      { error: '這一支回的是學生自己查來的資料。老師要看班上的狀況在班級的升學總覽。' },
+      { error: '這一支回的是學生自己查來的資料。老師要看班上的狀況：進「班級」點一個班，那一頁上有「升學總覽」。' },
       { status: 403 },
     );
   }

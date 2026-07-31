@@ -45,11 +45,29 @@
  * 這一條是專案的硬規則（文件 07 §2.1），而它在程式碼上的落實方式
  * 就是：這個檔案是純資料與純字串組裝，沒有任何 I/O 可以被加進來
  * 而不被 code review 看見。
+ *
+ * # 每年要有人看一次的東西，只有這幾樣
+ *
+ * 這個模組每年都要維護，所以「哪些東西會過期」必須數得出來：
+ *
+ *   一、**逐年公告的統計量**。全部集中在 `lib/admission.mjs` 的
+ *       `STAR_VACANCY_FACT`，而且顯示時一律走 `starVacancySentence()`
+ *       ——那一支在年份對不上時會改口說「最近一次有數字的是哪一年」，
+ *       而不是把舊數字掛上新年份。這個檔案裡**沒有第二個寫死的統計值**。
+ *   二、**推導出來的網址**（`star{民國年}`）。它吃 `year`，所以不會過期，
+ *       但委員會改版時整條規則會失效——那是 `caution` 與 `fallback`
+ *       存在的理由。
+ *   三、**時程的月份**（「2 月底成績公布」「3 月中放榜」）。制度性的，
+ *       多年不變；真的變了是整套制度改，那時這一份清單本來就要重寫。
+ *
+ * 註解裡的年份（`star115`、`apply114` 那兩個例子、「111 學年度起無穩定
+ * 網址」）**是歷史紀錄不是設定值**，它們說明的是「當年長成什麼樣子」，
+ * 所以不隨年度更新。
  */
 // 相對路徑而不是 `@/lib/...`：這個檔案要能被 `node --test` 直接載入
 // （單元測試不經過 webpack 也不經過 tsc 的 paths），而 `@/` 那個別名
 // 只有打包器認得。同一個理由見 lib/grading.mjs 與 lib/reviewState.mjs。
-import { admissionYearOf } from './admission.mjs';
+import { admissionYearOf, starVacancySentence } from './admission.mjs';
 
 // ═════════════════════════════════════════════════════════════════
 // §1 網址的三種性質
@@ -194,6 +212,7 @@ export function schoolOfficeOnly() {
  *   recordHint: string}[]}
  */
 export function sourceChecklist(year = admissionYearOf()) {
+  const y = Number(year);
   const star = starCircularUrl(year);
   const prev = [year - 1, year - 2, year - 3];
 
@@ -276,7 +295,11 @@ export function sourceChecklist(year = admissionYearOf()) {
       title: '第二輪：該校系有沒有缺額',
       what:
         '第一輪沒錄取、或你是推薦序 2 的時候，第二輪是真的機會——' +
-        '115 學年度繁星全國缺額 922 名。要查的是該校系當年度的缺額數與' +
+        // 這個數字是**逐年公告的統計量**，所以它從 `STAR_VACANCY_FACT`
+        // 來，而且一定帶著它自己的年份。這一步以前寫死「115 學年度」，
+        // 於是 `sourceChecklist(118)` 會把三年前的數字掛上 118 學年度，
+        // 而清單其他每一處的年份都是吃 `year` 參數的——讀者分不出來。
+        `${starVacancySentence(y)}。要查的是該校系當年度的缺額數與` +
         '第二輪的錄取標準（如果有公布）。',
       where: [star, { ...sieveStandardGuide(), label: '委員會首頁的繁星公告區' }],
       recordAs: { kind: 'STAR_VACANCY', label: '繁星缺額數' },

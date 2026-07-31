@@ -538,6 +538,43 @@ export function adviceBasis({
   const gaps = [];
   const yearsWithThreshold = [...new Set(thresholds.map((t) => t.year))];
 
+  /**
+   * **逐校系**的年份。
+   *
+   * 「近三年」講的一定是某一個校系的門檻，所以年數要一個校系一個校系
+   * 地數。合起來數的後果很具體：臺大 114、清大 113、成大 112 各一筆，
+   * 三個不同的年份，於是「你查到臺大近三年的門檻相當穩定」通過了閘門
+   * ——而臺大只有一年。
+   *
+   * 同一個錯誤還會關掉最有用的那句提示：合起來數是 3，於是
+   * `ONE_YEAR_ONLY`（「去把前兩年補上」）對這三個校系一個都不會出現。
+   *
+   * 分組的鍵是「大學 × 系 × 學群」，因為門檻本來就是逐校系公布的；
+   * 只用大學名分組的話，臺大電機與臺大財金會被當成同一條趨勢。
+   */
+  const byTarget = new Map();
+  for (const t of thresholds) {
+    const key = [t.institutionName ?? '', t.programName ?? '', t.starGroup ?? ''].join('｜');
+    const hit = byTarget.get(key) ?? {
+      key,
+      institutionName: t.institutionName ?? '',
+      programName: t.programName ?? null,
+      starGroup: t.starGroup ?? null,
+      label: [t.institutionName, t.programName, t.starGroup ? `第 ${t.starGroup} 類學群` : '']
+        .filter(Boolean)
+        .join(' '),
+      years: [],
+    };
+    if (!hit.years.includes(t.year)) hit.years.push(t.year);
+    byTarget.set(key, hit);
+  }
+  const targets = [...byTarget.values()].map((t) => ({
+    ...t,
+    years: [...t.years].sort((a, b) => b - a),
+  }));
+  /** 任何一個校系最多有幾年。閘門的「近三年」驗的是這個數字。 */
+  const maxYearsPerTarget = targets.reduce((n, t) => Math.max(n, t.years.length), 0);
+
   if (starWishes.length > 0 && thresholds.length === 0) {
     gaps.push({
       code: 'NO_THRESHOLD',
@@ -547,25 +584,30 @@ export function adviceBasis({
       lookFor: 'STAR_ROUND1',
     });
   }
-  if (yearsWithThreshold.length === 1) {
-    const only = yearsWithThreshold[0];
-    gaps.push({
-      code: 'ONE_YEAR_ONLY',
-      text:
-        `你只查到 ${only} 學年度一年的錄取標準。一年看不出趨勢——` +
-        `建議把 ${only - 1} 與 ${only - 2} 學年度也查一下，三年放在一起才看得出` +
-        '這個校系的門檻是穩定的還是每年在跳。',
-      lookFor: 'STAR_ROUND1',
-    });
-  }
-  if (yearsWithThreshold.length === 2) {
-    gaps.push({
-      code: 'TWO_YEARS_ONLY',
-      text:
-        `你查到 ${yearsWithThreshold.length} 年的錄取標準。再補一年會好得多——` +
-        '兩點連得出一條線，但看不出那條線是不是真的。',
-      lookFor: 'STAR_ROUND1',
-    });
+  // 一個校系一句。年份最少的排前面——那是最值得先補的那一個。
+  for (const t of [...targets].sort((a, b) => a.years.length - b.years.length)) {
+    const where = t.label || '你查的那個校系';
+    if (t.years.length === 1) {
+      const only = t.years[0];
+      gaps.push({
+        code: 'ONE_YEAR_ONLY',
+        text:
+          `${where}你只查到 ${only} 學年度一年的錄取標準。一年看不出趨勢——` +
+          `建議把 ${only - 1} 與 ${only - 2} 學年度也查一下，三年放在一起才看得出` +
+          '這個校系的門檻是穩定的還是每年在跳。',
+        lookFor: 'STAR_ROUND1',
+        target: t.label,
+      });
+    } else if (t.years.length === 2) {
+      gaps.push({
+        code: 'TWO_YEARS_ONLY',
+        text:
+          `${where}你查到 ${t.years.join('、')} 兩年的錄取標準。再補一年會好得多——` +
+          '兩點連得出一條線，但看不出那條線是不是真的。',
+        lookFor: 'STAR_ROUND1',
+        target: t.label,
+      });
+    }
   }
   if (officialPercentile === null && !selfPercentileRef) {
     gaps.push({
@@ -602,7 +644,12 @@ export function adviceBasis({
     selfPercentileRef,
     starWishes,
     gaps,
+    /** 全部門檻資料涵蓋的年份（跨校系合計）。**不要拿它驗「近三年」。** */
     yearsWithThreshold,
+    /** 逐校系的年份。 */
+    targets,
+    /** 任何**單一校系**最多有幾年。「近三年」要靠它驗。 */
+    maxYearsPerTarget,
     numbers: [...numbers],
     hasOfficialDoc: withTrust.some((r) => r.sourceKind === 'OFFICIAL_DOC'),
     hasSchoolOffice: withTrust.some((r) => r.sourceKind === 'SCHOOL_OFFICE'),

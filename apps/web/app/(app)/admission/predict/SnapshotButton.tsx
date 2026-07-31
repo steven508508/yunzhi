@@ -50,8 +50,12 @@ export default function SnapshotButton({
               把現在的預測存一份
             </Button>
             <span className="yz-hint" style={{ margin: 0 }}>
-              存下來的是<strong>區間與信心</strong>，學測成績公布後系統會自動補上實際級分，
-              然後老師端算得出這套預測到底準不準。區間沒有變化的話不會多存一份。
+              存下來的是<strong>區間與信心</strong>。學測成績公布之後，
+              <strong>你要回來把正式級分輸入進來</strong>（上面「加一筆級分」，
+              「這是哪一種考試」選<strong>真正的學測</strong>），那一筆才會把這幾份預測
+              補上實際級分，老師端也才算得出這套預測到底準不準。
+              <strong>系統沒有辦法自己去拿那個數字</strong>——它只在你的成績單上，
+              而這裡也不會有人替你按。區間沒有變化的話不會多存一份。
             </span>
           </div>
           {out && (

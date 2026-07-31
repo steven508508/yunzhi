@@ -233,6 +233,23 @@ const asUser = (u) => ({
 const YEAR = admissionYearOf();
 /** 這個學年度的學測。回填實際成績時的考試日期要落在這一天附近。 */
 const GSAT_DAY = `${1911 + YEAR + 1}-01-20`;
+
+/**
+ * 回填那一段用的「考試日」。**取 `GSAT_DAY` 與今天之中比較早的那一個。**
+ *
+ * 因為這一支跑在哪一天不受我們控制，而 8 月到隔年 1 月之間
+ * `GSAT_DAY` 是**未來**的日期——`addGradeRecord()` 會擋掉未來的考試日期
+ * （那一條在防「年份打錯」），於是整段回填的測試在半年裡跑不起來，
+ * 而失敗的訊息看起來像回填壞了。
+ *
+ * 取今天仍然落在同一個學年度裡（`YEAR` 就是今天算出來的），所以
+ * `backfillActual()` 推出來的 `targetYear` 照樣對得上那幾份預測。
+ */
+const BACKFILL_EXAM_AT = new Date(Math.min(new Date(GSAT_DAY).getTime(), Date.now()));
+const BACKFILL_EXAM_DAY = BACKFILL_EXAM_AT.toISOString().slice(0, 10);
+/** 考試前一天。預測要落在考試之前才會被回填（見 predictDb 的 backfillActual）。 */
+const BEFORE_EXAM = new Date(BACKFILL_EXAM_AT.getTime() - 86_400_000);
+
 const stamp = Date.now();
 
 // ── 種子 ─────────────────────────────────────────────────────
@@ -572,18 +589,28 @@ async function main() {
       assert.match(r.body.overall.verdict, /等學測成績公布/);
     });
 
-    await test('★ 輸入真正的學測級分 → 歷次預測自動回填實際成績', async () => {
+    await test('★ 輸入真正的學測級分 → 考試之前做的預測回填實際成績', async () => {
       // 回填掛在成績輸入上而不是一顆獨立的按鈕：獨立的按鈕永遠不會被按，
       // 而校準曲線會永遠是空的，然後沒有人知道這套預測準不準。
+      //
+      // 上面那幾份預測是**現在**存的，而考試日可能已經過去了。
+      // 先把它們的時間戳挪到考試之前——那才是真實的時序：高三上存預測、
+      // 1 月考試、2 月輸入正式級分。
+      await prisma.gradePrediction.updateMany({
+        where: { userId: jiayi.id },
+        data: { predictedAt: BEFORE_EXAM },
+      });
+
       const r = await addGrade(jiayi, {
         subjectCode: 'MATH_A',
         examName: `${YEAR} 學測`,
-        examDate: GSAT_DAY,
+        examDate: BACKFILL_EXAM_DAY,
         grade: 12,
         source: 'OFFICIAL_GSAT',
       });
       assert.equal(r.status, 200, r.text);
       assert.ok(r.body.backfilled >= 2, `只回填了 ${r.body.backfilled} 份`);
+      assert.equal(r.body.afterExam, 0, '這時候還沒有任何一份是考後才存的');
 
       const rows = await prisma.gradePrediction.findMany({
         where: { userId: jiayi.id, subjectCode: 'MATH_A' },
@@ -595,6 +622,60 @@ async function main() {
         where: { userId: jiayi.id, subjectCode: 'ENGLISH' },
       });
       assert.ok(en.every((x) => x.actualGrade === null));
+    });
+
+    await test('★ 考完之後才存的預測不會被算成命中', async () => {
+      // 這一份的**輸入裡就有正式級分**（OFFICIAL_GSAT 的難度與級距誤差
+      // 都是 0，而它是最近的一筆），區間會緊緊包住 12。讓它進校準曲線
+      // 等於自己給自己打分數——而同一個檔案很小心地不讓 thin 的預測
+      // 進表，卻讓一個知道答案的預測進得去，那比 thin 更糟。
+      const save = await savePredictions(jiayi);
+      assert.equal(save.status, 200, save.text);
+      assert.ok(save.body.saved.saved >= 1, '多了一筆正式成績，數學A要多存一份');
+
+      const after = (
+        await prisma.gradePrediction.findMany({
+          where: { userId: jiayi.id, subjectCode: 'MATH_A' },
+        })
+      ).filter((x) => new Date(x.predictedAt) >= BACKFILL_EXAM_AT);
+      assert.ok(after.length >= 1, '這一次應該存下了一份考後的預測');
+      assert.ok(
+        after.every((x) => x.actualGrade === null),
+        '考後才存的預測被填上了實際成績',
+      );
+
+      // 學生照系統自己的指示「要改的話先把舊的那一筆刪掉」重來一次，
+      // 回填會再跑一次——那一份仍然不可以被填上。
+      const record = (
+        await prisma.subjectGradeRecord.findMany({
+          where: { userId: jiayi.id, subjectCode: 'MATH_A' },
+        })
+      ).find((x) => x.source === 'OFFICIAL_GSAT');
+      const del = await callAs(asUser(jiayi), routes.grade.DELETE, `/api/admission/grades/${record.id}`, {
+        method: 'DELETE',
+        params: { recordId: record.id },
+      });
+      assert.equal(del.status, 200, del.text);
+
+      const again = await addGrade(jiayi, {
+        subjectCode: 'MATH_A',
+        examName: `${YEAR} 學測`,
+        examDate: BACKFILL_EXAM_DAY,
+        grade: 12,
+        source: 'OFFICIAL_GSAT',
+      });
+      assert.equal(again.status, 200, again.text);
+      assert.ok(again.body.afterExam >= 1, '考後的那幾份要被數出來，不是靜靜跳過');
+
+      const still = (
+        await prisma.gradePrediction.findMany({
+          where: { userId: jiayi.id, subjectCode: 'MATH_A' },
+        })
+      ).filter((x) => new Date(x.predictedAt) >= BACKFILL_EXAM_AT);
+      assert.ok(
+        still.every((x) => x.actualGrade === null),
+        '第二次回填把知道答案的那一份也填上了',
+      );
     });
 
     await test('★ 校準曲線算得出來，而且小樣本標成「還下不了結論」', async () => {

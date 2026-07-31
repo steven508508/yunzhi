@@ -21,6 +21,7 @@
  * 所以人數少於 `MIN_COHORT` 時連名次都不能給。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -36,6 +37,7 @@ import {
   simulate,
   studentView,
 } from '../lib/star.mjs';
+import { STAR_VACANCY_FACT, starVacancySentence } from '../lib/admission.mjs';
 
 const NOW = new Date('2027-02-20T01:00:00Z');
 
@@ -248,7 +250,7 @@ test('5 人競爭、第一輪 1 個名額，排第 4 的人看到的是位置與
   // **第二輪不能被當成零。** 把它當零是系統性的悲觀偏誤。
   assert.match(p.secondRoundNote, /不估第二輪的機率/);
   assert.match(p.secondRoundNote, /絕對不是零/);
-  assert.match(p.secondRoundNote, /922 名/);
+  assert.match(p.secondRoundNote, new RegExp(`${STAR_VACANCY_FACT.count} 名`));
 
   // 而且不能出現「有相當把握」這類措辭——官方公布的只有最後一名
   // 錄取者的百分比，每年只有一個極值資料點。
@@ -571,4 +573,44 @@ test('300 位學生的全校模擬跑得完（規格書 §7.6 要求 10 秒內�
   const v = studentView(sim, 's7');
   assert.equal(v.positions.length, 1);
   assert.ok(!JSON.stringify(v).includes('s8'));
+});
+
+// ═════════════════════════════════════════════════════════════════
+// §7 那個逐年公告的缺額數
+//
+// 「第二輪不是零」這句話裡有一個**每年都會變的統計量**，而它掛在
+// 每一位學生的每一個繁星位置底下。寫死的話，過期的方式是最壞的
+// 一種：那句話讀起來完全正常，只是它把三年前的數字掛上了今年。
+// ═════════════════════════════════════════════════════════════════
+
+test('★ 缺額數是哪一年的要說出來，不可以被掛上另一個學年度', () => {
+  const sim = run([who('a', 1), who('b', 2), who('c', 3)]);
+
+  // 同一年：直接陳述。
+  const same = studentView(sim, 'a', STAR_VACANCY_FACT.year).positions[0];
+  assert.match(same.secondRoundNote, new RegExp(`${STAR_VACANCY_FACT.year} 學年度`));
+  assert.ok(!/最近一次/.test(same.secondRoundNote));
+
+  // 三年後：**不可以**出現「118 學年度繁星全國缺額 922 名」這種句子。
+  const later = studentView(sim, 'a', STAR_VACANCY_FACT.year + 3).positions[0];
+  assert.match(later.secondRoundNote, /最近一次有數字的是/);
+  assert.ok(
+    !new RegExp(`${STAR_VACANCY_FACT.year + 3} 學年度繁星推薦全國缺額`).test(later.secondRoundNote),
+    '舊數字被掛上了新年份',
+  );
+  assert.match(later.secondRoundNote, new RegExp(`${STAR_VACANCY_FACT.count} 名`), '數字本身還是要講');
+
+  // 沒傳年份時退回那個數字自己的年份——不是退回「今年」。
+  const plain = studentView(sim, 'a').positions[0];
+  assert.match(plain.secondRoundNote, new RegExp(`${STAR_VACANCY_FACT.year} 學年度`));
+});
+
+test('那個數字只有一份定義（改一處全站跟著對）', () => {
+  assert.equal(starVacancySentence(STAR_VACANCY_FACT.year).includes(String(STAR_VACANCY_FACT.count)), true);
+  // 這個模組裡不可以再出現一次那個數字的字面值。
+  const src = readFileSync(new URL('../lib/star.mjs', import.meta.url), 'utf8');
+  assert.ok(
+    !new RegExp(`${STAR_VACANCY_FACT.count}`).test(src),
+    'star.mjs 裡又寫死了一次那個缺額數',
+  );
 });

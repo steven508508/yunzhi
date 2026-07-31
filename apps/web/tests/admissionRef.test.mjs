@@ -20,6 +20,7 @@
  * 它擋的是有人日後為了方便把那串亂碼貼進來。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -51,6 +52,7 @@ import {
   starCircularUrl,
   whereToLookFor,
 } from '../lib/admissionSources.mjs';
+import { STAR_VACANCY_FACT } from '../lib/admission.mjs';
 import {
   THRESHOLD_BASIS_NOTE,
   TWO_LAYER_NOTE,
@@ -578,6 +580,32 @@ test('由 kind 反查得回「這一項去哪裡查」', () => {
   assert.equal(own.where[0].url, null, '在校百分比查不到，這一項不能給網址');
 
   assert.equal(whereToLookFor('NOT_A_KIND', 115), null);
+});
+
+test('★ 清單裡沒有一句話會把舊統計掛上新學年度', () => {
+  // 缺額那一步以前寫死「115 學年度繁星全國缺額 922 名」，而清單其餘
+  // 每一處年份都吃 `year` 參數——於是 `sourceChecklist(118)` 讀起來
+  // 完全正常，只有那一句停在三年前，而讀者分不出來。
+  const same = sourceChecklist(STAR_VACANCY_FACT.year).find((s) => s.key === 'STAR_VACANCY');
+  assert.match(same.what, new RegExp(`${STAR_VACANCY_FACT.year} 學年度`));
+
+  for (const y of [116, 117, 118]) {
+    const step = sourceChecklist(y).find((s) => s.key === 'STAR_VACANCY');
+    assert.ok(
+      !new RegExp(`${y} 學年度繁星推薦全國缺額`).test(step.what),
+      `${y} 學年度被掛上了 ${STAR_VACANCY_FACT.year} 學年度的缺額數`,
+    );
+    assert.match(step.what, /最近一次有數字的是/, '要說得出那個數字是哪一年的');
+  }
+
+  // 而且整份清單裡**不可以再出現第二個寫死的統計值**。這一條是
+  // 「每年要維護的東西集中在一處」的護欄。
+  const src = readFileSync(new URL('../lib/admissionSources.mjs', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('export function sourceChecklist'));
+  assert.ok(
+    !new RegExp(String(STAR_VACANCY_FACT.count)).test(body),
+    'admissionSources.mjs 又寫死了一次那個缺額數',
+  );
 });
 
 test('繁星第一輪那一步要講「最後一名」而不是平均', () => {

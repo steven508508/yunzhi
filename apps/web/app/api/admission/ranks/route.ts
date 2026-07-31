@@ -35,8 +35,8 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
     return NextResponse.json(
       {
         error:
-          '在校成績百分比由教務處（校務管理員）匯入。這是全校最敏感的一份資料，' +
-          '所以連系統管理員都不在名單裡。',
+          '在校成績百分比由繁星承辦匯入（校務管理員與系統管理員）。這是全校最敏感的' +
+          '一份資料，所以名單很短，而且每一次全校檢視都會寫一筆稽核記錄。',
       },
       { status: 403 },
     );

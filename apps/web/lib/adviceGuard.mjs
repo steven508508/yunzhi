@@ -75,6 +75,10 @@
  * 數字旁邊都有它的資料基礎與重算得出它的種子。
  */
 
+// 制度常數的單一來源。**不要在這裡再寫一次那個數字**——白名單與說明
+// 文字寫死同一個統計值兩次的話，改了一邊另一邊會繼續放行舊的那個。
+import { STAR_VACANCY_FACT } from './admission.mjs';
+
 // ─────────────────────────────────────────────────────────────────
 // 正規化
 //
@@ -102,17 +106,32 @@ export function normalizeForAdvice(text) {
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * 制度常數。**建議可以講這幾個數字而不必對回任何一筆參考資料**，
- * 因為它們是系統自己的說明文字裡本來就有的公開制度事實：
+ * 制度常數。**建議可以講這幾個「數字 ＋ 單位」而不必對回任何一筆
+ * 參考資料**，因為它們是系統自己的說明文字裡本來就有的公開制度事實：
  *
- *   1 至 8   繁星學群的編號；第一輪「一校一名」的 1；名額常有 1 至 3 名；
- *            校內每個位置至多推薦 2 名；推薦序 2 至 6
- *   922      115 學年度繁星全國缺額（`lib/star.mjs` 的第二輪說明就寫了它）
+ *   1 至 8 名   第一輪「一校一名」的 1；名額常有 1 至 3 名；
+ *               校內每個位置至多推薦 2 名；推薦序 2 至 6
+ *   922 名      繁星全國缺額（`lib/star.mjs` 的第二輪說明就寫了它，
+ *               而那個數字與年份的單一來源是 `STAR_VACANCY_FACT`）
+ *
+ * # 為什麼單位是白名單的一部分，而不是只看數字
+ *
+ * 因為「1 至 8」這個範圍**同時也是最危險的百分比與級分區間**：繁星
+ * 頂標學生的在校百分比大量落在 1% 至 8%，而數學 A 的門檻級分也常常
+ * 是個位數。單位被丟掉的話，一位**什麼資料都還沒輸入**的學生照樣
+ * 會拿到「最後一名錄取者的在校百分比大約是 5%，而你自己是 3%」——
+ * 兩個數字都是編的，而它們讀起來與查來的完全一樣。
+ *
+ * 學群編號（第 2 類）與校內序位（第 4 位）不需要進白名單：它們的
+ * 「單位」不在 `NUMBER_WITH_UNIT` 裡，本來就不會被檢查。
  *
  * 這份白名單刻意小而且逐項說得出理由。放寬它等於放寬「每一個數字都
  * 必須有來源」那條規則，而那是這個檔案的主要價值。
  */
-export const INSTITUTION_NUMBERS = ['1', '2', '3', '4', '5', '6', '7', '8', '922'];
+export const INSTITUTION_NUMBERS = Object.freeze({
+  名: Object.freeze(['1', '2', '3', '4', '5', '6', '7', '8', String(STAR_VACANCY_FACT.count)]),
+  人: Object.freeze(['1', '2', '3', '4', '5', '6', '7', '8']),
+});
 
 /**
  * 把 `adviceBasis()` 的結果折成閘門要的事實。
@@ -125,7 +144,9 @@ export const INSTITUTION_NUMBERS = ['1', '2', '3', '4', '5', '6', '7', '8', '922
  * @param {object} basis `adviceBasis()` 的輸出
  */
 export function adviceFacts(basis = {}) {
-  const numbers = new Set(INSTITUTION_NUMBERS.map((n) => String(Number(n))));
+  // **制度常數不進這一份。** 這裡只放「這位學生真的查到的數字」，
+  // 而制度常數走 `institutionNumbers`，因為它們只在特定單位下才成立。
+  const numbers = new Set();
   for (const n of basis.numbers ?? []) {
     const v = Number(n);
     if (Number.isFinite(v)) numbers.add(String(v));
@@ -139,8 +160,21 @@ export function adviceFacts(basis = {}) {
   return {
     /** 可以出現的數字（正規化成 `String(Number(x))`）。 */
     numbers: [...numbers],
-    /** 有錄取標準資料的學年度數。「近三年」要靠它驗。 */
-    yearCount: (basis.yearsWithThreshold ?? []).length,
+    /** 單位 → 那個單位下可以出現的制度常數。 */
+    institutionNumbers: INSTITUTION_NUMBERS,
+    /**
+     * 可以說「近三年」的年數。
+     *
+     * **這是「同一個校系」最多有幾年**，不是全部資料橫跨幾年。臺大一筆、
+     * 清大一筆、成大一筆合起來是三個年份，但沒有任何一個校系看得出趨勢
+     * ——而「近三年門檻很穩定」講的一定是某一個校系。
+     *
+     * 舊形狀的 basis（沒有 `maxYearsPerTarget`）退回舊算法，這樣手寫
+     * basis 的呼叫端不會靜靜地拿到 0。
+     */
+    yearCount: Number.isFinite(basis.maxYearsPerTarget)
+      ? basis.maxYearsPerTarget
+      : (basis.yearsWithThreshold ?? []).length,
     /** 門檻資料的筆數。沒有門檻就不該出現任何比較。 */
     thresholdCount: (basis.thresholds ?? []).length,
     /** 有沒有任何一筆是官方文件。沒有就不可以說「依官方公布」。 */
@@ -158,13 +192,33 @@ export function adviceFacts(basis = {}) {
  * 說得出來的話。要旁邊同時出現一個數字或一個程度副詞才算。
  */
 const ODDS_WORDS =
-  /機率|機會|可能性|勝算|成功率|錄取率|通過率|上榜率|命中率|把握度|probability|chance|odds|likelihood/gi;
+  /機率|機會|可能性|勝算|勝率|成功率|錄取率|通過率|上榜率|命中率|把握度|希望(?=[很不還挺蠻超渺大小高低])|probability|chance|odds|likelihood/gi;
 
 /**
  * 程度。與機率詞連在一起就是一個沒有根據的預測，即使沒有數字——
  * 「你的機會很大」與「你的機率是 68%」在學生眼裡是同一句話。
+ *
+ * 英文那一段不是為了服務英文使用者，是因為 `ODDS_WORDS` 收了
+ * `chance`／`probability`：少了英文的程度詞，「Your chance is very high.」
+ * 會命中機率詞然後因為找不到程度而被放過——半條規則比沒有規則更糟，
+ * 因為它讓人以為那一類已經擋住了。
  */
-const MAGNITUDE = /[高低大小]|不小|不高|很|蠻|挺|超|過半|一半|幾成|偏高|偏低|微乎其微|渺茫|不錯|樂觀/;
+const MAGNITUDE =
+  /[高低大小]|不小|不高|很|蠻|挺|超|過半|一半|幾成|偏高|偏低|微乎其微|渺茫|不錯|樂觀|\b(?:very|quite|fairly|pretty|highly|extremely|rather|good|great|strong|solid|decent|slim|high|low|big)\b/i;
+
+/**
+ * 英文的程度詞，**單獨再看一次而且看得比較寬**。
+ *
+ * 因為中文一個字就是一個詞，而英文一個詞平均五六個字母：同樣看 12 個
+ * 字元，中文看得到十幾個詞，英文只看得到兩個。「Your chance of getting
+ * in is very high.」的 `very` 距離 `chance` 有二十幾個字元，用中文的
+ * 窗寬會漏掉——而它是一次完整的機率預測。
+ *
+ * 中文那一條不跟著放寬，理由相反：程度詞在中文裡到處都是（「差很多」
+ * 「大考中心」），窗一放寬就會開始誤擋。
+ */
+const MAGNITUDE_EN =
+  /\b(?:very|quite|fairly|pretty|highly|extremely|rather|good|great|strong|solid|decent|slim|high|low)\b/i;
 
 /** 否定與「做不到」。這兩種語境裡的機率詞是誠實的，不能擋。 */
 const ODDS_EXEMPT_AFTER = /無法|不能|不做|不估|不算|沒有辦法|估不出|算不出/;
@@ -182,13 +236,47 @@ const ODDS_EXEMPT_AFTER = /無法|不能|不做|不估|不算|沒有辦法|估�
 const FALSE_NEGATORS = /差不多|不過|不但|不僅|不只|不外乎|要不然|不然/g;
 
 /**
+ * 轉折詞。**否定詞在它前面的話，那個否定管的是前半句。**
+ *
+ * 這一行修的是這個檔案最容易被繞過的一種句型：
+ *
+ *     這不是保證，但你的機會很大。
+ *     不敢說一定，但你八成會上。
+ *
+ * 兩句各自同時命中三條規則（斷定詞、機率詞、程度詞），而三條都被
+ * 「八個字內有否定詞」放過了——因為那個「不」離命中點很近，只是它
+ * 否定的是**逗號前面那半句**。
+ *
+ * 而這正是提示詞重試時最容易誘發的句型：我們叫模型「不要說『一定』
+ * 『穩』『有把握』」，它會先照做否定一次，再把結論接在「但」後面。
+ * 也就是說，愈努力用提示詞管，愈會撞上這一種寫法。
+ *
+ * 判斷方式是「取轉折詞之後那一段」而不是「有轉折詞就當成沒有否定」：
+ * 「我不保證，但也不敢說你穩上」的後半句自己還有一個否定，那一句要
+ * 放過。
+ */
+const TURN_MARKERS = /但是|但|可是|然而|不過|只是|話說回來/g;
+
+/**
  * 這個位置前面有否定嗎。
  *
  * 看八個字而不是一個字：「沒有把握」的 `有把握` 命中時，它前面第一個字
  * 是「有」而不是「沒」。只看一個字的實作會把最誠實的那一句話擋掉。
+ *
+ * 窗內有轉折詞時**只看轉折詞之後那一段**（見 `TURN_MARKERS`）。
+ * 轉折詞的比對要在 `FALSE_NEGATORS` 之前做，因為「不過」同時是兩者，
+ * 而先折成「約」就找不到它了。
  */
 function negatedBefore(text, index, back = 8) {
-  const win = text.slice(Math.max(0, index - back), index).replace(FALSE_NEGATORS, '約');
+  const raw = text.slice(Math.max(0, index - back), index);
+
+  let after = 0;
+  TURN_MARKERS.lastIndex = 0;
+  for (let m = TURN_MARKERS.exec(raw); m !== null; m = TURN_MARKERS.exec(raw)) {
+    after = m.index + m[0].length;
+  }
+
+  const win = raw.slice(after).replace(FALSE_NEGATORS, '約');
   return /[不沒無非未別]|難以/.test(win);
 }
 
@@ -228,6 +316,105 @@ const CERTAINTY = [
 
 /** 帶單位的數字。**這幾個單位裡的數字會被學生用來做決定。** */
 const NUMBER_WITH_UNIT = /(\d+(?:\.\d+)?)\s*(%|級分|名|人|分)(?!鐘|之)/g;
+
+// ─────────────────────────────────────────────────────────────────
+// 中文數字
+//
+// # 為什麼這一段要存在，而正規化那一段仍然不折中文數字
+//
+// 檔頭寫的是「『七成』折成『7成』之後就對不上成數那一條規則」，那句話
+// 現在仍然成立——所以正規化那一支**不動**。但少了這一段的後果是：
+// 「百分之七十」「十分之七」「門檻是十八」對 `NUMBER_WITH_UNIT`、
+// `ODDS_PREDICTION`、`NO_UNCERTAINTY` **三條規則同時是透明的**，
+// 而它們是模型被擋掉阿拉伯數字之後最自然的下一種寫法。
+//
+// 做法是**只在這裡把中文數字讀成數值**，用來回答同一個問題：
+// 這個數字對得回一筆參考資料嗎。折在正規化那一層會傷到成數規則，
+// 折在這裡不會——「七成」根本不符合下面任何一個形狀。
+// ─────────────────────────────────────────────────────────────────
+
+const CN_DIGITS = { 零: 0, 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+
+/**
+ * 中文數字讀成數值。讀不出來回 `null`——**null 一律當成「對不回來源」**，
+ * 不是當成「沒有數字」。看不懂的寫法要往擋的方向倒。
+ *
+ * 只處理 0 至 9999：百分比、級分、缺額都在這個範圍裡，而更大的數字
+ * 在這個模組裡沒有意義（真的出現多半是模型在寫別的東西）。
+ */
+export function cnNumber(text) {
+  const s = String(text ?? '').trim();
+  if (!s || /[^零一二三四五六七八九十百千兩]/.test(s)) return null;
+
+  let total = 0; // 已經結算的部分
+  let section = 0; // 目前這一節（千位以下）
+  let digit = null; // 最近一個個位數
+  for (const ch of s) {
+    if (ch in CN_DIGITS) {
+      digit = CN_DIGITS[ch];
+      continue;
+    }
+    const unit = ch === '十' ? 10 : ch === '百' ? 100 : 1000;
+    // 「十八」的十前面沒有數字，當成 1；「二十」的十前面有 2。
+    section += (digit === null ? 1 : digit) * unit;
+    digit = null;
+  }
+  total += section + (digit ?? 0);
+  return total > 9999 ? null : total;
+}
+
+/**
+ * 中文寫的百分比與分數。`百分之七十`、`十分之七`、`三分之二`。
+ *
+ * 分母不是 100 的形式一樣要抓：「十分之七」與「70%」是同一個數字，
+ * 而它更容易被讀成一句話而不是一個數字。
+ */
+const CN_FRACTION = /([零一二三四五六七八九十百千兩]{1,6}|\d+)\s*分之\s*([零一二三四五六七八九十百千兩]{1,6}|\d+)/g;
+
+/** 中文數字 ＋ 單位。`十八級分`、`一百二十名`。 */
+const CN_NUMBER_WITH_UNIT = /([零一二三四五六七八九十百千兩]{1,6})\s*(%|級分|名|人)/g;
+
+/**
+ * 中文數字寫的門檻，**沒有單位也算**。
+ *
+ * 「這個校系的門檻是十八，你是十二」與「門檻是 18%」是同一句話，
+ * 而前者躲得過每一條要 `\d` 的規則。
+ *
+ * 後面的否定環視擋掉時間與計量詞（三年、兩次、四天…）——那些是這個
+ * 功能最該講的話裡本來就有的字，而它們不是門檻。
+ */
+const CN_BARE_CLAIM =
+  /(門檻|標準|百分比|級分|名額|缺額)(?:大約|大概|差不多|約)?(?:是|為|在|落在)\s*([零一二三四五六七八九十百千兩]{1,6})(?![零一二三四五六七八九十百千兩年次個月日天位所校屆班級成分名人%．.])/g;
+
+/**
+ * 附近有沒有一個「數量」。阿拉伯數字，或上面那幾種中文寫法。
+ *
+ * **這一條刻意另寫一份而不是重用上面那三條**：那三條帶 `g` 旗標，而
+ * `.test()` 會推進它們的 `lastIndex`，於是下一次比對從半路開始——
+ * 症狀是某幾段輸出隨機地漏擋，而且重跑一次結果不一樣。
+ */
+const CN_QUANTITY =
+  /(?:[零一二三四五六七八九十百千兩]{1,6}|\d+)\s*分之|[零一二三四五六七八九十百千兩]{1,6}\s*(?:%|級分|名|人)/;
+
+function hasQuantity(near) {
+  return /\d/.test(near) || CN_QUANTITY.test(near);
+}
+
+/**
+ * 這個「數值 ＋ 單位」講得出來源嗎。
+ *
+ * 兩條路：對得回這位學生查到的某一個數字（任何單位都可以——他查到的
+ * 18 可以被講成 18%，那就是它的意思），或者是這個單位下的制度常數。
+ *
+ * @param {Set<string>} allowed 這位學生查到的數字
+ * @param {Record<string, readonly string[]>} institution 單位 → 制度常數
+ */
+function sourcedNumber(allowed, institution, value, unit) {
+  if (value === null || !Number.isFinite(value)) return false;
+  const key = String(Number(value));
+  if (allowed.has(key)) return true;
+  return (institution?.[unit] ?? []).includes(key);
+}
 
 /**
  * 平均、中位數。**這幾個字在這裡一定是編的。**
@@ -281,6 +468,23 @@ function nearby(text, start, end, back, fwd) {
   return text.slice(Math.max(0, start - back), end + fwd);
 }
 
+/**
+ * 同上，但連擷取群組一起回。
+ *
+ * 不用 `String.matchAll` 是因為它會**沿用傳進去那個正規表達式的
+ * `lastIndex`**（規格如此），而這裡的每一條都是模組層級的常數、帶 `g`
+ * 旗標、而且散在多個地方用。一次沒歸零，下一段輸出就從半路開始比對。
+ */
+function allMatchesWithGroups(re, text) {
+  re.lastIndex = 0;
+  const out = [];
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    out.push(m);
+    if (m[0].length === 0) re.lastIndex += 1;
+  }
+  return out;
+}
+
 /** 全域正規表達式的每一個命中位置。`g` 旗標的 lastIndex 一定要先歸零。 */
 function allMatches(re, text) {
   re.lastIndex = 0;
@@ -315,6 +519,7 @@ export function checkAdvice(advice, facts = {}, opts = {}) {
   const v = [];
   const text = normalizeForAdvice(advice);
   const allowed = new Set(facts.numbers ?? []);
+  const institution = facts.institutionNumbers ?? INSTITUTION_NUMBERS;
 
   const add = (code, severity, detail) => {
     if (!v.some((x) => x.code === code)) v.push({ code, severity, detail });
@@ -326,8 +531,12 @@ export function checkAdvice(advice, facts = {}, opts = {}) {
     // 功能必須說得出來的話。
     if (negatedBefore(text, hit.index)) continue;
     if (ODDS_EXEMPT_AFTER.test(text.slice(hit.end, hit.end + 10))) continue;
-    const withNumber = /\d/.test(nearby(text, hit.index, hit.end, 24, 24));
-    const withMagnitude = MAGNITUDE.test(nearby(text, hit.index, hit.end, 12, 12));
+    // 「數量」而不是「阿拉伯數字」：「機率是百分之六十八」與「機率是 68%」
+    // 是同一句話，而前者一個 `\d` 都沒有。
+    const withNumber = hasQuantity(nearby(text, hit.index, hit.end, 24, 24));
+    const withMagnitude =
+      MAGNITUDE.test(nearby(text, hit.index, hit.end, 12, 12)) ||
+      MAGNITUDE_EN.test(nearby(text, hit.index, hit.end, 30, 30));
     if (withNumber || withMagnitude) {
       add(
         'ODDS_PREDICTION',
@@ -368,17 +577,42 @@ export function checkAdvice(advice, facts = {}, opts = {}) {
   //
   // 建議裡的每一個帶單位的數字都必須對得回一筆 AdmissionReference。
   // 對不回去的就是模型自己編的，而它讀起來與查來的完全一樣。
-  NUMBER_WITH_UNIT.lastIndex = 0;
-  for (let m = NUMBER_WITH_UNIT.exec(text); m !== null; m = NUMBER_WITH_UNIT.exec(text)) {
-    const key = String(Number(m[1]));
-    if (allowed.has(key)) continue;
+  //
+  // 四種寫法各一輪：阿拉伯數字＋單位、中文數字＋單位、中文的分數／
+  // 百分比、以及**連單位都沒有的中文門檻**（「門檻是十八」）。
+  // 少掉任何一輪，模型換一種寫法就整段透明。
+  const unsourced = (shown, value, unit) => {
+    if (sourcedNumber(allowed, institution, value, unit)) return false;
     add(
       'UNSOURCED_NUMBER',
       'FAKE',
-      `「${m[1]}${m[2]}」對不回任何一筆你查到的資料。` +
+      `「${shown}」對不回任何一筆你查到的資料。` +
         '沒有來源的數字與有來源的長得一模一樣，而學生會照著它決定要不要填志願。',
     );
-    break;
+    return true;
+  };
+
+  numbers: {
+    for (const m of allMatchesWithGroups(NUMBER_WITH_UNIT, text)) {
+      if (unsourced(`${m[1]}${m[2]}`, Number(m[1]), m[2])) break numbers;
+    }
+    for (const m of allMatchesWithGroups(CN_NUMBER_WITH_UNIT, text)) {
+      if (unsourced(`${m[1]}${m[2]}`, cnNumber(m[1]), m[2])) break numbers;
+    }
+    for (const m of allMatchesWithGroups(CN_FRACTION, text)) {
+      // 分母 100 是百分比；其他分母是比例（「十分之七」＝ 70%），
+      // 而那種寫法對不回任何一筆門檻資料——門檻是用百分比公布的。
+      const denom = /^\d+$/.test(m[1]) ? Number(m[1]) : cnNumber(m[1]);
+      const numer = /^\d+$/.test(m[2]) ? Number(m[2]) : cnNumber(m[2]);
+      const asPercent = denom === 100 ? numer : null;
+      if (unsourced(`${m[1]}分之${m[2]}`, asPercent, '%')) break numbers;
+    }
+    for (const m of allMatchesWithGroups(CN_BARE_CLAIM, text)) {
+      // 單位當成 `%`：這個句型講的一定是門檻，而門檻的單位是百分比或
+      // 級分——兩種都不在制度常數的白名單裡，所以只要對不回學生查到的
+      // 數字就是編的。
+      if (unsourced(m[0], cnNumber(m[2]), '%')) break numbers;
+    }
   }
 
   // ── 五、把極值當平均 ────────────────────────────────────
@@ -441,9 +675,14 @@ export function checkAdvice(advice, facts = {}, opts = {}) {
   // 就收下——為了少一句「資料很薄」而把一段有用的建議丟掉是虧的。
   //
   // 只在建議**真的引用了一個百分比**時要求它交代資料基礎。單看
-  // `thresholdCount > 0` 的話，一段完全不下結論、只說「去把 113 那年
+  // 「有沒有門檻資料」的話，一段完全不下結論、只說「去把 113 那年
   // 補上」的建議也會被判成不合格——而那一段正是資料不足時最該給的東西。
-  if ((facts.thresholdCount ?? 0) > 0 && /\d+(?:\.\d+)?\s*%/.test(text)) {
+  //
+  // **但是不要再加「有門檻資料時才要求」那個前提。** 加上去的話，
+  // 資料**完全沒有**的那一次反而不必交代——而那正是最薄的一次。
+  // 條件掛在「這段話裡有沒有一個百分比」上就夠了：有百分比就是在下
+  // 結論，下結論就要說得出它站在什麼上面。中文寫的百分比一樣算。
+  if (/\d+(?:\.\d+)?\s*%/.test(text) || /百分之[零一二三四五六七八九十百千兩]/.test(text)) {
     if (!UNCERTAINTY_MARKERS.test(text)) {
       add(
         'NO_UNCERTAINTY',
@@ -563,6 +802,15 @@ export function safeAdvice(basis = {}) {
       : null;
   if (mine) {
     lines.push(`你的在校百分比是 ${mine.v}%（${mine.from}，越小越好）。`);
+    if (thresholds.length === 0) {
+      // 這一句不是客套。畫面上單獨擺一個百分比，讀者會自己替它找一個
+      // 對照——而這時候系統手上一個門檻都沒有。順帶：它也讓這一段
+      // 通得過自己的 `NO_UNCERTAINTY`（有百分比就要交代資料基礎）。
+      lines.push(
+        '你手上還沒有任何校系的錄取標準，所以這個數字現在**沒有東西可以拿來比**——' +
+          '它本身看不出你落在哪裡。',
+      );
+    }
   }
 
   if (thresholds.length > 0) {
