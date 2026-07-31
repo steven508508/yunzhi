@@ -24,3 +24,13 @@ samples/
 # 元件校樣（由 tools/build-gallery.mjs 產生）
 component-gallery.html
 ai-verification-report.md
+
+# 發行壓縮檔與它的雜湊。用 `git archive` 從 tag 產生（見 docs/中午部署.md），
+# 所以它的內容**已經**全部在版控裡——再 commit 一份 2.8 MB 的副本，
+# 只會讓 clone 變慢，而且下一版還會再來一份。
+#
+# 產生的位置本來就該在 repo 外面（`git archive ... > ~/yunzhi-vX.tar.gz`）。
+# 這幾行是給手滑的那一次用的：打錯路徑的症狀是 `git add -A` 把它吞進去，
+# 而那件事在 push 之前不會有人發現。
+yunzhi-v*.tar.gz
+yunzhi-v*.tar.gz.sha256
