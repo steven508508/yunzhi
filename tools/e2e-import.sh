@@ -64,6 +64,31 @@ pg_isready -q || die "Postgres 沒有在跑。請先 pg_ctlcluster 16 main start
 redis-cli ping >/dev/null 2>&1 || die "Redis 沒有在跑"
 ok "Postgres 與 Redis 就緒"
 
+# Prisma Client 產生過了嗎。
+#
+# **這一段存在的唯一理由是那個錯誤訊息指向錯的地方。** 有三支 e2e
+# （tutor、guardian、grading-ai）打包出來的 bundle 真的會在執行期
+# 匯入 `@prisma/client`——因為 `lib/notifyDb.ts` 用的是**值**層級的
+# `import { Prisma }`（要 `Prisma.JsonNull`），不是 `import type`。
+# 沒產生過的時候，Node 讀到的是還沒被生成內容取代的殼，於是報：
+#
+#   SyntaxError: Named export 'Prisma' not found. The requested module
+#   '@prisma/client' is a CommonJS module…
+#
+# 讀起來像 ESM/CJS 互通的問題，於是人會去改 import 的寫法——而那條路
+# 走到底也修不好。真正的原因是 `npm ci --ignore-scripts` 跳過了
+# postinstall，而那正是 CI 與 Dockerfile 都刻意用的安裝方式。
+#
+# 這裡自己補跑，而不是只提示：跳過 postinstall 是這個 repo 的常規做法
+# （封閉網段的部署機得走離線退路），所以「忘了 generate」不是使用者的
+# 疏忽，是預設狀態。
+if [[ ! -e node_modules/.prisma/client/index.js ]]; then
+  printf '   … Prisma Client 還沒產生（npm ci --ignore-scripts 會跳過），現在補跑\n'
+  npm run db:generate >/dev/null 2>&1 ||
+    die "prisma generate 失敗。手動跑一次看訊息：npm run db:generate"
+fi
+ok "Prisma Client 就緒"
+
 # 超級使用者連線有兩種來源，因為執行環境有兩種：
 #   開發機／沙箱  本機 cluster，走 unix socket ＋ peer 認證（su postgres）
 #   CI            Postgres 跑在另一個容器裡，沒有 postgres 這個 OS 使用者，

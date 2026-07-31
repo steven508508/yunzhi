@@ -148,6 +148,18 @@ jobs:
 
       - run: npm ci --ignore-scripts
 
+      # `--ignore-scripts` 跳過 postinstall，也就跳過了 prisma generate。
+      # 有三支 e2e 打包出來的 bundle 會在執行期真的匯入 `@prisma/client`
+      # （`lib/notifyDb.ts` 用值層級的 `import { Prisma }`），沒產生過就
+      # 死在一句「Named export 'Prisma' not found … is a CommonJS module」
+      # ——那句話指向 ESM/CJS 互通，而真正的原因在這裡。
+      #
+      # e2e-import.sh 自己也會補跑一次（同樣的理由），這一步留著是為了
+      # 讓它在 CI 的步驟清單上有名字：跑了十分鐘才紅的那一次，要看得出
+      # 是哪一段花掉的。
+      - name: 產生 Prisma Client
+        run: npm run db:generate
+
       # moto 是 S3 相容的假伺服器。用它而不是真的 MinIO：這一層要驗的
       # 是「程式有沒有把物件放對位置」，不是 MinIO 本身。
       - name: Python 相依
