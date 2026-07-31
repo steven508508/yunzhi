@@ -193,7 +193,7 @@ sudo ./deploy/scripts/setup-nginx.sh
 ./deploy/scripts/setup-nginx.sh --print
 ```
 
-站台設定的四個關鍵點，自己改設定時不要漏掉：
+站台設定的六個關鍵點，自己改設定時不要漏掉：
 
 **`client_max_body_size 200M`** — nginx 預設 1M，不改的話匯入題本
 會直接壞掉，而且回的是 413，看不出是哪一層擋的。
@@ -201,11 +201,76 @@ sudo ./deploy/scripts/setup-nginx.sh
 **`X-Forwarded-For`** — 少了它，稽核記錄裡所有事件的來源 IP 都會是
 `127.0.0.1`，誠信事件調查時等於沒有資訊。
 
+**`X-Forwarded-Proto`** — 少了它，系統會以為自己在 http 上，
+登入後的轉址會掉回 http，使用者看到的是登入成功又被踢回登入頁。
+
 **`X-Frame-Options: DENY`** — 防作弊的全螢幕鎖定與焦點偵測可以用
 iframe 包起來繞過。少了這一條，考試模式的鎖定形同虛設。
 
 **`/api/tutor/stream` 關閉 `proxy_buffering`** — 否則智慧老師的回應會
 變成「轉圈圈 20 秒然後一次跳出全部文字」，對話式教學的體感完全消失。
+
+**`proxy_read_timeout 300s` 以上** — 預設 60 秒。考試是長連線，
+題本解析的 API 也可能很慢。
+
+### 手動整合：不讓系統碰你的 nginx 設定
+
+機器上已經有其他站台、或用宝塔／aaPanel 之類的面板管理時，多數人
+不會希望安裝腳本去動 `/etc/nginx`。**這是完全支援的做法**：
+
+安裝流程本身不碰 nginx。`docker-install.sh` 只會在結尾印出建議文字，
+`preflight.sh` 會執行 `nginx -v` 與 `nginx -t`，但那是唯讀檢查（順帶
+幫你確認既有設定沒壞）。**只要不執行 `setup-nginx.sh`，就沒有任何
+東西會寫進你的 nginx 設定。**
+
+範本在 `deploy/nginx/yunzhi.conf`，自己抄過去改。往既有設定裡加的
+時候，下面四個陷阱各自都會造成「看起來設好了但沒有作用」：
+
+**先查 http 層級的指令有沒有撞名。** 範本裡的 `limit_req_zone`（兩個
+zone）與 `map $http_upgrade`（`$connection_upgrade`）是 http 區塊層級
+的。既有設定若已定義過同名的，nginx 會直接 emerg 起不來——**連帶把
+機器上其他站台一起弄掉**。套用前先確認：
+
+```bash
+grep -rn "limit_req_zone\|map \$http_upgrade" /etc/nginx/nginx.conf /etc/nginx/conf.d/
+```
+
+面板產生的設定多半已經定義好 `$connection_upgrade`，那就把範本裡
+那段 map 刪掉。
+
+**`location ^~ /` 會讓所有正則 location 失效。** 面板產生的反向代理
+設定常常長這樣。`^~` 的語義是「前綴命中就停止，不再比對正則」，
+所以你照範本加的 `location ~ ^/api/tutor/stream` **永遠不會被命中**，
+而且不會有任何錯誤訊息——症狀是智慧老師依然一次跳出全文。
+
+新增的 location 要寫成前綴式並且更長，才會贏：
+
+```nginx
+location ^~ /api/tutor/stream { ... }
+```
+
+同理，那類設定裡的「禁止存取敏感檔案」正則區塊其實也從未生效
+（不影響安全，請求都轉給應用了，但別誤以為它擋著）。
+
+**`add_header` 不會繼承。** 只要某個 location 裡出現任何一個
+`add_header`，server 層的**全部消失**。SSE 那段需要
+`add_header X-Accel-Buffering "no"`，所以那個 location 裡必須把
+`X-Frame-Options` 等安全標頭原樣重複一次——否則你只是關掉緩衝，
+順手把防作弊的 iframe 防護一起關了。
+
+**面板會覆寫你的修改。** 宝塔在 UI 裡動一次反向代理設定，
+`#PROXY-CONF-START/END` 之間就會重新產生。自訂的 location 要放在
+那個區塊**外面**，或放進面板留給自訂設定的 include 目錄
+（宝塔是 `/www/server/panel/vhost/nginx/extension/<網域>/`）。
+
+### 速率限制：學校要按帳號，不要按 IP
+
+範本附了 `limit_req_zone $binary_remote_addr` 的登入限流。**校園環境
+請不要直接套用**：整班學生走同一條對外線路出去，在 nginx 眼中是同一
+個來源 IP，按 IP 限流會在全班同時交卷時擋到真的學生——而那正是最
+不能出事的時刻。
+
+要防暴力嘗試的話應該在應用層按帳號限，不是在反向代理按 IP。
 
 ### 外部代理 ＋ 多實例
 
@@ -382,6 +447,18 @@ sudo ./deploy/scripts/ubuntu-install.sh --offline   # 全新的 Ubuntu（會一�
 它會檢查設定、服務、資料庫連通性、資源用量、備份狀態，
 每一項失敗都附上下一步該做什麼。
 
+**doctor 全綠不等於使用者打得開。** 它是從機器內部檢查的，
+反向代理那一段不在它的視野裡。用外部代理時再補這兩步：
+
+```bash
+docker compose ps web        # PORTS 欄要有 127.0.0.1:3000->3000/tcp
+curl -sSI https://你的網域/ | head -1     # 要 200 或 3xx，不是 502
+```
+
+第一步驗的是「應用有沒有真的對宿主機開口」，第二步驗的是
+「你的 nginx 有沒有正確接上」。這兩件事各自失敗的症狀都是 502，
+但修法完全不同——分開驗才知道要去哪一層找。
+
 ---
 
 ## 常見問題
@@ -399,3 +476,48 @@ sudo ./deploy/scripts/ubuntu-install.sh --offline   # 全新的 Ubuntu（會一�
 **資料庫連不上但密碼看起來是對的** — 若曾經手動改過 `.env` 的
 `POSTGRES_PASSWORD`，資料庫端的密碼並不會跟著變。見
 `docs/OPERATIONS.md` 的「金鑰輪替」。
+
+**每一個容器都健康，但反向代理一路 502** — 先確認主機埠真的發布了：
+
+```bash
+docker compose ps web        # PORTS 欄要有 127.0.0.1:3000->3000/tcp
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/readyz
+```
+
+`docker compose ps` 只顯示 `3000/tcp`（沒有 `->`）就是埠沒發布出去。
+這種狀態下容器仍然是 `healthy`，因為 healthcheck 是從容器**內部**打
+`readyz` 的；`doctor.sh` 也只會報一行「主應用未就緒」，看不出是網路
+層的問題。
+
+Docker 對只掛在 `internal: true` 網路上的容器**不會建立埠發布所需的
+NAT 規則，而且不報錯**：`docker inspect` 看得到 PortBindings 設定完整，
+`iptables -t nat -S DOCKER` 裡沒有對應規則，宿主機上沒有任何東西在聽。
+v0.27.3 修掉了這個（web 補上 `edge` 網路），`tools/deploy-check.mjs`
+有一項在盯著。自己改過 compose 的網路設定時要留意同一件事。
+
+**手動 `docker compose` 時映像拉不到，或標籤變成 `dev`** — compose 的
+映像標籤取自 `${APP_VERSION:-dev}`，而那個變數是 `docker-install.sh`
+從 `VERSION` 讀出來傳進去的。手動下指令時它不存在，於是取了預設值：
+
+```bash
+APP_VERSION=$(cat VERSION) docker compose up -d web
+```
+
+前提是那個版本的映像已經建出來了。剛 `git pull` 完但還沒重建時，
+`VERSION` 已經是新版而映像還是舊版標籤，compose 會跑去 registry 拉一個
+不存在的映像。要嘛先重建，要嘛暫時指定手上有的那個版本號。
+
+**重新 clone 或搬動目錄之後，資料好像不見了** — compose 的專案名稱
+預設取自**目錄名**，volume 會叫 `<目錄名>_postgres-data`。clone 到
+別的目錄名，compose 會建一組全新的空 volume，舊資料還在但沒有被掛上。
+重新取得程式碼時目錄名要保持一致：
+
+```bash
+cd ~ && mv yunzhi yunzhi-old && git clone <repo> yunzhi
+cd yunzhi && cp ../yunzhi-old/.env . && chmod 600 .env
+```
+
+**`.env` 一定要沿用舊的，而且不要重跑 `gen-secrets.sh`。** 它會產生
+一組新的 `POSTGRES_PASSWORD`，而資料庫 volume 裡的舊密碼不會跟著變，
+症狀是容器起得來但應用一直認證失敗。`BACKUP_ENCRYPTION_KEY` 更嚴重：
+換掉之後既有的加密備份**全部無法解密，沒有救援途徑**。
