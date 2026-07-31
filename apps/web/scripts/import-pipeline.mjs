@@ -13,6 +13,8 @@
  * 盲目重試三次就是白燒三倍的前四階段。所以 502（設定錯）
  * 直接放棄並把原因寫給老師看，只有 503（限流、暫時故障）才重試。
  */
+import http from 'node:http';
+import https from 'node:https';
 import { referencedAssetIds } from '../lib/questionShape.mjs';
 import { withTenant, withoutTenantScope } from '../lib/tenantContext.mjs';
 
@@ -69,6 +71,60 @@ const STAGE_TIMEOUT_MS = {
   ANNOTATING: 10 * 60_000,
 };
 
+/**
+ * 送一個 POST，**沒有任何內建逾時**，只聽 AbortSignal。
+ *
+ * **為什麼不用 fetch。** Node 的 global fetch 走 undici，而 undici 的
+ * `headersTimeout` 預設是 5 分鐘——上面那張 STAGE_TIMEOUT_MS 給 SOLVING
+ * 開了 30 分鐘，undici 卻會在第 5 分鐘把連線砍掉。50 題各投 3 票、
+ * 用 HIGH 模型跑，五分鐘內送不出回應標頭是常態，於是：
+ *
+ *     AI 自答失敗：無法連線 AI 服務（http://ai:8000）：fetch failed
+ *
+ * 那句話把人指向網路，但網路是好的——是我們自己的 HTTP 客戶端
+ * 提早放棄。而 `fetch failed` 是 undici 的泛用包裝，真正的原因
+ * （UND_ERR_HEADERS_TIMEOUT）藏在 `e.cause` 裡，原本沒有被帶出來。
+ *
+ * 要用 fetch 也可以，但得把 undici 加成直接相依、再同步加進
+ * apps/web/Dockerfile 的 /script-modules 清單（standalone 不會追蹤
+ * scripts/*.mjs 的相依）。node:http 零相依，這裡不值得多那一條線。
+ */
+function postJSON(url, payload, signal) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const lib = u.protocol === 'https:' ? https : http;
+    const data = JSON.stringify(payload);
+
+    const req = lib.request(
+      u,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(data),
+        },
+        // 0 = 不設限。逾時由呼叫端的 AbortSignal 統一負責，
+        // 兩層各自計時只會讓「到底是誰砍的」變得難查。
+        timeout: 0,
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () =>
+          resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }),
+        );
+      },
+    );
+
+    req.on('error', reject);
+    if (signal) {
+      if (signal.aborted) req.destroy(new DOMException('Aborted', 'AbortError'));
+      else signal.addEventListener('abort', () => req.destroy(new DOMException('Aborted', 'AbortError')), { once: true });
+    }
+    req.end(data);
+  });
+}
+
 async function callAI(path, body, stage) {
   const timeout = STAGE_TIMEOUT_MS[stage] ?? 10 * 60_000;
   const controller = new AbortController();
@@ -76,12 +132,7 @@ async function callAI(path, body, stage) {
 
   let res;
   try {
-    res = await fetch(`${AI_URL}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    res = await postJSON(`${AI_URL}${path}`, body, controller.signal);
   } catch (e) {
     clearTimeout(timer);
     if (e.name === 'AbortError') {
@@ -92,13 +143,21 @@ async function callAI(path, body, stage) {
       );
     }
     // 連不上 AI 服務：多半是它還在啟動，或剛被重啟。值得重試。
-    throw new RetryableStageError(`無法連線 AI 服務（${AI_URL}）：${e.message}`, stage);
+    //
+    // **一定要帶出底層原因。** 只印 e.message 的話，ECONNREFUSED
+    // （容器沒起來）、ECONNRESET（被 OOM 砍掉）、EAI_AGAIN（DNS）
+    // 全部長成同一句話，而這三者的處置完全不同。
+    const cause = e.cause?.code ?? e.cause?.message ?? e.code ?? '';
+    throw new RetryableStageError(
+      `無法連線 AI 服務（${AI_URL}）：${e.message}${cause ? `（${cause}）` : ''}`,
+      stage,
+    );
   } finally {
     clearTimeout(timer);
   }
 
-  const text = await res.text();
-  if (!res.ok) {
+  const text = res.text;
+  if (res.status < 200 || res.status >= 300) {
     let detail = text.slice(0, 800);
     try {
       const j = JSON.parse(text);
