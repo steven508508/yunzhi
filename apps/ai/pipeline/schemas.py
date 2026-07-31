@@ -19,7 +19,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class QuestionType(str, Enum):
@@ -116,9 +116,18 @@ class SegmentResult(BaseModel):
 
 
 class OptionOut(BaseModel):
+    """
+    一個選項。
+
+    別名是給模型的餘裕：提示詞沒有附 schema，模型很常回
+    `{"key": "A", "text": "..."}`。**只認等價的寫法，不猜語意。**
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
     order: int = Field(ge=1, le=10)
-    label: str
-    content: str
+    label: str = Field(validation_alias=AliasChoices("label", "key", "letter", "marker"))
+    content: str = Field(validation_alias=AliasChoices("content", "text", "value"))
 
 
 class AnswerSlot(BaseModel):
@@ -141,11 +150,17 @@ class ConfidenceReason(BaseModel):
 
 
 class StructuredQuestion(BaseModel):
-    question_no: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    #: 別名是給模型的餘裕：提示詞沒有附 schema，模型很常回 `number`／
+    #: `stem`。**只認等價的寫法，不猜語意。**
+    question_no: str = Field(
+        validation_alias=AliasChoices("question_no", "number", "no", "q_no", "num")
+    )
     sub_label: str | None = None        # 混合題子題：「（a）」，全形
     group_key: str | None = None
     type: QuestionType
-    content: str
+    content: str = Field(validation_alias=AliasChoices("content", "stem", "text", "body"))
     options: list[OptionOut] = Field(default_factory=list)
     answer_slots: list[AnswerSlot] = Field(default_factory=list)
     score: float | None = None
@@ -160,8 +175,28 @@ class StructuredQuestion(BaseModel):
     #: **只在原稿印了才填，絕對不可推估。** 一個編出來的答對率會被
     #: 當成實測值寫進題庫，之後再也分不出真假。
     national_correct_rate: float | None = Field(default=None, ge=0, le=1)
-    confidence: float = Field(ge=0, le=1)
+    #: 缺漏時預設 0（最低），**不是**猜一個高分。信心分數決定校對者
+    #: 先看哪幾題，預設高等於安靜地把沒把握的題目送進題庫。
+    confidence: float = Field(default=0.0, ge=0, le=1)
     confidence_reasons: list[ConfidenceReason] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_option_order(cls, data):
+        """
+        選項沒給 `order` 時依出現順序補 1、2、3…
+
+        模型很常回 `{"key": "A", "text": "…"}` 而漏掉 order——那是它
+        看不到 schema 的必然結果。順序本來就是陣列順序，補得回來，
+        沒必要為此讓整頁重跑一次（一次重跑就是一次 AI 費用）。
+        """
+        if isinstance(data, dict):
+            opts = data.get("options")
+            if isinstance(opts, list):
+                for i, o in enumerate(opts, start=1):
+                    if isinstance(o, dict) and o.get("order") is None:
+                        o["order"] = i
+        return data
 
     @field_validator("content")
     @classmethod

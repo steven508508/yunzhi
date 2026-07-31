@@ -41,6 +41,7 @@ from providers import BaseProvider
 
 from .prompts import READ_SYSTEM, read_user
 from .canonical import ASSET_REF, PageReading, Question
+from .coerce import fill_placements
 from .schemas import BlockType
 
 log = logging.getLogger("yunzhi.ai.reading")
@@ -136,6 +137,10 @@ async def read_page(
         tier=tier,
         max_tokens=16384,
         images=images,
+        # placement.page 是呼叫端才知道的：模型讀的是一張影像，
+        # 它不知道那是全份文件的第幾頁。漏掉這個必填欄位情有可原，
+        # 補起來比讓整頁重跑（＝重送影像＝再付一次錢）划算。
+        coerce=lambda d: fill_placements(d, page_index),
     )
     u = getattr(completion, "usage", None)
     usage = {

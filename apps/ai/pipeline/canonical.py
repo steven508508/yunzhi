@@ -322,6 +322,25 @@ class SubjectCode(str, Enum):
     EARTH_SCIENCE = "EARTH_SCIENCE"
 
     ELECTIVE = "ELECTIVE"
+
+    @classmethod
+    def _missing_(cls, value):
+        """
+        模型常常回中文科目名。**只認沒有歧義的**：單獨的「數學」
+        對應不到 MATH_A 或 MATH_B，猜錯會讓整份講義進錯題庫，
+        而且要到化學老師組不出考卷那天才會發現——留 UNKNOWN
+        讓校對的人選。理由與對照表見 pipeline/coerce.py。
+        """
+        from .coerce import SUBJECT_ALIASES
+
+        if isinstance(value, str):
+            code = SUBJECT_ALIASES.get(value.strip())
+            if code:
+                return cls(code)
+            upper = value.strip().upper().replace("-", "_")
+            if upper in cls.__members__:
+                return cls[upper]
+        return cls.UNKNOWN
     UNKNOWN = "UNKNOWN"
 
 
@@ -854,6 +873,14 @@ class DocumentMeta(BaseModel):
     edition: Edition = Edition.UNKNOWN
     #: 主要語言。英文科與中譯英是 mixed。下游的嵌入與朗讀要用。
     language: Literal["zh-Hant", "en", "mixed", "unknown"] = "unknown"
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _lang(cls, v):
+        """模型很常回 BCP 47 的地區碼（zh-TW），schema 用的是文字系統碼。"""
+        from .coerce import normalize_language
+
+        return normalize_language(v)
     textbook: TextbookRef = Field(default_factory=TextbookRef)
     page_count: int = Field(default=0, ge=0)
     #: 原稿檔名與物件鍵，供回頭比對
@@ -1272,6 +1299,15 @@ class PageReading(BaseModel):
     genre: Genre = Genre.UNKNOWN
     edition: Edition = Edition.UNKNOWN
     language: Literal["zh-Hant", "en", "mixed", "unknown"] = "unknown"
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _lang(cls, v):
+        """同 DocumentMeta：模型很常回 zh-TW。"""
+        from .coerce import normalize_language
+
+        return normalize_language(v)
+
     #: 頁首頁尾印的章節。每一頁都印，取眾數就是整份的章節。
     textbook: TextbookRef = Field(default_factory=TextbookRef)
 

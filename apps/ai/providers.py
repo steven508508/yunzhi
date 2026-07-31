@@ -156,6 +156,7 @@ class BaseProvider(abc.ABC):
         max_tokens: int,
         temperature: float,
         images: list[bytes] | None = None,
+        json_mode: bool = False,
     ) -> Completion: ...
 
     async def complete(
@@ -167,9 +168,14 @@ class BaseProvider(abc.ABC):
         max_tokens: int = 4096,
         temperature: float = 0.0,
         images: list[bytes] | None = None,
+        json_mode: bool = False,
     ) -> Completion:
         """
         帶重試與併發控制的呼叫入口。
+
+        `json_mode` 要求上游保證輸出是 JSON。閘道不支援時會自動退回
+        （見 OpenAIProvider._renegotiate），呼叫端不需要知道差別——
+        pipeline 那一層本來就有寬容解析與驗證重試兜著。
 
         退避採指數加抖動。固定間隔的重試在限流情境下會讓所有
         worker 同時再打一次，把限流變成自我維持的迴圈。
@@ -187,6 +193,7 @@ class BaseProvider(abc.ABC):
                         max_tokens=max_tokens,
                         temperature=temperature,
                         images=images,
+                        json_mode=json_mode,
                     )
             except FatalError:
                 raise
@@ -265,7 +272,7 @@ class AnthropicProvider(BaseProvider):
     default_base_url = "https://api.anthropic.com"
 
     async def _call(
-        self, *, model, system, user, max_tokens, temperature, images=None
+        self, *, model, system, user, max_tokens, temperature, images=None, json_mode=False
     ) -> Completion:
         client = await self.client()
         t0 = time.perf_counter()
@@ -369,12 +376,27 @@ class OpenAIProvider(BaseProvider):
         self._token_param: str | None = None
         self._send_temperature: bool | None = None
         self._image_detail: bool | None = None
+        #: 上游認不認得 response_format。None＝還沒問過。
+        self._json_mode: bool | None = None
 
-    def _body(self, model, messages, max_tokens, temperature) -> dict[str, Any]:
+    def _body(
+        self, model, messages, max_tokens, temperature, json_mode: bool = False
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"model": model, "messages": messages}
         body[self._token_param or "max_tokens"] = max_tokens
         if self._send_temperature is not False:
             body["temperature"] = temperature
+        # 只送 json_object，不送 json_schema。
+        #
+        # 嚴格模式（`{"type": "json_schema", "strict": true}`）要求 schema
+        # 的每一個物件都標 additionalProperties: false 且所有欄位都在
+        # required 裡——這裡的 canonical schema 大量使用選填欄位與
+        # 遞迴結構，改成合規的形狀等於重寫資料模型。而 json_object
+        # 已經解決了絕大部分的問題：模型不再輸出 markdown 圍籬、
+        # 不再在 JSON 前後加說明。欄位名與列舉值由提示詞注入的 schema
+        # 與 pipeline/coerce.py 負責。
+        if json_mode and self._json_mode is not False:
+            body["response_format"] = {"type": "json_object"}
         return body
 
     def _renegotiate(self, detail: str) -> bool:
@@ -397,6 +419,10 @@ class OpenAIProvider(BaseProvider):
             self._send_temperature = False
             log.info("上游不接受自訂 temperature，之後不再送出")
             changed = True
+        if "response_format" in low and self._json_mode is not False:
+            self._json_mode = False
+            log.info("上游不認得 response_format，之後改用提示詞注入 schema")
+            return True
         if "detail" in low and self._image_detail is not False:
             self._image_detail = False
             log.info("上游不認得 image_url.detail，之後不再送出")
@@ -412,7 +438,15 @@ class OpenAIProvider(BaseProvider):
         return {"type": "image_url", "image_url": image_url}
 
     async def _call(
-        self, *, model, system, user, max_tokens, temperature, images=None
+        self,
+        *,
+        model,
+        system,
+        user,
+        max_tokens,
+        temperature,
+        images=None,
+        json_mode: bool = False,
     ) -> Completion:
         client = await self.client()
         t0 = time.perf_counter()
@@ -503,7 +537,8 @@ class MockProvider(BaseProvider):
     default_base_url = "mock://local"
 
     async def _call(
-        self, *, model, system, user, max_tokens, temperature, images=None
+        self, *, model, system, user, max_tokens, temperature, images=None,
+        json_mode: bool = False,  # 假資料本來就合規。
     ) -> Completion:
         t0 = time.perf_counter()
         await asyncio.sleep(0.05)  # 模擬網路延遲，讓時序問題在測試中就浮現

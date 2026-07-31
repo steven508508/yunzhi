@@ -24,10 +24,11 @@ import logging
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from providers import BaseProvider, ContentRefused, FatalError, ProviderError
 
+from .jsonrepair import loads_tolerant
 from .prompts import (
     ANNOTATE_SYSTEM,
     PROMPT_VERSION,
@@ -40,6 +41,7 @@ from .prompts import (
     solve_user,
     structure_user,
 )
+from .schemahint import compact_schema
 from .schemas import (
     CHOICE,
     OPEN_ENDED,
@@ -94,10 +96,10 @@ def _parse_json(text: str) -> Any:
         idx = text.rfind(close)
         if idx > 0:
             try:
-                return json.loads(text[: idx + 1])
+                return loads_tolerant(text[: idx + 1])
             except json.JSONDecodeError:
                 continue
-    return json.loads(text)
+    return loads_tolerant(text)
 
 
 async def _structured(
@@ -111,17 +113,38 @@ async def _structured(
     temperature: float = 0.0,
     attempts: int = 3,
     images: list[bytes] | None = None,
+    coerce: Callable[[Any], Any] | None = None,
 ):
     """
     要求結構化輸出並驗證。驗證失敗時把錯誤訊息回饋給模型再試——
     這比單純重試有效得多，因為模型看得到自己哪裡不合規。
+
+    三道防線，由前到後：
+
+      一、`json_mode` 讓上游保證輸出是合法 JSON（閘道不支援會自動
+          退回，見 providers.OpenAIProvider._renegotiate）。
+      二、把精簡 schema 附在提示詞後面。**這一道才是治本的**：
+          json_object 只保證「是 JSON」，不保證欄位名對——實地看到的
+          `subject: '數學'`、`question_no` 寫成 `number` 都是 json_mode
+          管不到的。
+      三、`coerce` 與 schema 上的別名把已知的等價寫法收下來。
+
+    每一道都在省同一件事：驗證失敗的重試會**重送整張頁面影像**，
+    那比附一份 schema 貴得多。
     """
+    hint = compact_schema(model_cls)
+    schema_note = (
+        "\n\n輸出必須符合以下 schema。`*` 開頭是必填欄位；"
+        "`|` 分隔的是該欄位**唯一允許的值**，不要自己翻譯或換寫法。\n"
+        f"{hint}"
+    )
+
     last_err: str | None = None
     for i in range(attempts):
-        prompt = user
+        prompt = user + schema_note
         if last_err:
             prompt = (
-                f"{user}\n\n"
+                f"{user}{schema_note}\n\n"
                 f"你上一次的輸出未通過驗證，錯誤如下：\n{last_err}\n"
                 f"請修正後重新輸出完整的 JSON。"
             )
@@ -132,9 +155,13 @@ async def _structured(
             max_tokens=max_tokens,
             temperature=temperature if i == 0 else min(0.3, temperature + 0.1 * i),
             images=images,
+            json_mode=True,
         )
         try:
-            return model_cls.model_validate(_parse_json(completion.text)), completion
+            payload = _parse_json(completion.text)
+            if coerce is not None:
+                payload = coerce(payload)
+            return model_cls.model_validate(payload), completion
         except Exception as e:  # pydantic ValidationError 或 JSON 錯誤
             last_err = str(e)[:600]
             log.warning("結構化輸出驗證失敗（第 %d/%d 次）：%s", i + 1, attempts, last_err)

@@ -225,7 +225,7 @@ sudo chown -R "$(id -un):$(id -gn)" /var/backups/yunzhi
 # 三個端點
 curl localhost:3000/api/healthz    # {"alive":true,...}      行程活著
 curl localhost:3000/api/readyz     # {"ready":true,...}      資料庫與 Redis 都通
-curl localhost:3000/api/version    # {"appVersion":"0.27.6"} 現在跑的是哪一版
+curl localhost:3000/api/version    # {"appVersion":"0.28.0"} 現在跑的是哪一版
 
 # 容器狀態（全部要是 running，web / postgres / redis / minio 要是 healthy）
 docker compose ps
