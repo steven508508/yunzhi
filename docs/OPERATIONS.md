@@ -89,6 +89,15 @@ POSTGRES_SHARED_BUFFERS=1GB     # 約總記憶體的 25%
 
 `work_mem` 調高之前先算乘法：300 連線 × 8MB 在最壞情況是 2.4GB。
 
+**`POSTGRES_MAX_CONNECTIONS` 調小之後，手動跑一次 `backup.sh`。**
+它與 `max_worker_processes`、`max_locks_per_transaction`、
+`max_prepared_transactions` 這三個一樣，Postgres 復原 WAL 時不接受比
+「寫下那些 WAL 的那台」更小的值。調小的當下一切正常——調小連線數不會
+讓正在跑的資料庫出問題——**代價是在你最需要時間點還原的那一天，還原
+起不來**，而錯誤訊息裡沒有「有人改過設定」這幾個字。跑一次備份，新的
+基礎備份就會用新的值當基準。處理方式見
+`docs/DISASTER-RECOVERY.md` 的「如果它說 insufficient parameter settings」。
+
 ---
 
 ## 金鑰輪替

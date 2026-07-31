@@ -171,6 +171,42 @@ LOG:  archive recovery complete
 `archive recovery complete` 而沒有它，代表 WAL 沒有涵蓋到你要的時間，
 資料庫只是跑到手邊 WAL 的結尾就停了 —— 時間點是錯的，不要往下做。
 
+### 如果它說 `insufficient parameter settings`
+
+第 4 步起不來，log 裡是這樣：
+
+```
+FATAL:  recovery aborted because of insufficient parameter settings
+DETAIL: max_worker_processes = 4 is a lower setting than on the primary
+        server, where its value was 8.
+HINT:   You can restart the server after making the necessary configuration changes.
+```
+
+**這不是備份壞了，是設定在備份之後被調小了。** Postgres 復原 WAL 時
+需要的資源不能少於當初寫下那些 WAL 的那台，涉及四個參數：
+`max_connections`、`max_worker_processes`、`max_locks_per_transaction`、
+`max_prepared_transactions`。
+
+會踩到它的情境很具體：機器買回來比原本規劃的小，於是有人把
+`max_connections` 從 200 調到 100 —— 那天一切正常，因為調小連線數不會
+讓正在跑的資料庫出問題。**代價是在三個星期後、你最需要還原的那一天
+才出現**，而訊息裡完全沒有「有人改過設定」這幾個字。
+
+處理方式是照 DETAIL 那一行把值補回去，補在
+`postgresql.auto.conf`（不是 `postgresql.conf`，理由見下一節），然後重跑
+第 4 步：
+
+```bash
+docker compose exec postgres bash -c \
+  "echo 'max_worker_processes = 8' >> /var/lib/postgresql/data/pitr/data/postgresql.auto.conf"
+```
+
+一次只會報一個參數，改完再啟動可能會報下一個 —— 逐個補到起得來為止，
+這是正常的，不代表哪裡壞了。
+
+**反過來說：這四個參數只要調小過，就去手動跑一次 `backup.sh`。** 新的
+基礎備份會用新的值當基準，舊備份的這個坑就不會再等在那裡。
+
 ### 為什麼設定要寫在 `postgresql.auto.conf`
 
 因為 compose 的 postgres 是用
