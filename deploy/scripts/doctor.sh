@@ -104,7 +104,17 @@ if [[ "${MODE}" == "docker" ]]; then
   # 它不在的時候，備份容器就算 unhealthy 也不會被任何地方報出來——
   # 而「備份天天失敗」的唯一症狀就是那個 unhealthy。三層指示燈
   # （容器 healthcheck、這張清單、下面的 backup.age）原本同時是綠的。
-  for svc in postgres redis minio web worker ai caddy backup; do
+  # **Caddy 只在它該跑的時候才檢查。** PROXY_MODE=external 時
+  # docker-boot.sh 不帶 --profile caddy，容器本來就不存在——把它
+  # 無條件列進來的話，每一台用既有 nginx 的機器每次跑 doctor 都會
+  # 固定紅一項、而且整支腳本回非零。
+  #
+  # 那個代價比「少檢查一個服務」大得多：假警報會訓練維護老師忽略
+  # doctor 的輸出，而 doctor 正是出事時唯一的觀測手段。把它接進監控
+  # 的人還會天天收到一則永遠不會好的告警。
+  svcs=(postgres redis minio web worker ai backup)
+  [[ "${PROXY_MODE:-caddy}" == "caddy" ]] && svcs+=(caddy)
+  for svc in "${svcs[@]}"; do
     state="$(compose ps --format '{{.State}}' "${svc}" 2>/dev/null | head -1)"
     health="$(compose ps --format '{{.Health}}' "${svc}" 2>/dev/null | head -1)"
     case "${state}" in
@@ -325,10 +335,20 @@ fi
 
 # WAL 歸檔失敗是靜默的，而它失敗的後果是磁碟被寫滿。
 if [[ "${WAL_ARCHIVE_ENABLED:-true}" == "true" ]]; then
+  # **failed_count 是累計值，不會衰減。** 只看它的話，這輩子失敗過
+  # 一次就永遠報紅——最典型的就是裝機當天歸檔目錄權限還沒對的那幾
+  # 秒，之後歸檔正常運作好幾個月，doctor 還是天天說它壞了。
+  #
+  # 真正要問的是「最後一次成功比最後一次失敗新嗎」。新 → 已經恢復，
+  # 降成提醒（但不隱藏，曾經出過事值得知道）；不新 → 現在真的壞著，
+  # 而它壞著的後果是 Postgres 累積 WAL 直到磁碟寫滿。
   wal_fail="$(pg_query "SELECT failed_count FROM pg_stat_archiver")"
   wal_last="$(pg_query "SELECT coalesce(last_archived_time::text,'從未') FROM pg_stat_archiver")"
-  if (( ${wal_fail:-0} > 0 )); then
-    fail wal.archive "WAL 歸檔失敗 ${wal_fail} 次" "Postgres 會累積 WAL 直到磁碟寫滿。檢查歸檔目錄權限：docker compose logs postgres | grep -i archive"
+  wal_ok="$(pg_query "SELECT (last_failed_time IS NULL OR (last_archived_time IS NOT NULL AND last_archived_time > last_failed_time))::int FROM pg_stat_archiver")"
+  if (( ${wal_fail:-0} > 0 )) && [[ "${wal_ok}" != "1" ]]; then
+    fail wal.archive "WAL 歸檔失敗 ${wal_fail} 次，且最後一次嘗試仍是失敗" "Postgres 會累積 WAL 直到磁碟寫滿。檢查歸檔目錄權限：docker compose logs postgres | grep -i archive"
+  elif (( ${wal_fail:-0} > 0 )); then
+    soft wal.archive "WAL 歸檔曾失敗 ${wal_fail} 次，現已恢復（最後一次成功 ${wal_last}）" "歷史失敗多半是裝機當天權限未就緒。要歸零計數：SELECT pg_stat_reset_shared('archiver');"
   elif [[ -n "${wal_last}" ]]; then
     pass wal.archive "WAL 歸檔正常（最後一次 ${wal_last}）"
   fi
