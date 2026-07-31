@@ -124,6 +124,13 @@ export async function loadProgress(jobId: string, tenantId: string) {
     stages,
     totalPages: job.totalPages,
     totalCandidates: job.totalCandidates,
+    /**
+     * 判讀失敗的頁面。**這一份資料原本只被拿去組進度頁的一行字，
+     * 校對介面完全看不到**——於是一份 20 題的題本只抽出 4 題時，
+     * 老師打開編輯器看到 4 題，沒有任何東西告訴他另外 16 題去哪了。
+     * 這是靜默的資料遺失，比抽錯更糟。
+     */
+    failedPages: (detail.SEGMENTING?.failedPages ?? []) as string[],
     aiCostTwd: Number(job.aiCostTwd ?? 0),
     attemptCount: job.attemptCount,
     files: job.files,

@@ -159,6 +159,8 @@ export default async function Page({ params }: { params: Promise<{ jobId: string
       knowledgePoints={knowledgePoints}
       reviewSeconds={job.job.reviewSeconds ?? 0}
       committedCount={job.candidates.filter((c) => c.questionId).length}
+      failedPages={progress.failedPages}
+      totalPages={progress.totalPages ?? 0}
     />
   );
   });

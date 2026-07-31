@@ -101,6 +101,8 @@ export default function Review({
   knowledgePoints,
   reviewSeconds: initialReviewSeconds,
   committedCount,
+  failedPages,
+  totalPages,
 }: {
   jobId: string;
   title: string;
@@ -115,6 +117,10 @@ export default function Review({
   reviewSeconds: number;
   /** 這份題本已入庫的題目數，供刪除對話框說明連帶影響。 */
   committedCount: number;
+  /** 判讀失敗的頁面。這些頁面的題目**完全沒有進來**。 */
+  failedPages: string[];
+  /** 原稿總頁數，用來說「20 頁裡有 16 頁沒讀到」。 */
+  totalPages: number;
 }) {
   const [items, setItems] = useState(initial);
   const [cur, setCur] = useState(() => {
@@ -508,6 +514,29 @@ export default function Review({
           「已儲存」決定要不要關掉分頁。 */}
       {indicator.detail && (
         <div className="yz-savebar" role="alert">{indicator.detail}</div>
+      )}
+
+      {/* 判讀失敗的頁面。**這一塊必須佔畫面**，理由與上面那條存檔列
+          一樣：這是靜默的資料遺失。一份 20 題的題本只抽出 4 題時，
+          老師打開編輯器看到的是 4 題「正常」的題目——沒有任何東西
+          告訴他另外 16 題根本沒進來，他會以為原稿就只有這些。
+
+          Python 那端早就把 page_unreadable 標成 ERROR issue 了
+          （routes_import.py 的註解還寫著「校對介面會顯示第 N 頁未能
+          判讀」），但那份資料一路傳到 web 之後只被拿去組進度頁的
+          一行字，校對介面從來沒有讀過它。 */}
+      {failedPages.length > 0 && (
+        <div className="yz-savebar" role="alert" style={{ background: 'var(--mark)' }}>
+          <strong>
+            有 {failedPages.length} 頁未能判讀
+            {totalPages > 0 && `（共 ${totalPages} 頁）`}——這些頁面的題目完全沒有進來。
+          </strong>
+          <br />
+          {failedPages.join('、')}
+          <br />
+          下面列出的 {items.length} 題只是讀得到的部分。要補齊請回匯入紀錄頁重跑，
+          或確認原稿這幾頁是否為翻拍模糊、手寫覆蓋、或整頁是圖。
+        </div>
       )}
 
       {pendingTypes.length > 0 && (
