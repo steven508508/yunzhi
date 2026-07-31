@@ -322,6 +322,10 @@ export function createProctorTracker({ questionOrder = null } = {}) {
      *
      * 代價是一次進出留下兩列。全螢幕的切換一場考試不會超過幾次，
      * 兩列讀得完；而離開分頁一場可能有幾十次，那才需要合併成一列。
+     *
+     * **但「當下就記一列」不等於「當下就送出去」**：那一列在
+     * `MIN_AWAY_MS` 之內還可能被撤回（下面那個 iPad 的假訊號），
+     * 而送出去之後就撤不回來了。送出的時機由 `drain` 押後，見那一支。
      */
     fullscreen(isFull, at) {
       if (isFull === fullNow) return;
@@ -360,6 +364,11 @@ export function createProctorTracker({ questionOrder = null } = {}) {
         // 是瀏覽器。撤回剛才那一列，兩邊都不記。
         return;
       }
+      // 撤不回來（那一列已經被 beacon 強制送出去了）。**還是要補這一列**：
+      // 少了它，老師端看到的是一個永遠沒有結束的「離開全螢幕」。
+      // 它的 `durationMs` 若短於 MIN_AWAY_MS，`summarizeEvents` 會據此
+      // 把那一次不算進「離開全螢幕幾次」——同一條「短於這個長度的是
+      // 瀏覽器不是行為」的規則，在讀的那一端再守一次。
       push({
         type: 'FULLSCREEN_ENTER',
         at,
@@ -435,10 +444,33 @@ export function createProctorTracker({ questionOrder = null } = {}) {
      *
      * 太短而沒有留下記錄的那一種**要保留**：它什麼都還沒送出去，
      * 而手機切輸入法的連續抖動正是靠它才接得起來。
+     *
+     * # 剛離開全螢幕的那一列會被留下來，最多 `MIN_AWAY_MS`
+     *
+     * 因為它還在撤回窗裡。iPad 把全螢幕彈掉又在 0.2 秒後彈回來時，
+     * `fullscreen(true)` 要撤回剛才那一列——而**送出去的撤不回來**。
+     * v0.26.0 之前作答頁在離開全螢幕的當下就送，於是撤回從來沒有成立過：
+     * 每一次 iPad 的假訊號都在老師端變成一列「離開全螢幕」，
+     * 而那是一件學生沒有做過的事。
+     *
+     * 為什麼不改成「回來才記」（那樣就不必留）：因為多數學生離開之後
+     * 不會再進去，那一列只剩分頁關閉時的 beacon 送得出去，而那是這條路
+     * 上最不可靠的一次傳輸。押後 1.5 秒買到的是同一個效果，代價小得多。
+     *
+     * @param at 現在（單調時鐘）。**不給就是全部放行**——那是 beacon
+     *   那條路：分頁要關了，撤回窗已經沒有意義，而留著等於永遠送不出去。
+     *   有時鐘可用的呼叫端一律要傳，否則這個保護等於不存在。
      */
-    drain() {
-      const out = queue;
-      queue = [];
+    drain(at = null) {
+      const holding =
+        typeof at === 'number' &&
+        fsOut &&
+        fsOut.record &&
+        at - fsOut.start < PROCTOR.MIN_AWAY_MS
+          ? fsOut.record
+          : null;
+      const out = holding ? queue.filter((r) => r !== holding) : queue;
+      queue = holding ? [holding] : [];
       if (justBack && justBack.record) justBack = null;
       lastPaste = null;
       return out;
@@ -537,6 +569,19 @@ export function summarizeEvents(events) {
       }
     } else if (e.type === 'FULLSCREEN_EXIT') {
       fullscreenExits += 1;
+    } else if (
+      e.type === 'FULLSCREEN_ENTER' &&
+      typeof e.durationMs === 'number' &&
+      e.durationMs < PROCTOR.MIN_AWAY_MS
+    ) {
+      // 「離開了 0.2 秒就回來」——那不是行為，是 iPad 的全螢幕 API
+      // （見 `fullscreen`）。合併器本來會把兩列一起撤掉，但那一列
+      // 若已經被 beacon 強制送出去就撤不回來了，只剩這裡抵銷得掉。
+      //
+      // 抵銷的是**計數**不是那一列：時間軸上兩列都照樣列出來，
+      // 老師看得到「離開 0 秒後回到全螢幕」。刪掉事實不是這個模組
+      // 該做的事，說出「這一次不算一次離開」才是。
+      fullscreenExits = Math.max(0, fullscreenExits - 1);
     } else if (e.type === 'PASTE') {
       pastes += 1;
       pasteChars += Number(e.meta?.chars) || 0;

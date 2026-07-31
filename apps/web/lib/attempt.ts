@@ -973,6 +973,15 @@ export type TakeQuestion = {
   /** 題組的前導敘述。同一個題組的第一題才帶，後面的題目共用。 */
   stimulus: string | null;
   stimulusLabel: string | null;
+  /**
+   * 題組共用的附圖（實驗裝置圖、地圖、圖表）。
+   *
+   * **與 `stimulus` 是一組，一定要一起帶。** 只帶文字的那一版讓作答頁
+   * 印出「如圖所示」而畫面上什麼都沒有——而那一題的條件就在圖裡。
+   * 與 `stimulus` 同一條規則：只掛在題組的第一題上，後面的小題由
+   * `stimulusFor` 往回找（連圖一起找）。
+   */
+  stimulusAssets: Prisma.JsonValue | null;
   groupId: string | null;
   options: TakeOption[];
   /** 選填題的格位標籤。**只有標籤，沒有答案。** */
@@ -1083,6 +1092,7 @@ export async function loadAttemptForStudent(
         subLabel: null,
         stimulus: null,
         stimulusLabel: null,
+        stimulusAssets: null,
         groupId: null,
         options: [],
         slots: null,
@@ -1107,6 +1117,10 @@ export async function loadAttemptForStudent(
       subLabel: q.subLabel,
       stimulus: firstOfGroup ? (q.group?.stimulus ?? null) : null,
       stimulusLabel: firstOfGroup ? (q.group?.label ?? null) : null,
+      // 圖跟著文字走：帶了引文的那一題才帶圖，否則同一張圖會在封包裡
+      // 出現三次。上面那個 select 早就查了這一欄，只是沒有人把它接出去
+      // ——症狀是題組題永遠缺圖，而作答頁與檢討頁都不會報錯。
+      stimulusAssets: firstOfGroup ? (q.group?.stimulusAssets ?? null) : null,
       groupId: q.groupId,
       options: orderOptions(q.options, item.optionOrder),
       // 有選項的題目不會有格位。舊資料裡偶爾兩者都有（匯入時多存了
@@ -1309,6 +1323,8 @@ export async function listStudentTasks(userId: string): Promise<StudentTask[]> {
       // 查詢，而少了它們就得逐份任務再問一次——那就是 N+1。
       releasePolicy: true,
       releasedAt: true,
+      // 同卷任務要靠它查（見下面的 `cohortByPaper`）。
+      paperId: true,
       paper: {
         select: {
           title: true,
@@ -1339,6 +1355,8 @@ export async function listStudentTasks(userId: string): Promise<StudentTask[]> {
     orderBy: [{ dueAt: 'asc' }, { createdAt: 'desc' }],
   });
 
+  const cohorts = await cohortByPaper(rows);
+
   return rows.map((a) => {
     const attempts = a.attempts;
     const open = attempts.find(
@@ -1359,7 +1377,12 @@ export async function listStudentTasks(userId: string): Promise<StudentTask[]> {
     // 成績講的是最近一次**交出去**的那一份，不是最後開的那一份——
     // 後者可能是一份剛開始寫、還沒交的，而清單上顯示它的分數（null）
     // 會讓上禮拜考完的成績看起來不見了。
-    const visible = last ? maySeeResult(a, last, now) : null;
+    //
+    // `paperCohort` 一定要一起傳。少了它，ON_DUE 的判斷只看自己的
+    // `dueAt`：忠班截止那一刻清單就把按鈕畫成「看檢討」，而檢討頁那一支
+    // （lib/result.ts 有查同卷任務）說「孝仁兩班還沒考完，逐題檢討還沒
+    // 開放」。**兩個畫面都不覺得自己壞了**，而學生會去問老師。
+    const visible = last ? maySeeResult({ ...a, paperCohort: cohorts.get(a.id) }, last, now) : null;
 
     return {
       assignmentId: a.id,
@@ -1382,6 +1405,8 @@ export async function listStudentTasks(userId: string): Promise<StudentTask[]> {
       // 分數只在放行到 SCORE_ONLY 以上時才出現。這一頁是清單，
       // 但它與檢討頁受同一條規則管——只在清單上藏起來、
       // 詳細頁卻看得到（或反過來）是最難察覺的一種不一致。
+      // 「同一條規則」包含**餵給它的資料**：兩邊都要帶同卷任務，
+      // 少了一邊就是 v0.26.0 那個「清單寫看檢討、點進去說還沒開放」。
       score: visible && visible.level !== 'NONE' ? (last?.totalScore ?? null) : null,
       maxScore: last ? a.paper.totalScore : null,
       resultLevel: visible?.level ?? 'NONE',
@@ -1389,6 +1414,55 @@ export async function listStudentTasks(userId: string): Promise<StudentTask[]> {
       resultNote: visible?.reason ?? '',
     };
   });
+}
+
+/**
+ * 這幾份任務各自的「同一份卷子上的其他任務」，鍵是**任務 id**。
+ *
+ * # 為什麼不直接用 `lib/assignment.ts` 的 `paperCohort`
+ *
+ * 那一支一次問一份任務，而這一頁一次要問一位學生的每一份任務——
+ * 一個高三生的清單上二十幾份，那就是二十幾次查詢，而答案多數是空的。
+ * 所以這裡一次把所有相關的卷子問完，再自己分組。
+ *
+ * # 為什麼只查 ON_DUE 的
+ *
+ * 因為只有那一種政策會走到 `cohortGate`（見 lib/release.mjs 的
+ * `maySeeResult`）。其他四種查了也不會被讀，而這一支在每一位學生
+ * 每一次打開任務清單時都會跑。
+ *
+ * # 沒查的那幾份回傳 `undefined` 而不是空陣列
+ *
+ * 空陣列的意思是「這份卷子沒有別的任務」，`undefined` 是「沒問過」。
+ * `cohortGate` 對這兩者的處理相同，但寫成空陣列的話，下一個人把這裡
+ * 改成「全部都查」時會少掉一個提醒：**沒問過就不可以推論出沒有別的班**。
+ */
+async function cohortByPaper(
+  rows: { id: string; paperId: string; releasePolicy: string }[],
+): Promise<Map<string, { id: string; title: string; dueAt: Date | null }[]>> {
+  const out = new Map<string, { id: string; title: string; dueAt: Date | null }[]>();
+  const onDue = rows.filter((a) => a.releasePolicy === 'ON_DUE');
+  if (onDue.length === 0) return out;
+
+  const others = await prisma.assignment.findMany({
+    where: { paperId: { in: [...new Set(onDue.map((a) => a.paperId))] } },
+    select: { id: true, title: true, dueAt: true, paperId: true },
+    orderBy: [{ dueAt: 'asc' }, { createdAt: 'asc' }],
+  });
+
+  const byPaper = new Map<string, typeof others>();
+  for (const o of others) {
+    const bucket = byPaper.get(o.paperId);
+    if (bucket) bucket.push(o);
+    else byPaper.set(o.paperId, [o]);
+  }
+  for (const a of onDue) {
+    // **要把自己排掉。** 留著的話 `cohortGate` 會把自己的截止時間當成
+    // 「別的班還沒考完」，而學生看到的訊息會變成一句假話：
+    // 「這份卷子還有別的班級沒有考完」——沒有別的班。
+    out.set(a.id, (byPaper.get(a.paperId) ?? []).filter((o) => o.id !== a.id));
+  }
+  return out;
 }
 
 /**

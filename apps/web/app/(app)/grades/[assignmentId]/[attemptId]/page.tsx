@@ -325,7 +325,14 @@ function QuestionBlock({
       {q.stimulus && (
         <div className="yz-take__stimulus">
           {q.stimulusLabel && <div className="yz-take__stimlabel">{q.stimulusLabel}</div>}
-          <MathText>{q.stimulus}</MathText>
+          {/* 附圖走**老師那條路**（`/api/assets?key=`，預設值）：那一支問的是
+              「你教不教這份題本的科目」。學生那一條要帶 `attempt=`，
+              老師帶了反而會被判成「這不是你的作答」。
+              `loadAttemptForGrading` 一直都把這幾個欄位查回來了，只是這一頁
+              沒有接——症狀是老師在判一份看不到圖的作答，而畫面上只寫〔附圖〕。 */}
+          <MathText assets={q.stimulusAssets} label="題組素材">
+            {q.stimulus}
+          </MathText>
         </div>
       )}
 
@@ -341,6 +348,10 @@ function QuestionBlock({
           <span className="yz-review__score">
             {q.earnedScore === null ? '—' : fmtScore(q.earnedScore)} / {fmtScore(q.score)} 分
           </span>
+          {/* 收合時的一行預覽**刻意不傳 assets**：它在 `<summary>` 裡，
+              而附圖是可以點開放大的按鈕——巢狀的互動元素會讓鍵盤操作
+              與讀螢幕都亂掉，一行的高度也放不下一張圖。標記會排成
+              〔附圖〕，而那正是這裡要的。學生的檢討頁同一個決定。 */}
           <span className="yz-review__peek">
             <MathText>{q.content}</MathText>
           </span>
@@ -349,7 +360,9 @@ function QuestionBlock({
         <div className="yz-review__body">
           <div className="yz-review__stem">
             {q.subLabel && <b>{q.subLabel}</b>}
-            <MathText>{q.content}</MathText>
+            <MathText assets={q.contentAssets} label={`第 ${q.order} 題`}>
+              {q.content}
+            </MathText>
           </div>
 
           {q.options.length > 0 ? (
@@ -370,7 +383,12 @@ function QuestionBlock({
                   </span>
                   <span className="yz-take__optkey">({o.label})</span>
                   <span>
-                    <MathText>{o.content}</MathText>
+                    {/* 選項的圖也要畫：物理的四個選項常常整個就是四張圖，
+                        少了它們這一頁上只剩四個〔附圖〕，而老師正在判
+                        「他選的那一個對不對」。 */}
+                    <MathText assets={o.assets} label={`第 ${q.order} 題選項 ${o.label}`}>
+                      {o.content}
+                    </MathText>
                   </span>
                   {/* 文字標記與底色並存：把這一頁印出來給家長看的時候，
                       只靠底色就分不出他選了哪一個。 */}
@@ -392,6 +410,16 @@ function QuestionBlock({
                   這個分數是人給的，「全班重新計分」不會把它改掉。
                 </span>
               )}
+            </p>
+          )}
+
+          {/* 到題庫看這一題。老師是為了「這一題是不是出錯了」才點進這一份
+              作答的，而下一步一定是去看那一題的標準答案與解析——以前那一步
+              只能自己到 /bank 用題幹文字搜。`UNAVAILABLE` 的那幾題沒有題庫
+              可去（版面快照指到一個已經不存在的 id），連結畫出來只會 404。 */}
+          {q.type !== 'UNAVAILABLE' && (
+            <p className="yz-grade__sub">
+              <Link href={`/bank/${q.questionId}`}>到題庫看這一題（答案、解析、規準）</Link>
             </p>
           )}
 

@@ -24,9 +24,19 @@ export declare function saveIndicator(input?: {
   savedAtLabel?: string | null;
 }): { kind: SaveKind; urgent: boolean; label: string; detail: string | null };
 
+/**
+ * 待送出佇列與**正在飛的那一批**合起來還有幾題沒到伺服器。
+ * 泛型：作答頁的 `Pending` 形狀由那一頁定義，這裡只要求有 `questionId`。
+ */
+export declare function unsentAnswers<T extends { questionId: string }>(
+  inFlightBatch: readonly T[] | null | undefined,
+  pending: ReadonlyMap<string, T> | null | undefined,
+): T[];
+
 export declare function answeredGap(input?: {
   local?: number | null;
   server?: number | null;
+  /** 傳 `unsentAnswers(...).length`，不是 `pending.size`。 */
   pendingCount?: number;
 }): { kind: 'unknown' | 'ok' | 'pending' | 'lost'; gap: number; detail: string | null };
 
@@ -48,13 +58,21 @@ export type StimulusSource = {
   order: number;
   stimulus: string | null;
   stimulusLabel: string | null;
+  /** 題組共用的附圖。`unknown`：這一層不認得 Prisma 的 Json 型別。 */
+  stimulusAssets?: unknown;
   groupId: string | null;
 };
 
 export declare function stimulusFor(
   questions: readonly StimulusSource[],
   index: number,
-): { stimulus: string; label: string | null; inherited: boolean } | null;
+): {
+  stimulus: string;
+  label: string | null;
+  /** 與 `stimulus` 同一題來源的附圖。沒有圖是 `null`，不是 `undefined`。 */
+  assets: unknown;
+  inherited: boolean;
+} | null;
 
 export declare function groupRange(
   questions: readonly StimulusSource[],

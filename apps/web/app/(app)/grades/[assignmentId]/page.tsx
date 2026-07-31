@@ -716,6 +716,7 @@ export default async function AssignmentGradesPage({
               答對率的分母是交卷人數，<strong>未作答計為答錯</strong>——老師問的是
               「這一題全班有多少人會」。多選題的「平均得分率」會高於答對率，
               那個差就是部分給分吃掉的部分。
+              　<strong>題號可以點</strong>，會開到題庫裡的那一題（答案、解析、規準都在那裡）。
               {awarded.size > 0 && (
                 <>
                   　標成「已送分」的那 {awarded.size} 題<strong>不論作答一律得滿分</strong>
@@ -727,7 +728,21 @@ export default async function AssignmentGradesPage({
             <Table
               caption="各題答對率"
               columns={[
-                { key: 'o', head: '題號', numeric: true, cell: (q: QRow) => q.order },
+                {
+                  key: 'o',
+                  head: '題號',
+                  numeric: true,
+                  // 題號是連結。老師在這張表上看到「第 12 題答對率 3%」時，
+                  // 下一個動作永遠是去看那一題到底出了什麼事（答案設錯？
+                  // 選項印壞了？），而在這之前他得自己到 /bank 用題幹文字
+                  // 搜——搜出來的還可能是別份卷子上長得很像的那一題。
+                  // 反方向的連結（題庫 → 這一頁）早就有了，這是它的回程。
+                  cell: (q: QRow) => (
+                    <Link href={`/bank/${q.questionId}`} title="到題庫看這一題">
+                      {q.order}
+                    </Link>
+                  ),
+                },
                 { key: 't', head: '題型', cell: (q: QRow) => TYPE_LABELS[q.type] ?? q.type },
                 { key: 's', head: '配分', numeric: true, cell: (q: QRow) => q.score },
                 { key: 'c', head: '答對率', cell: (q: QRow) => <Rate value={q.correctRate} /> },

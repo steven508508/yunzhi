@@ -228,8 +228,24 @@ export default async function BatchGradingPage({
             第 {view.questionOrder} 題（{TYPE_LABEL[view.questionType] ?? view.questionType}，
             {fmt(view.maxScore)} 分）
           </h2>
+          {/* 題組的引文。**AI 拿得到而老師拿不到是不可以的**——
+              `proposeGrade` 刻意把它併進餵給模型的題幹（一題「請根據
+              上文說明…」少了引文，模型評的是一段沒有題目的作答），
+              而老師要判斷那個建議合不合理，手上得有同一份東西。 */}
+          {view.stimulus && (
+            <div className="yz-take__stimulus">
+              <div className="yz-take__stimlabel">{view.stimulusLabel ?? '題組題幹'}</div>
+              {/* 附圖走老師那條路（`/api/assets?key=`，預設值）：它問的是
+                  「你教不教這份題本的科目」，而這一頁進來時判過 `mayGrade`。 */}
+              <MathText assets={view.stimulusAssets} label="題組素材">
+                {view.stimulus}
+              </MathText>
+            </div>
+          )}
           <div className="yz-prop__stem">
-            <MathText>{view.stem}</MathText>
+            <MathText assets={view.stemAssets} label={`第 ${view.questionOrder} 題`}>
+              {view.stem}
+            </MathText>
           </div>
 
           {view.rubric ? (

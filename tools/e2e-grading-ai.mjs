@@ -53,7 +53,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -380,7 +379,23 @@ process.env.AI_SERVICE_URL = `http://127.0.0.1:${server.address().port}`;
 // 用 `@/` 別名。用 esbuild 打包成一份 ESM，把 `@/lib/prisma` 換成上面那個
 // 替身——**其餘的程式碼一個字都不改**，所以這裡跑的判斷與正式環境跑的
 // 是同一份。
-const outDir = mkdtempSync(path.join(tmpdir(), 'yz-grading-'));
+// 打包的產物要放在 `node_modules` 底下，**不是** `/tmp`。
+//
+// `external: ['@prisma/client']` 的意思是「不要打包進來，執行時再解析」，
+// 而 Node 解析 bare specifier 是從**匯入者所在的目錄**往上找 node_modules。
+// bundle 放 `/tmp` 的話那條路上一個 node_modules 都沒有，於是整支測試
+// 在 `await import()` 那一行以 `ERR_MODULE_NOT_FOUND` 炸掉。
+//
+// 這件事會被拖到今天才發現，是因為在 `lib/scoring.ts` 開始 import
+// `lib/notifyDb.ts`（成績重算要通知學生）之前，這個 bundle 恰好沒有
+// 任何一條路徑真的用到 `@prisma/client` 的**值**（其餘都是 `import type`，
+// esbuild 會整句抹掉）。也就是說它一直是對的地雷、只是沒人踩到——
+// 而它沒被踩到的三個月裡，這支測試也沒有被任何 runner 跑過。
+//
+// 其餘六支 e2e 早就寫成 `ROOT/node_modules/...`（見 e2e-admission-ref、
+// e2e-tutor、e2e-portfolio…），這裡跟它們一致。`.` 開頭的目錄名是為了
+// 不被 npm 當成套件掃到。
+const outDir = mkdtempSync(path.join(ROOT, 'node_modules', '.yz-e2e-grading-'));
 const shimPath = path.join(outDir, 'prisma-shim.mjs');
 writeFileSync(shimPath, 'export const prisma = globalThis.__YZ_GRADING_PRISMA__;\n');
 const entry = path.join(outDir, 'entry.ts');

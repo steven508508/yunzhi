@@ -69,7 +69,14 @@ export type ProctorTracker = {
   fullscreen(isFull: boolean, at: number): void;
   paste(chars: number, at: number): void;
   close(at: number): void;
-  drain(): ProctorRecord[];
+  /**
+   * 取出已經合併完成的記錄。
+   *
+   * `at`（單調時鐘的現在）**有就要傳**：剛離開全螢幕的那一列還在撤回窗
+   * 裡時會被留下來，最多 1.5 秒。不傳等於全部放行，那是 beacon 那條路
+   * （分頁要關了，留著就送不出去了）。
+   */
+  drain(at?: number | null): ProctorRecord[];
   pending(): number;
   stats(): { pending: number; dropped: number; away: boolean; fullscreen: boolean };
 };
@@ -90,6 +97,10 @@ export type ProctorSummary = {
   longestMs: number;
   /** 切走之後沒有再回到這個畫面的次數。**不可以當成 0 秒。** */
   unfinished: number;
+  /**
+   * 離開全螢幕幾次。**瞬間彈出又彈回來的那幾次不算**（iPad 的假訊號），
+   * 判斷方式見 `summarizeEvents`。
+   */
   fullscreenExits: number;
   pastes: number;
   pasteChars: number;

@@ -406,26 +406,58 @@ test('沒進過全螢幕的裝置不會被記上一筆「離開全螢幕」', ()
   assert.equal(t.drain().length, 0, 'iPad 的學生不該因為裝置限制而被記一筆');
 });
 
-test('瞬間的進出（iPad 上的假訊號）兩邊都不記', () => {
+test('瞬間的進出（iPad 上的假訊號）兩邊都不記——**中間送過一次也一樣**', () => {
   const t = createProctorTracker();
   t.fullscreen(true, T0);
-  t.drain();
+  t.drain(T0);
   t.fullscreen(false, T0 + 1_000);
+  // **這一行是這個測試的重點。** 作答頁在離開全螢幕的當下就會送一次
+  // （那時它是這一頁上最該送到的一件事），所以真實的順序是
+  // 「離開 → 送出 → 回來」。舊版這裡沒有 drain，於是它永遠是綠的，
+  // 而正式環境每一次 iPad 的假訊號都變成一列「離開全螢幕」。
+  assert.deepEqual(t.drain(T0 + 1_050), [], '還在撤回窗裡的那一列不可以被送出去');
   t.fullscreen(true, T0 + 1_200);
-  assert.equal(t.drain().length, 0, '那不是行為，是瀏覽器');
+  assert.equal(t.drain(T0 + 5_000).length, 0, '那不是行為，是瀏覽器');
 });
 
-test('假訊號的撤回只在那一列還沒送出去時成立', () => {
+test('撤回窗過了就真的送出去——不是永遠壓著', () => {
   const t = createProctorTracker();
   t.fullscreen(true, T0);
+  t.drain(T0);
   t.fullscreen(false, T0 + 1_000);
-  t.drain(); // EXIT 已經送出去了
-  t.fullscreen(true, T0 + 1_200);
+  assert.equal(t.drain(T0 + 1_100).length, 0, '窗內：留著');
+  const out = t.drain(T0 + 1_000 + PROCTOR.MIN_AWAY_MS);
+  assert.equal(out.length, 1, '窗外：一定要送，否則他真的離開時老師看不到');
+  assert.equal(out[0].type, 'FULLSCREEN_EXIT');
+  assert.equal(out[0].at, T0 + 1_000, '記的是離開的時刻，不是送出的時刻');
+});
+
+test('beacon 那條路（沒有時鐘）一律放行——分頁要關了，留著就沒了', () => {
+  const t = createProctorTracker();
+  t.fullscreen(true, T0);
+  t.drain(T0);
+  t.fullscreen(false, T0 + 1_000);
   const out = t.drain();
+  assert.equal(out.length, 1, '不傳時間就是 beacon：撤回窗已經沒有意義');
+  assert.equal(out[0].type, 'FULLSCREEN_EXIT');
+});
+
+test('被強制送出而撤不回來時，補一列 ENTER，而老師端的計數要抵銷掉', () => {
+  const t = createProctorTracker();
+  t.fullscreen(true, T0);
+  t.drain(T0);
+  t.fullscreen(false, T0 + 1_000);
+  const sent = t.drain(); // beacon：EXIT 已經在伺服器上了
+  t.fullscreen(true, T0 + 1_200);
+  const out = t.drain(T0 + 5_000);
   // 撤不回來就要補上對應的 ENTER，否則老師端看到一個永遠沒有結束的
   // 「離開全螢幕」。
   assert.equal(out.length, 1);
   assert.equal(out[0].type, 'FULLSCREEN_ENTER');
+  assert.equal(out[0].durationMs, 200);
+  // 而摘要不可以說「離開全螢幕 1 次」——那是一件學生沒有做過的事。
+  const s = summarizeEvents([...sent, ...out]);
+  assert.equal(s.fullscreenExits, 0, '0.2 秒的進出不是一次離開');
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -583,6 +615,28 @@ test('回全螢幕那一列的時間不算進離開時間', () => {
   const s = summarizeEvents([{ type: 'FULLSCREEN_ENTER', durationMs: 600_000 }]);
   assert.equal(s.awayMs, 0, '不在全螢幕不等於不在考卷上');
   assert.equal(s.awayCount, 0);
+});
+
+test('離開 0.2 秒又回來不算一次離開全螢幕，離開 10 秒算', () => {
+  // 前者是 iPad 的全螢幕 API 自己彈的（合併器來不及撤回時就會長這樣），
+  // 後者是學生真的按了 Esc。兩者在資料庫裡是同樣的兩列，差別只在長度
+  // ——而摘要那一行是老師唯一會讀到的東西。
+  const bounce = summarizeEvents([
+    { type: 'FULLSCREEN_EXIT', durationMs: null },
+    { type: 'FULLSCREEN_ENTER', durationMs: 200 },
+  ]);
+  assert.equal(bounce.fullscreenExits, 0);
+
+  const real = summarizeEvents([
+    { type: 'FULLSCREEN_EXIT', durationMs: null },
+    { type: 'FULLSCREEN_ENTER', durationMs: 10_000 },
+  ]);
+  assert.equal(real.fullscreenExits, 1, '真的離開了十秒要照樣記');
+
+  // 抵銷不可以變成負數：EXIT 那一列送失敗而 ENTER 送成功時，
+  // 老師看到的必須是 0 次，不是 −1 次。
+  const orphan = summarizeEvents([{ type: 'FULLSCREEN_ENTER', durationMs: 200 }]);
+  assert.equal(orphan.fullscreenExits, 0);
 });
 
 test('沒有事件時每一個數字都是 0，不是 undefined', () => {

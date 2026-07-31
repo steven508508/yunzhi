@@ -1,6 +1,28 @@
 /**
  * 一題非選題的 AI 建議 ＋ 老師的輸入框。
  *
+ * # 輸入框永遠在，就算一則建議都沒有
+ *
+ * 這一塊在批次閱卷頁上是**整列唯一的給分入口**（答案卷那一頁旁邊還有
+ * 一個 `ScoreOne`，批次頁沒有）。v0.26.0 以前輸入框整塊掛在
+ * `proposal !== null` 底下，於是 AI 服務掛掉時三十列全部只剩一顆
+ * 「請 AI 評這一份」——而畫面上的錯誤訊息寫著「可以直接用旁邊的輸入框
+ * 給分」，那個輸入框在這一頁不存在。老師只能逐份點「看整份」開三十個
+ * 分頁。同一條死路也發生在「這一題我不想花九十次模型呼叫，直接自己改」
+ * 的正常情況——而那是一個完全合理的選擇。
+ *
+ * 沒有建議時給分走的是 `/api/attempts/[attemptId]/score`（`setManualScore`），
+ * 與答案卷那一頁的 `ScoreOne` 同一支、同一筆稽核、同一個「重新計分不會
+ * 蓋掉」的記號。**不是**去 `/api/proposals/decide` 生一筆空建議：
+ * 那張表記的是「老師對 AI 的某一個建議做了什麼決定」，沒有建議的時候
+ * 那一列是假的，而採用率與平均誤差都會被它汙染。
+ *
+ * 代價：答案卷那一頁旁邊本來就有一個 `ScoreOne`，所以那一頁會出現兩個
+ * 作用相同的輸入框。那是可以接受的——**有建議的時候它本來就是兩個**
+ * （那一頁刻意兩塊都畫），而反過來用一個旗標關掉這一塊的話，
+ * 下一個忘記傳旗標的呼叫端就會回到「這一頁沒有給分的入口」。
+ * 一個多出來的輸入框看得見，一個不存在的輸入框看不見。
+ *
  * # 版面上最重要的一件事：輸入框是空的
  *
  * AI 的建議與輸入框並列，但**建議不會被填進去**。
@@ -133,6 +155,26 @@ export function ProposalCard({
     });
   }
 
+  /**
+   * 沒有 AI 建議時的給分。走人工給分那一支，不碰建議那張表。
+   *
+   * 理由是不留下一筆假的「決定」：`AnswerGradeProposal` 的每一列都是
+   * 「AI 提了什麼、老師怎麼決定」的證據，而這裡根本沒有人提過建議。
+   * 混進去的話，「這個功能到底準不準」那一塊算出來的採用率會是假的。
+   */
+  function scoreDirect(finalScore: number) {
+    setLocalError(null);
+    void run(async () => {
+      setDone(null);
+      await submitJson(`/api/attempts/${attemptId}/score`, {
+        json: { questionId, score: finalScore, note: note.trim() || null },
+      });
+      setDone(`已給 ${fmt(finalScore)} 分`);
+      setScore('');
+      router.refresh();
+    });
+  }
+
   function propose() {
     void run(async () => {
       setDone(null);
@@ -150,7 +192,7 @@ export function ProposalCard({
       {proposal === null ? (
         <div className="yz-prop__ask">
           <span className="yz-prop__asktext">
-            這一題還沒有 AI 建議。
+            這一題還沒有 AI 建議，<b>可以直接在下面給分</b>。
             {!compact && '建議只是第一稿——分數還是你按下去才成立。'}
           </span>
           <Button variant="quiet" busy={busy} busyLabel="AI 正在讀" onClick={propose}>
@@ -234,59 +276,70 @@ export function ProposalCard({
         </>
       )}
 
-      {/* 老師這一側。已決定的也留著——老師會改主意，而改主意要走同一條路
-          （重新走一次 decide，狀態與誤差跟著更新）。 */}
-      {proposal !== null && (
-        <div className="yz-prop__acts">
-          <label className="yz-prop__lab" htmlFor={`prop-score-${questionId}-${attemptId}`}>
-            你給幾分
-          </label>
-          <input
-            id={`prop-score-${questionId}-${attemptId}`}
-            className="yz-in yz-score__in"
-            type="number"
-            min={0}
-            max={max}
-            step="0.5"
-            value={score}
-            disabled={busy}
-            placeholder="—"
-            onChange={(e) => setScore(e.currentTarget.value)}
-          />
-          <span className="yz-score__max">／ {fmt(max)} 分</span>
+      {/* 老師這一側。**沒有建議時照樣畫**（那時它是這一列唯一的給分
+          入口，見檔頭），已決定的也留著——老師會改主意，而改主意要走
+          同一條路（重新走一次 decide，狀態與誤差跟著更新）。 */}
+      <div className="yz-prop__acts">
+        <label className="yz-prop__lab" htmlFor={`prop-score-${questionId}-${attemptId}`}>
+          你給幾分
+        </label>
+        <input
+          id={`prop-score-${questionId}-${attemptId}`}
+          className="yz-in yz-score__in"
+          type="number"
+          min={0}
+          max={max}
+          step="0.5"
+          value={score}
+          disabled={busy}
+          placeholder="—"
+          onChange={(e) => setScore(e.currentTarget.value)}
+        />
+        <span className="yz-score__max">／ {fmt(max)} 分</span>
 
-          <input
-            className="yz-in yz-prop__notein"
-            type="text"
-            value={note}
-            disabled={busy}
-            placeholder={
-              suggested === null ? '為什麼是這個分數' : '改分或不採用時，寫一句為什麼'
-            }
-            onChange={(e) => setNote(e.currentTarget.value)}
-          />
+        <input
+          className="yz-in yz-prop__notein"
+          type="text"
+          value={note}
+          disabled={busy}
+          placeholder={
+            proposal === null
+              ? '為什麼是這個分數（家長問起時只剩這一句）'
+              : suggested === null
+                ? '為什麼是這個分數'
+                : '改分或不採用時，寫一句為什麼'
+          }
+          onChange={(e) => setNote(e.currentTarget.value)}
+        />
 
+        <Button
+          variant="quiet"
+          busy={busy}
+          busyLabel="存檔中"
+          disabled={score.trim() === ''}
+          // 沒有建議就沒有「決定」可記，走人工給分那一支。
+          onClick={() =>
+            proposal === null ? scoreDirect(Number(score)) : decide(Number(score), false)
+          }
+        >
+          給分
+        </Button>
+
+        {suggested !== null && (
           <Button
             variant="quiet"
-            busy={busy}
-            busyLabel="存檔中"
-            disabled={score.trim() === ''}
-            onClick={() => decide(Number(score), false)}
+            disabled={busy}
+            onClick={() => decide(suggested, false)}
+            title="照 AI 的建議給分。這是一個明確的動作，會記在稽核裡。"
           >
-            給分
+            採用 {fmt(suggested)} 分
           </Button>
+        )}
 
-          {suggested !== null && (
-            <Button
-              variant="quiet"
-              disabled={busy}
-              onClick={() => decide(suggested, false)}
-              title="照 AI 的建議給分。這是一個明確的動作，會記在稽核裡。"
-            >
-              採用 {fmt(suggested)} 分
-            </Button>
-          )}
-
+        {/* 「不採用」與「哪個面向評不準」都是**對一則建議**的回應，
+            沒有建議時它們沒有指涉對象——畫出來只會讓老師以為自己
+            漏看了什麼。 */}
+        {proposal !== null && (
           <Button
             variant="quiet"
             disabled={busy || score.trim() === ''}
@@ -295,29 +348,29 @@ export function ProposalCard({
           >
             不採用
           </Button>
+        )}
 
-          {rubricDimensions.length > 0 && (
-            <div className="yz-prop__tags">
-              <span className="yz-prop__lab">哪個面向評不準</span>
-              {rubricDimensions.map((d) => (
-                <label key={d} className="yz-prop__tag">
-                  <input
-                    type="checkbox"
-                    checked={weak.includes(d)}
-                    disabled={busy}
-                    onChange={(e) =>
-                      setWeak((prev) =>
-                        e.currentTarget.checked ? [...prev, d] : prev.filter((x) => x !== d),
-                      )
-                    }
-                  />
-                  {d}
-                </label>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+        {proposal !== null && rubricDimensions.length > 0 && (
+          <div className="yz-prop__tags">
+            <span className="yz-prop__lab">哪個面向評不準</span>
+            {rubricDimensions.map((d) => (
+              <label key={d} className="yz-prop__tag">
+                <input
+                  type="checkbox"
+                  checked={weak.includes(d)}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setWeak((prev) =>
+                      e.currentTarget.checked ? [...prev, d] : prev.filter((x) => x !== d),
+                    )
+                  }
+                />
+                {d}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
 
       {current !== null && (
         <p className="yz-grade__sub">

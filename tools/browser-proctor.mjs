@@ -524,6 +524,45 @@ try {
     assert.match(alerts, /不會影響你的成績/, '提示要說得出後果，而後果只有「被記錄」');
   });
 
+  await test('彈出去 0.2 秒又彈回來（iPad 的假訊號）不會留下任何一列', async () => {
+    // **這一條要在瀏覽器裡跑，因為它驗的是「元件送出的時機」。**
+    // 單元測試那一支（tests/proctor.test.mjs）驗的是合併器：給它
+    // 「離開 → drain → 回來」的順序，兩邊都不記。而合併器做得到那件事
+    // 的前提是那一列**還沒被送出去**——真正決定這件事的是這一頁：
+    // v0.26.0 以前它在離開全螢幕的當下就 `proctorSend()`，於是撤回
+    // 從來沒有成立過，每一台 iPad 的每一次假訊號都在老師端變成一列
+    // 「離開全螢幕」，而學生什麼都沒做。
+    seen.proctor.length = 0;
+    const hitsBefore = seen.proctorHits;
+    await setFullscreen(true);
+    await page.waitForTimeout(6_000); // 讓開場那一列（如果有）先走完
+    seen.proctor.length = 0;
+
+    await setFullscreen(false);
+    await page.waitForTimeout(200); // 瀏覽器自己彈回來的那 0.2 秒
+    await setFullscreen(true);
+
+    // 等到「當下就送」與「4 秒攢一次」兩個時機都過完。
+    await page.waitForTimeout(9_000);
+    const kinds = seen.proctor.map((e) => e.type);
+    assert.deepEqual(
+      kinds,
+      [],
+      `收到 ${kinds.join('、')}：那 0.2 秒不是學生的行為，是瀏覽器。` +
+        `（共打了 ${seen.proctorHits - hitsBefore} 次伺服器）`,
+    );
+  });
+
+  await test('真的離開全螢幕（超過門檻）照樣記得到——上一條不可以是把它關掉', async () => {
+    seen.proctor.length = 0;
+    await setFullscreen(false);
+    await waitEvents(1);
+    assert.ok(
+      seen.proctor.map((e) => e.type).includes('FULLSCREEN_EXIT'),
+      '押後送出不可以變成不送',
+    );
+  });
+
   await test('離開全螢幕不會擋住鍵盤或跳出強制回全螢幕的對話框', async () => {
     // 按鍵仍然要能選答案。擋鍵盤擋不住真的想作弊的人，
     // 只會讓一個按到 Esc 的正常學生不知所措。

@@ -179,6 +179,19 @@ export type BatchView = {
   questionOrder: number | null;
   questionType: string;
   stem: string;
+  /** 題幹的附圖。老師要判 AI 的建議合不合理，手上得有學生看到的東西。 */
+  stemAssets: Prisma.JsonValue | null;
+  /**
+   * 題組的前導敘述（引文、圖表說明）。
+   *
+   * **AI 拿得到而老師拿不到是不可以的。** `proposeGrade` 刻意把它併進
+   * 餵給模型的題幹（見那一支：少了引文等於評一段沒有題目的作答），
+   * 而這一頁以前只給老師子題題幹——於是老師在判斷一個他看不到題目的
+   * 建議準不準。
+   */
+  stimulus: string | null;
+  stimulusLabel: string | null;
+  stimulusAssets: Prisma.JsonValue | null;
   maxScore: number;
   /** 規準（含描述文字）。**只在老師端**，而且這一頁自己判過 `mayGrade`。 */
   rubric: RubricView | null;
@@ -413,7 +426,17 @@ export async function loadQuestionBatch(
               order: true,
               score: true,
               question: {
-                select: { id: true, type: true, content: true, scoringRule: true },
+                select: {
+                  id: true,
+                  type: true,
+                  content: true,
+                  contentAssets: true,
+                  scoringRule: true,
+                  // 題組的引文與共用附圖。與 `proposeGrade` 餵給模型的
+                  // 是同一份資料——兩邊看到的題目不一樣的話，老師否決
+                  // 建議時記下的「AI 評不準」其實是「老師少看了引文」。
+                  group: { select: { stimulus: true, label: true, stimulusAssets: true } },
+                },
               },
             },
           },
@@ -501,6 +524,10 @@ export async function loadQuestionBatch(
     questionOrder: item.order,
     questionType: item.question.type,
     stem: item.question.content,
+    stemAssets: item.question.contentAssets,
+    stimulus: item.question.group?.stimulus ?? null,
+    stimulusLabel: item.question.group?.label ?? null,
+    stimulusAssets: item.question.group?.stimulusAssets ?? null,
     maxScore: item.score,
     // 這一頁已經判過 `mayGrade`，所以規準的描述文字在這裡是授權範圍內的
     // ——它是老師閱卷時的依據。學生那一側走 `rubricNoticeForStudent`。

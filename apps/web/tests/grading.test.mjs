@@ -12,6 +12,9 @@
  * 官方規則出處是文件 A.2（大考中心的計分制度）。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import {
@@ -719,4 +722,109 @@ test('百分位數是累計人數百分比', () => {
   assert.equal(percentileOf(scores, 100), 100);
   assert.equal(percentileOf(scores, 50), 50);
   assert.equal(percentileOf([], 50), null);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 閱卷畫面上的三條路：給分的入口、看得到題目、走得回題庫
+//
+// # 為什麼這一段是靜態檢查
+//
+// 這三條的共同點是**它們壞掉的時候沒有任何東西會壞**：頁面回 200、
+// 資料查得到、型別也對。只是老師手上少了一個他非有不可的東西——
+// 一個輸入框、一張圖、一個連結。行為測試看不出這種缺席（沒有東西可以
+// 斷言「不存在」），而畫面測試要一整個瀏覽器。所以這裡照
+// `gradingWriteBarrier.test.mjs` 的做法讀原始碼，用規則判斷。
+//
+// 三條都是 v0.26.0 的情境模擬走出來的：
+//
+//   · AI 掛掉時批次閱卷頁上三十列全部只剩一顆「請 AI 評這一份」，
+//     而錯誤訊息寫著「可以直接用旁邊的輸入框給分」——那個輸入框
+//     在那一頁不存在
+//   · 老師在判一份看不到圖的作答（資料就在手上，畫面沒接）
+//   · 「第 12 題答對率 3%」的下一步是去看那一題，而沒有路過去
+// ═══════════════════════════════════════════════════════════════
+
+const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const src = (rel) => readFileSync(path.join(WEB, rel), 'utf8');
+
+const PROPOSAL_CARD = 'app/(app)/grades/[assignmentId]/ProposalCard.tsx';
+const BATCH_PAGE = 'app/(app)/grades/[assignmentId]/grading/page.tsx';
+const SHEET_PAGE = 'app/(app)/grades/[assignmentId]/[attemptId]/page.tsx';
+const CLASS_PAGE = 'app/(app)/grades/[assignmentId]/page.tsx';
+
+test('沒有 AI 建議時，批次閱卷頁上照樣有給分的輸入框', () => {
+  const card = src(PROPOSAL_CARD);
+  // 輸入框那一整塊不可以掛在「有建議」底下。批次頁的一列只畫這一個
+  // 元件（`StudentRow`），所以掛上去等於那一列沒有任何給分的方法，
+  // 而老師只能逐份開「看整份」——三十份就是三十個分頁。
+  assert.ok(
+    !/\{proposal !== null && \(\s*<div className="yz-prop__acts"/.test(card),
+    '給分的輸入框又被關在「有 AI 建議」底下了。AI 掛掉、預算用完、' +
+      '或老師根本不想花九十次模型呼叫時，這一頁就沒有任何給分的入口。',
+  );
+  assert.match(card, /<div className="yz-prop__acts">/, '找不到輸入框那一塊');
+});
+
+test('沒有建議時的給分走人工給分那一支，不生一筆假的「決定」', () => {
+  const card = src(PROPOSAL_CARD);
+  assert.match(
+    card,
+    /submitJson\(`\/api\/attempts\/\$\{attemptId\}\/score`/,
+    '沒有建議時應該走 setManualScore 那條路（與答案卷頁的 ScoreOne 同一支）',
+  );
+  // 反過來也要擋：沒有建議卻去 /api/proposals/decide 的話，
+  // 「這個功能到底準不準」那一塊的採用率會被一批空建議汙染。
+  assert.match(
+    card,
+    /proposal === null \? scoreDirect\(Number\(score\)\) : decide\(/,
+    '有建議走 decide、沒有建議走人工給分，這個分岔要看得出來',
+  );
+});
+
+test('老師的兩個閱卷畫面都把附圖交給 MathText', () => {
+  // 資料一直都在（`lib/result.ts` 與 `loadQuestionBatch` 都查了），
+  // 只是畫面沒接——症狀是老師在判一份只看得到〔附圖〕的作答。
+  const sheet = src(SHEET_PAGE);
+  for (const [what, pattern] of [
+    ['題組素材', /<MathText assets=\{q\.stimulusAssets\}/],
+    ['題幹', /<MathText assets=\{q\.contentAssets\}/],
+    ['選項', /<MathText assets=\{o\.assets\}/],
+  ]) {
+    assert.match(sheet, pattern, `答案卷頁的${what}沒有帶附圖`);
+  }
+
+  const batch = src(BATCH_PAGE);
+  assert.match(batch, /<MathText assets=\{view\.stemAssets\}/, '批次閱卷頁的題幹沒有帶附圖');
+  assert.match(batch, /<MathText assets=\{view\.stimulusAssets\}/, '批次閱卷頁的引文沒有帶附圖');
+});
+
+test('批次閱卷頁給老師的題目與餵給 AI 的是同一份（含題組引文）', () => {
+  // `proposeGrade` 刻意把 `group.stimulus` 併進題幹（少了引文等於評一段
+  // 沒有題目的作答）。老師要判斷那個建議合不合理，手上就得有同一份東西
+  // ——否則他否決時記下的「AI 評不準」其實是「老師少看了引文」。
+  const db = src('lib/gradingProposalDb.ts');
+  const batchFn = db.slice(
+    db.indexOf('export async function loadQuestionBatch'),
+    db.indexOf('// 產生建議'),
+  );
+  assert.ok(batchFn.length > 500, '找不到 loadQuestionBatch 的內容');
+  assert.match(batchFn, /group: \{ select: \{ stimulus: true/, '沒有查題組的引文');
+  assert.match(batchFn, /stimulus: item\.question\.group\?\.stimulus/, '查了卻沒有帶出去');
+  assert.match(src(BATCH_PAGE), /\{view\.stimulus\}/, '帶出去了卻沒有畫');
+});
+
+test('成績頁與答案卷頁都走得回題庫的那一題', () => {
+  // 老師在「各題答對率」看到第 12 題只有 3% 會，第一個動作是去看那一題
+  // 出了什麼事。反向的連結（題庫 → 這份任務）早就有了，正向的沒有，
+  // 於是那一步只能自己到 /bank 用題幹文字搜。
+  assert.match(
+    src(CLASS_PAGE),
+    /href=\{`\/bank\/\$\{q\.questionId\}`\}/,
+    '各題答對率那張表沒有通往題庫的連結',
+  );
+  assert.match(
+    src(SHEET_PAGE),
+    /href=\{`\/bank\/\$\{q\.questionId\}`\}/,
+    '答案卷頁的每一題也要走得回題庫',
+  );
 });

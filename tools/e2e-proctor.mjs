@@ -37,7 +37,6 @@
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -144,7 +143,14 @@ const raw = createPgShim({
 });
 const prisma = adapt(raw);
 
-const outDir = mkdtempSync(path.join(tmpdir(), 'yz-proctor-e2e-'));
+// 放 `node_modules` 底下而不是 `/tmp`：bundle 裡標成 external 的套件，
+// Node 是從**匯入者所在的目錄**往上找 node_modules 的，`/tmp` 那條路上
+// 一個都沒有。`proctorDb.ts` 目前只有 `import type { Prisma }`（會被
+// esbuild 整句抹掉），所以放 `/tmp` 現在剛好還能跑——但這是「還沒踩到」
+// 而不是「不會踩到」：只要有人在裡面加一個值層級的外部 import，這支
+// 測試就會在 `await import()` 那一行以 ERR_MODULE_NOT_FOUND 死掉，而
+// 死因與被測的功能毫無關係。e2e-grading-ai 上週就是這樣死的。
+const outDir = mkdtempSync(path.join(ROOT, 'node_modules', '.yz-e2e-proctor-'));
 const shimPath = path.join(outDir, 'prisma-shim.mjs');
 writeFileSync(shimPath, 'export const prisma = globalThis.__YZ_PROCTOR_PRISMA__;\n');
 

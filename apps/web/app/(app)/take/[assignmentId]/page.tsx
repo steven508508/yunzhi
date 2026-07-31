@@ -113,6 +113,7 @@ import {
   submitCheck,
   submitRetryDelay,
   timeAlert,
+  unsentAnswers,
 } from '@/lib/takeState.mjs';
 
 type AnswerState = {
@@ -508,12 +509,11 @@ export default function TakeAssignmentPage() {
   const beacon = useCallback(() => {
     const id = attemptRef.current;
     if (!id) return;
-    const merged = new Map<string, Pending>();
-    for (const item of inFlightBatch.current) merged.set(item.questionId, item);
-    // 佇列裡的比較新（同一題重寫過），所以放在後面覆蓋。
-    for (const [k, v] of pending.current) merged.set(k, v);
-    if (merged.size === 0) return;
-    const payload = JSON.stringify({ answers: [...merged.values()] });
+    // 合併的規則在 `unsentAnswers`（純函式、有測試），與校時那一處
+    // 共用同一份——這裡合併而那裡沒有，正是假警報的來源。
+    const merged = unsentAnswers(inFlightBatch.current, pending.current);
+    if (merged.length === 0) return;
+    const payload = JSON.stringify({ answers: merged });
     navigator.sendBeacon?.(
       `/api/attempts/${id}/answers`,
       new Blob([payload], { type: 'application/json' }),
@@ -529,9 +529,13 @@ export default function TakeAssignmentPage() {
   /**
    * 取一批要送的。上一次失敗的排在前面（它比較舊），超過一批的量留在
    * 重試緩衝裡下一輪再送——這條線不趕時間。
+   *
+   * `at` 給了時鐘，剛離開全螢幕的那一列就會被留到撤回窗過完才送
+   * （見 `proctor.mjs` 的 `drain`）。**beacon 那條路刻意不給**：
+   * 分頁要關了，留著等於永遠送不出去。
    */
-  const proctorTake = useCallback((): ProctorRecord[] => {
-    const all = [...proctorRetry.current, ...(proctor.current?.drain() ?? [])];
+  const proctorTake = useCallback((at: number | null): ProctorRecord[] => {
+    const all = [...proctorRetry.current, ...(proctor.current?.drain(at) ?? [])];
     proctorRetry.current = all.slice(PROCTOR.MAX_BATCH, PROCTOR.MAX_QUEUE);
     return all.slice(0, PROCTOR.MAX_BATCH);
   }, []);
@@ -549,7 +553,7 @@ export default function TakeAssignmentPage() {
     const t = proctor.current;
     if (!id || !t) return;
     if (t.pending() === 0 && proctorRetry.current.length === 0) return;
-    const batch = proctorTake();
+    const batch = proctorTake(now());
     if (batch.length === 0) return;
     try {
       const res = await fetchT(`/api/attempts/${id}/proctor`, {
@@ -591,7 +595,12 @@ export default function TakeAssignmentPage() {
       const t = proctor.current;
       if (!id || !t) return;
       if (closeOpen) t.close(now());
-      const batch = proctorTake();
+      // **不傳時鐘＝不押後任何一列。** 這條路是「這個分頁可能下一秒就
+      // 不在了」，撤回窗在那之後沒有意義，而留下來的那一列會跟著分頁
+      // 一起消失。代價：切到背景的瞬間剛好在全螢幕的撤回窗裡時，
+      // 那一次假訊號會留在伺服器上——`summarizeEvents` 在讀的那一端
+      // 用同一條門檻把它抵銷掉。
+      const batch = proctorTake(null);
       if (batch.length === 0) return;
       const payload = JSON.stringify({ events: toProctorPayload(batch, now()) });
       navigator.sendBeacon?.(
@@ -635,13 +644,27 @@ export default function TakeAssignmentPage() {
     };
     const onBlur = () => t.blur(now());
     const onFocus = () => t.focus(now());
+    /**
+     * 離開全螢幕之後那一次送出。**不是當下就送，是等撤回窗過完才送。**
+     *
+     * 當下就送的那一版（v0.26.0 以前）讓 iPad 的假訊號永遠撤不回來：
+     * `proctorSend` 的第一件事是 drain，那一列當場離開佇列，0.2 秒後
+     * 學生「回到」全螢幕時 `retract` 找不到它——於是老師端多了一列
+     * 「離開全螢幕」，而學生什麼都沒做（見 lib/proctor.mjs 的 `drain`）。
+     *
+     * 那為什麼不乾脆交給 4 秒一次的定時送：因為學生按了 Esc 之後很可能
+     * 接著就關掉分頁，而「他離開了全螢幕」是這一頁上最該送到的一件事。
+     * 押後 1.7 秒仍然遠早於下一次定時送。
+     */
+    let fsTimer: ReturnType<typeof setTimeout> | null = null;
     const onFs = () => {
       const full = isFullscreen();
       t.fullscreen(full, now());
       setFsLeft(!full);
-      // 離開全螢幕當下就送出去。學生按了 Esc 之後很可能接著就關掉分頁，
-      // 而這是這一頁上最該送到的一件事。
-      if (!full) void proctorSendRef.current();
+      if (!full) {
+        if (fsTimer) clearTimeout(fsTimer);
+        fsTimer = setTimeout(() => void proctorSendRef.current(), PROCTOR.MIN_AWAY_MS + 200);
+      }
     };
     const onPaste = (e: ClipboardEvent) => {
       // **只取長度。** 內容一個字都不留——那可能是學生自己在別處打的
@@ -676,6 +699,7 @@ export default function TakeAssignmentPage() {
       document.removeEventListener('paste', onPaste);
       window.removeEventListener('pagehide', onLeave);
       clearInterval(flush);
+      if (fsTimer) clearTimeout(fsTimer);
       proctorBeacon(true);
     };
   }, [phase, proctorBeacon]);
@@ -711,10 +735,16 @@ export default function TakeAssignmentPage() {
       // 伺服器每 30 秒就送來它真正收到幾題，舊版收到之後直接丟掉。
       // 一場 60 分鐘的考試有 120 次機會說出「你以為寫了 13 題，
       // 伺服器上只有 9 題」，而它一次都沒用。
+      //
+      // **「還沒送出去」要連正在飛的那一批一起算**（`unsentAnswers`）。
+      // 只數 `pending.size` 的話，熱點卡住的那幾秒剛好碰上校時就會
+      // 判成「你的答案不見了」——而那幾題正在網路上，一題都沒掉。
+      // 這一頁最貴的一種 bug 是安靜地說假話，第二貴的是大聲說假話：
+      // 一個沒事的學生會照著這句話在考試中舉手。
       const gap = answeredGap({
         local: countAnswered(answersRef.current),
         server: body.answered,
-        pendingCount: pending.current.size,
+        pendingCount: unsentAnswers(inFlightBatch.current, pending.current).length,
       });
       if (gap.kind === 'lost' && gap.detail) setNotice(gap.detail);
     } catch {
@@ -755,10 +785,16 @@ export default function TakeAssignmentPage() {
         // 先把未存的送出去。少了這一步，最後幾題（防抖還沒到期的那些）
         // 會在交卷之後才送到，而那時伺服器已經不收了。
         await flushRef.current();
-        // flush 之後還留在佇列裡的，就是真的沒送出去的。
+        // flush 之後還沒確定送到的，就是真的沒送出去的。
         // 舊版無條件寫死「你的答案已經存在伺服器上」，而那句話出現的
         // 唯一情境正是它最可能為假的情境。
-        const stuck = pending.current.size;
+        //
+        // 這裡與校時那一處同一個口徑（`unsentAnswers`）：`flush` 最多繞
+        // 三圈就會回來（呼叫端在等著交卷），所以回來的當下**可能還有
+        // 一批在飛**。只數佇列的話那幾題會被算成「已經存好了」，
+        // 而交卷之後才到的 PATCH 伺服器一律 409——那正是會靜靜掉答案的
+        // 那條路。寧可說「還有 N 題沒確定」，不要說一句可能是假的安心話。
+        const stuck = unsentAnswers(inFlightBatch.current, pending.current).length;
         const res = await fetchT(`/api/attempts/${id}/submit`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -779,7 +815,13 @@ export default function TakeAssignmentPage() {
         setPhase('submitted');
         return true;
       } catch (e) {
-        setNotice(submitFailNote(netMessage(e), pending.current.size, auto));
+        setNotice(
+          submitFailNote(
+            netMessage(e),
+            unsentAnswers(inFlightBatch.current, pending.current).length,
+            auto,
+          ),
+        );
         return false;
       } finally {
         submitLock.current = false;
@@ -1362,12 +1404,19 @@ export default function TakeAssignmentPage() {
                   {stim.label ?? '題組題幹'}
                   {range && `　·　第 ${range.from}–${range.to} 題共用`}
                 </div>
-                {/* 題組共用的附圖**這裡拿不到**：`lib/attempt.ts` 的白名單
-                    只帶 `group.stimulus`，沒有 `group.stimulusAssets`
-                    （那個 select 是「不可以洩題」那條規則的所在地，
-                    加欄位要由那一支自己決定）。實驗裝置圖掛在題組上的
-                    卷子會在這裡缺圖，缺口記在這裡而不是靜靜地漏掉。 */}
-                <MathText>{stim.stimulus}</MathText>
+                {/* 題組共用的附圖。`assets` 一定要傳（哪怕是 null）：
+                    不傳是「這個畫面不畫圖」，於是 `![[a:fig1]]` 會排成一個
+                    安靜的〔附圖〕記號；傳 null 是「這一段真的沒有圖」，
+                    題幹裡卻有標記時畫面會明講找不到它。作答中的學生看到
+                    「如圖所示」而畫面上什麼都沒有時，要看得出是系統的問題
+                    ——他才會舉手，而不是照著一份缺了條件的題目硬寫。 */}
+                <MathText
+                  assets={stim.assets}
+                  assetBase={figureBase}
+                  label={stim.label ?? '題組題幹'}
+                >
+                  {stim.stimulus}
+                </MathText>
               </div>
             )}
 

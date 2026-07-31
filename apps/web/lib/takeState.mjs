@@ -93,6 +93,41 @@ export function saveIndicator({
 // ─────────────────────────────────────────────────────────────────
 
 /**
+ * **還沒有確定送到伺服器的那幾題。**
+ *
+ * 「沒送出去」有兩堆，而不是一堆：待送出佇列（`pending`），加上
+ * **正在飛的那一批**（`inFlightBatch`）。後者在送出之前就被搬離佇列了
+ * （見作答頁的 `flushOnce`），所以請求在網路上的那幾秒，`pending.size`
+ * 是 0 而那幾題其實一題都還沒到。
+ *
+ * 兩個呼叫端問的是同一個問題，所以合併的規則只能有一份：
+ *
+ *   · `beacon()` —— 分頁要關了，把沒送到的一起丟出去
+ *   · 校時後的 `answeredGap` —— 伺服器少收的那幾題是不是還在路上
+ *
+ * v0.26.0 之前只有前者合併，後者傳的是 `pending.size`。症狀是熱點卡住的
+ * 那幾秒剛好碰上 30 秒一次的校時：本機 13 題、伺服器 9 題、`pendingCount`
+ * 0 → 判成 `lost` → 畫面上跳出硃砂色的「你的答案可能不見了，一分鐘後
+ * 還是對不起來就舉手」。**什麼都沒掉，而學生在考試中舉手了。**
+ * 一句錯誤的警告比沉默貴：它讓一個沒事的學生停下來。
+ *
+ * 同一題在兩堆裡都有時只算一次，而且**佇列裡的那一份比較新**（學生在
+ * 請求飛的期間又改了同一題），所以放在後面覆蓋。
+ */
+export function unsentAnswers(inFlightBatch, pending) {
+  const merged = new Map();
+  for (const item of Array.isArray(inFlightBatch) ? inFlightBatch : []) {
+    if (item && item.questionId) merged.set(item.questionId, item);
+  }
+  if (pending && typeof pending.forEach === 'function') {
+    pending.forEach((item, key) => {
+      if (item) merged.set(item.questionId ?? key, item);
+    });
+  }
+  return [...merged.values()];
+}
+
+/**
  * 考試進行中的比對。伺服器每 30 秒的校時裡就帶著它真正收到幾題，
  * 舊版收到之後直接丟掉。
  *
@@ -101,6 +136,11 @@ export function saveIndicator({
  *   ok       伺服器收到的不比本機少
  *   pending  差額落在待送出佇列裡——正常，重試會補上，不要嚇他
  *   lost     差額比佇列還多——這是真的少了，要說
+ *
+ * `pendingCount` 要傳 `unsentAnswers(...).length`，**不是 `pending.size`**。
+ * 理由見上一支：正在飛的那一批不在佇列裡，而它同樣還沒到伺服器。
+ * 這個數字寧可高估也不要低估——高估的代價是晚 30 秒才喊，低估的代價
+ * 是在沒有事的時候喊。
  */
 export function answeredGap({ local, server, pendingCount = 0 } = {}) {
   if (typeof local !== 'number' || typeof server !== 'number') {
@@ -165,19 +205,37 @@ export function submitCheck({ local, server, total } = {}) {
  * 相鄰且維持原順序，所以帶素材的那一題一定在前面。掃到列表開頭為止
  * 而不是碰到別的題組就停，是因為版面快照萬一有髒資料時，
  * 多掃 24 次的成本遠低於學生看不到題目。
+ *
+ * **附圖跟著素材一起回傳。** 一段「請閱讀下圖的實驗裝置」的引文與它的
+ * 那張圖是同一件事，分開帶的話遲早有一個呼叫端只接了文字——而症狀是
+ * 學生看到「如圖所示」卻沒有圖。`assets` 是 `null` 與 `undefined` 兩件
+ * 不同的事（見 components/MathText）：這裡一律給得出一個值（沒有就是
+ * `null`），代表「這個畫面會畫圖，而這一段真的沒有圖」。
  */
 export function stimulusFor(questions, index) {
   const q = Array.isArray(questions) ? questions[index] : null;
   if (!q) return null;
   if (q.stimulus) {
-    return { stimulus: q.stimulus, label: q.stimulusLabel ?? null, inherited: false };
+    return {
+      stimulus: q.stimulus,
+      label: q.stimulusLabel ?? null,
+      assets: q.stimulusAssets ?? null,
+      inherited: false,
+    };
   }
   if (!q.groupId) return null;
   for (let i = index - 1; i >= 0; i--) {
     const prev = questions[i];
     if (!prev || prev.groupId !== q.groupId) continue;
     if (prev.stimulus) {
-      return { stimulus: prev.stimulus, label: prev.stimulusLabel ?? null, inherited: true };
+      // 附圖取**提供這段素材的那一題**的，不是自己的：兩者是一組，
+      // 各取一半會在第 38 題畫出第 37 題的文字配上一張不存在的圖。
+      return {
+        stimulus: prev.stimulus,
+        label: prev.stimulusLabel ?? null,
+        assets: prev.stimulusAssets ?? null,
+        inherited: true,
+      };
     }
   }
   return null;

@@ -14,6 +14,9 @@
  * 端對端測試變紅。所以它們必須在這裡被釘住。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import {
@@ -27,7 +30,11 @@ import {
   SUBMIT_RETRY_MS,
   TIME_ALERTS,
   timeAlert,
+  unsentAnswers,
 } from '../lib/takeState.mjs';
+
+const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = (rel) => readFileSync(path.join(WEB, rel), 'utf8');
 
 // ─────────────────────────────────────────────────────────────────
 // 一、待送出佇列的狀態機
@@ -119,6 +126,74 @@ test('伺服器沒給數字時不假裝比對過', () => {
   assert.equal(answeredGap({ local: 13, server: null }).kind, 'unknown');
 });
 
+/** 待送出佇列的一筆。只有 `questionId` 有意義，其餘欄位在這裡不參與判斷。 */
+const p = (id, text = null) => ({ questionId: id, answerText: text });
+
+test('正在飛的那一批也算「還沒送出去」——否則會冒出一句假的遺失警告', () => {
+  // 學生在熱點上連答四題 → 防抖觸發 flushOnce → 它**先清空佇列**再送出，
+  // 於是請求在網路上的那 6 秒 `pending.size` 是 0。這期間 30 秒一次的
+  // 校時回來說「伺服器收到 9 題」。
+  const inFlight = [p('q1'), p('q2'), p('q3'), p('q4')];
+  const pending = new Map();
+  const g = answeredGap({
+    local: 13,
+    server: 9,
+    pendingCount: unsentAnswers(inFlight, pending).length,
+  });
+  assert.equal(
+    g.kind,
+    'pending',
+    '什麼都沒掉，而這一句硃砂色的警告會讓一個沒事的學生在考試中舉手',
+  );
+  assert.equal(g.detail, null, '不要在畫面上說話');
+});
+
+test('兩堆都空了還對不起來，就是真的少了——這時候一定要吵', () => {
+  // 這一條與上一條是一組：修「假警報」不可以順手把真的警報關掉。
+  const g = answeredGap({
+    local: 13,
+    server: 9,
+    pendingCount: unsentAnswers([], new Map()).length,
+  });
+  assert.equal(g.kind, 'lost');
+  assert.match(g.detail, /舉手/);
+});
+
+test('同一題在兩堆裡只算一次，而且佇列裡的那一份比較新', () => {
+  // 學生在請求飛的那幾秒又改了同一題：要送的是新的那一份，
+  // 而它只能算一題（算兩題會讓 pendingCount 高到蓋掉真的遺失）。
+  const out = unsentAnswers([p('q1', '舊')], new Map([['q1', p('q1', '新')]]));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].answerText, '新');
+});
+
+test('沒有東西在飛、也沒有東西在等的時候是空的（beacon 據此不送）', () => {
+  assert.deepEqual(unsentAnswers([], new Map()), []);
+  assert.deepEqual(unsentAnswers(null, null), [], '兩個參數都可能還沒初始化');
+  assert.deepEqual(unsentAnswers(undefined, undefined), []);
+});
+
+test('beacon 與校時用的是同一份合併規則', () => {
+  // 這兩處合併規則不一致，正是 v0.26.0 那個假警報的成因：
+  // beacon 合併了、校時沒有。靜態盯著它們呼叫同一支函式。
+  const src = read('app/(app)/take/[assignmentId]/page.tsx');
+  const calls = src.match(/unsentAnswers\(inFlightBatch\.current, pending\.current\)/g) ?? [];
+  assert.ok(
+    calls.length >= 2,
+    `只找到 ${calls.length} 處合併。beacon 與 answeredGap 兩邊都要用 unsentAnswers，` +
+      '各寫各的遲早會再分岐一次。',
+  );
+  // 存檔指示器那幾處的 `pending.current.size` 是對的（它另外有一個
+  // `inFlight` 旗標），這裡只盯 answeredGap 的那一個參數。
+  const gap = /answeredGap\(\{([\s\S]{0,300}?)\}\)/.exec(src);
+  assert.ok(gap, '找不到 answeredGap 的呼叫');
+  assert.match(
+    gap[1],
+    /pendingCount:\s*unsentAnswers\(/,
+    'answeredGap 又拿 pending.current.size 當「還沒送出去」了——正在飛的那一批不在裡面。',
+  );
+});
+
 test('交卷時兩個數字一致而且寫滿了：不出聲', () => {
   const c = submitCheck({ local: 25, server: 25, total: 25 });
   assert.equal(c.kind, 'ok');
@@ -152,30 +227,69 @@ test('交卷時伺服器沒回答題數：不能說「都收到了」', () => {
 // ─────────────────────────────────────────────────────────────────
 
 /** 37–39 為題組，素材只掛在 37 上（lib/attempt.ts 為了省頻寬）。 */
+const FIG = [{ id: 'fig1', key: 't/x/import/j/fig1.png', width: 400, height: 300 }];
 const GROUPED = [
   { order: 36, groupId: null, stimulus: null, stimulusLabel: null },
-  { order: 37, groupId: 'g1', stimulus: '某工廠生產甲、乙兩種產品……', stimulusLabel: '37–39 題組' },
+  {
+    order: 37,
+    groupId: 'g1',
+    stimulus: '下圖為某實驗裝置……',
+    stimulusLabel: '37–39 題組',
+    stimulusAssets: FIG,
+  },
   { order: 38, groupId: 'g1', stimulus: null, stimulusLabel: null },
   { order: 39, groupId: 'g1', stimulus: null, stimulusLabel: null },
   { order: 40, groupId: 'g2', stimulus: '另一篇閱讀素材……', stimulusLabel: null },
 ];
 
-test('題組第一題：用自己的素材', () => {
+test('題組第一題：用自己的素材，連圖一起', () => {
   const s = stimulusFor(GROUPED, 1);
   assert.equal(s.inherited, false);
-  assert.match(s.stimulus, /某工廠/);
+  assert.match(s.stimulus, /實驗裝置/);
   assert.equal(s.label, '37–39 題組');
+  assert.deepEqual(s.assets, FIG);
 });
 
-test('題組第二、三小題：往回找得到同一段素材', () => {
-  // 這一條就是阻斷級的卡點 15。修之前這兩題的畫面上什麼都沒有。
+test('題組第二、三小題：往回找得到同一段素材，**圖也要跟著**', () => {
+  // 前半是阻斷級的卡點 15（修之前這兩題的畫面上什麼都沒有）。
+  // 後半是它的第二半：文字帶到了而圖沒帶，畫面上寫著「下圖為某實驗
+  // 裝置」而沒有圖——那一題的條件就在圖裡。
   for (const i of [2, 3]) {
     const s = stimulusFor(GROUPED, i);
     assert.ok(s, `第 ${GROUPED[i].order} 題應該找得到素材`);
-    assert.match(s.stimulus, /某工廠/);
+    assert.match(s.stimulus, /實驗裝置/);
     assert.equal(s.inherited, true);
     assert.equal(s.label, '37–39 題組');
+    assert.deepEqual(s.assets, FIG, '圖要取自提供這段素材的那一題，不是自己的');
   }
+});
+
+test('沒有圖的題組回 null 而不是 undefined——那是兩件不同的事', () => {
+  // MathText：`assets` 沒傳（undefined）＝「這個畫面不畫圖」，標記排成
+  // 〔附圖〕；傳 null ＝「這一段真的沒有圖」，題幹裡有標記時會明講
+  // 找不到它。作答中的學生要分得出「這裡本來就沒圖」與「圖掉了」。
+  assert.equal(stimulusFor(GROUPED, 4).assets, null);
+});
+
+test('題組共用的附圖從資料庫一路帶得到畫面上', () => {
+  // 這一條是一條**管線**：DB 有這一欄、select 查了它、型別帶得動它、
+  // 畫面把它交給 MathText。斷在中間任何一節的症狀都一樣——
+  // 學生看到「如圖所示」而畫面上什麼都沒有，沒有任何錯誤。
+  const attempt = read('lib/attempt.ts');
+  assert.match(attempt, /stimulusAssets: true/, 'select 沒有查這一欄');
+  assert.match(attempt, /stimulusAssets: Prisma\.JsonValue \| null/, 'TakeQuestion 上沒有這一欄');
+  assert.match(
+    attempt,
+    /stimulusAssets: firstOfGroup \?/,
+    'loadAttemptForStudent 查了卻沒有帶出去',
+  );
+
+  const page = read('app/(app)/take/[assignmentId]/page.tsx');
+  assert.match(page, /assets=\{stim\.assets\}/, '作答頁沒有把題組的圖交給 MathText');
+  assert.ok(
+    !/白名單\s*\n?\s*只帶 `group\.stimulus`/.test(page),
+    '那句「拿不到」的註解已經不是事實了，要跟著改掉',
+  );
 });
 
 test('不屬於任何題組的題目不會撿到別人的素材', () => {
@@ -300,4 +414,31 @@ test('失敗再多次也不放棄，停在最長的間隔', () => {
   // 所以不重跑），時間到那一刻剛好斷線的人卷子就永遠停在 IN_PROGRESS。
   assert.equal(submitRetryDelay(9), 60_000);
   assert.equal(submitRetryDelay(100), 60_000);
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 七、任務清單與檢討頁看到的必須是同一個答案
+//
+// 這一節是靜態檢查，因為要守的是**兩支不同的函式餵給同一條規則的
+// 資料一不一樣**——`maySeeResult` 本身已經被 release.test.mjs 釘住了，
+// 而它算錯的唯一方式是有人少傳一個參數。那種錯不會讓任何測試變紅：
+// 兩個畫面各自都很正常，只是說的話不一樣。
+// ─────────────────────────────────────────────────────────────────
+
+test('清單頁算放行等級時也要帶同卷任務，否則會寫「看檢討」卻打不開', () => {
+  // 忠孝兩班考同一份卷子、截止日不同。清單只看自己的 dueAt 就判成 FULL
+  // → 按鈕寫「看檢討」；點進去檢討頁帶了同卷任務 → SCORE_ONLY
+  // →「逐題檢討還沒開放」。兩個畫面都不覺得自己壞了。
+  const src = read('lib/attempt.ts');
+  const call = /maySeeResult\(([\s\S]{0,160}?)\)/.exec(src.replace(/\/\/[^\n]*/g, ''));
+  assert.ok(call, '找不到 listStudentTasks 裡的 maySeeResult 呼叫');
+  assert.match(
+    call[1],
+    /paperCohort/,
+    'listStudentTasks 沒有把同卷任務傳進 maySeeResult，' +
+      '而 lib/result.ts 有——同一條規則收到兩份不同的資料。',
+  );
+  // 自己不可以出現在自己的同卷清單裡：留著的話 cohortGate 會把自己的
+  // 截止時間當成「別的班還沒考完」，訊息就變成一句假話。
+  assert.match(src, /filter\(\(o\) => o\.id !== a\.id\)/, '同卷任務要把自己排掉');
 });
