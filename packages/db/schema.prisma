@@ -2548,6 +2548,19 @@ model InterviewPractice {
 
   questionId String
   answerText String
+
+  /// 這一次練習是為了哪一個校系。null ＝ 還沒指定／通用練習。
+  ///
+  /// 四月通過第一階段的學生手上通常有兩到三個系要面試，同一題
+  /// （「你為什麼想讀這個系」）他會為每一個系各練一次，而三份答案
+  /// 應該長得完全不一樣。沒有這一欄的話，練習紀錄是一條按時間排的
+  /// 平鋪清單，他回頭找不到「台大那一版」——而面試前一晚要看的
+  /// 正好就是那一版。
+  ///
+  /// 型別與 `PortfolioEssay.programRef` 一致（同一個字串識別同一個
+  /// 校系），這樣一致性檢查才對得起來。
+  programRef String?
+
   /// 結構面回饋。{ addressed, examples, contradictions, questions }
   feedback   Json?
 
@@ -2562,5 +2575,6 @@ model InterviewPractice {
   question InterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([userId, programRef, createdAt])
   @@map("interview_practices")
 }

@@ -55,6 +55,15 @@ export type NavItem = {
   label: string;
   /** 誰看得到。沒列進來的角色，連結不畫、頁面也擋。 */
   roles: readonly string[];
+  /**
+   * 不畫在導覽列上，但**仍然受這張表管**。
+   *
+   * 「不畫」與「不管」是兩件事，而這個旗標只關掉前者。沒有它的話，
+   * 一個刻意不上導覽列的頁面（入口在別頁的那種）就只剩兩條路：
+   * 要嘛硬塞進導覽列、要嘛自己在頁面裡手寫一份角色清單——而後者
+   * 正是這個檔案存在要避免的事。手寫的那一份不會有人記得跟著改。
+   */
+  hidden?: true;
 };
 
 export const NAV_ITEMS: readonly NavItem[] = [
@@ -107,6 +116,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // 要先捲過一整頁他已經送出去的素材才找得到練習。
   { href: '/interview', label: '面試準備', roles: LEARNER },
 
+  // 能力分析。**不畫在導覽列上**——入口在檢討頁，因為學生看完自己
+  // 錯在哪，那正是他會問「所以我接下來要幹嘛」的那一刻；而他一學期
+  // 點它三次，放進導覽列會排擠掉他每天要點的那一項。
+  //
+  // 但它必須在這張表裡，否則 `mayUse('/ability', …)` 永遠回 false，
+  // 那一頁就只能自己寫一份角色判定——而自己寫的那一份，改角色的時候
+  // 沒有人會記得跟著改。
+  { href: '/ability', label: '能力分析', roles: LEARNER, hidden: true },
+
   { href: '/knowledge', label: '知識點', roles: STAFF },
   // 這三項排在最後而且只有管理員看得到：它們一年只碰一兩次，
   // 但少了任何一項，前面那幾項就都動不了，所以不能只留在資料庫裡。
@@ -122,9 +140,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: '/settings/staff', label: '教職員', roles: ADMIN },
 ];
 
-/** 這個角色的導覽列。在伺服器端呼叫，client 只會拿到他該看的那幾項。 */
+/**
+ * 這個角色的導覽列。在伺服器端呼叫，client 只會拿到他該看的那幾項。
+ *
+ * `hidden` 的項目不畫——但它們仍然在 `NAV_ITEMS` 裡，所以 `mayUse()`
+ * 照樣管得到。
+ */
 export function navFor(systemRole: string): NavItem[] {
-  return NAV_ITEMS.filter((item) => item.roles.includes(systemRole));
+  return NAV_ITEMS.filter((item) => !item.hidden && item.roles.includes(systemRole));
 }
 
 /**
