@@ -18,12 +18,18 @@
  * 因為兩題算出來的小數看起來與二十題的一樣精確，而學生會照著它決定
  * 不用複習。**寧可說「還不知道」，也不要給一個站不住的數字。**
  *
- * # 為什麼這一頁不在導覽列上
+ * # 為什麼這一頁不在導覽列上，但仍然歸 nav.ts 管
  *
  * 導覽列的每一項都對應 `lib/nav.ts` 的一條規則，而那個檔案是全系統
- * 唯一一份「角色 ↔ 區域」對照表，改它會動到每一頁的存取判定。
- * 這一頁的入口在檢討頁——學生看完自己錯在哪，那正是他會想知道
- * 「所以我接下來要幹嘛」的那一刻。
+ * 唯一一份「角色 ↔ 區域」對照表。這一頁的入口在檢討頁——學生看完
+ * 自己錯在哪，那正是他會想知道「所以我接下來要幹嘛」的那一刻，
+ * 所以它在那張表裡標了 `hidden`：不畫連結，但 `mayUse()` 照樣管得到。
+ *
+ * 存取判定**不可以寫成 `systemRole !== 'STUDENT'` 的二分法**。
+ * 系統有六種角色，而那個寫法把「不是學生」全部當成老師：家長打開
+ * 這一頁會讀到「老師要看的是某一位學生或某一個班的弱點，那在班級
+ * 頁裡」與一顆「去班級」的按鈕——而 `/classes` 對她是拒絕。
+ * 一句對她說的話，加上一顆按不動的按鈕。
  *
  * # 這一頁只看得到自己的
  *
@@ -34,8 +40,9 @@
 import Link from 'next/link';
 
 import { studentAbility, abilityReadiness, SOLID, WEAK } from '@/lib/abilityDb';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
-import { Empty, Note } from '@/components/Feedback';
+import { Denied, Empty, Note } from '@/components/Feedback';
 
 export const dynamic = 'force-dynamic';
 
@@ -56,15 +63,34 @@ function Bar({ value }: { value: number }) {
 
 export default async function AbilityPage() {
   return scopedPage(async (user) => {
-    if (user.systemRole !== 'STUDENT') {
-      // 老師沒有作答記錄，這一頁對他永遠是空的。與其給一片空白，
-      // 不如直接說他要找的東西在哪一頁。
+    if (!mayUse(user.systemRole, '/ability')) {
+      // 進不來的有兩種人，而他們要的東西完全不同——所以話也要不同。
+      // **每一句都要指向一個他按得動的地方**：給家長一顆「去班級」
+      // 的按鈕（而那一區對她是拒絕）比什麼都不給更糟，因為她會按。
+      if (mayUse(user.systemRole, '/classes')) {
+        // 老師沒有作答記錄，這一頁對他永遠是空的。與其給一片空白，
+        // 不如直接說他要找的東西在哪一頁。
+        return (
+          <main className="yz-panel">
+            <Empty
+              title="這一頁是學生看自己的分析"
+              hint="老師要看的是某一位學生或某一個班的弱點，那在班級頁裡。"
+              action={<Link href="/classes">去班級</Link>}
+            />
+          </main>
+        );
+      }
       return (
         <main className="yz-panel">
-          <Empty
-            title="這一頁是學生看自己的分析"
-            hint="老師要看的是某一位學生或某一個班的弱點，那在班級頁裡。"
-            action={<Link href="/classes">去班級</Link>}
+          <Denied
+            what="能力分析"
+            why={
+              <>
+                這一頁是學生看自己章節強弱的畫面。家長看得到的是孩子的
+                任務與已經開放的成績，在<Link href="/guardian">「孩子的狀況」</Link>
+                那一頁；章節分析屬於學習過程，只有孩子自己和老師看得到。
+              </>
+            }
           />
         </main>
       );

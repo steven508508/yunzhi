@@ -255,19 +255,25 @@ export default function Guardians({
         consequence={
           <>
             <p style={{ marginBottom: 12 }}>
-              移除之後這位家長<strong>立刻看不到{studentName}的任何資料</strong>，
-              而且正在看的畫面也會被登出。
+              移除之後這位家長<strong>立刻看不到{studentName}的任何資料</strong>。
             </p>
+            {/* 「會不會被登出」跟著帳號走，所以那句話**只能長在停用的
+                那一邊**：`unlinkGuardian` 只在他一個孩子都不剩的時候
+                才清 session（還有孩子就不動帳號，退掉其中一個不該影響
+                另一個）。兩個孩子的家長不會被登出，而上面那一句原本
+                對所有人都說「正在看的畫面也會被登出」——同一個對話框
+                裡兩句話對不起來，而按下去的人以為自己知道會發生什麼。 */}
             <p style={{ marginBottom: 12 }}>
               {removing && removing.children > 1 ? (
                 <>
                   他還接著另外 {removing.children - 1} 個孩子，
-                  所以<strong>帳號會留著</strong>，只是少了這一位。
+                  所以<strong>帳號會留著、也不會被登出</strong>，只是少了這一位——
+                  他下一次開畫面就看不到{studentName}了。
                 </>
               ) : (
                 <>
-                  這是他唯一的孩子，所以<strong>帳號會一併停用</strong>。
-                  之後再接到別的學生身上時會自動恢復。
+                  這是他唯一的孩子，所以<strong>帳號會一併停用</strong>，
+                  正在看的畫面也會立刻被登出。之後再接到別的學生身上時會自動恢復。
                 </>
               )}
             </p>

@@ -30,6 +30,7 @@ import {
   GUARDIAN_TASK_FIELDS,
   NOISE_BAND,
   PEER_FLOOR,
+  classMeansFromAttempts,
   compareToClass,
   noDataReason,
   projectTask,
@@ -297,4 +298,289 @@ test('nav 上家長只有一項，而且進不了任何職員的區域', async (
   assert.equal(mayUse('STUDENT', '/guardian'), false, '學生看得到家長端');
   assert.equal(mayUse('TEACHER', '/guardian'), false, '老師看得到家長端');
   assert.equal(mayUse('GUARDIAN', '/guardian'), true);
+});
+
+// ── 班級平均數的是人，不是作答次數 ───────────────────────────
+
+/** `n` 次作答，同一位學生。 */
+const tries = (assignmentId, userId, scores) =>
+  scores.map((totalScore, i) => ({ assignmentId, userId, totalScore, attemptNo: i + 1 }));
+
+test('一份可作答三次的練習卷上，兩個學生不會變成六位同學', () => {
+  // 這是整個反推防線失效的那一種：`maxAttempts = 3`，班上只有兩位
+  // 學生寫、各交三次 → 六列 GRADED → `peers = 6 ≥ PEER_FLOOR` →
+  // 媽媽的手機上出現「班級平均 74.3」。而扣掉自己只剩**一個人**，
+  // 她知道自己孩子的分數，`2×平均 − 自己` 就是另一個孩子的分數。
+  const rows = [...tries('a1', 'kid', [60, 70, 68]), ...tries('a1', 'other', [80, 82, 84])];
+  const stat = classMeansFromAttempts(rows).get('a1');
+  assert.equal(stat.peers, 2, '數成作答次數了');
+  const c = compareToClass({ score: 68, maxScore: 100, mean: stat.mean, peers: stat.peers });
+  assert.equal(c.show, false, '兩個人的平均被交出去了');
+  assert.equal(c.mean, null);
+});
+
+test('平均不是按作答次數加權的——重考三次的那一位只算一票', () => {
+  // 加權的後果不只是數字偏掉：孩子那一欄用的是**最後一次交卷**，
+  // 而平均用的是全部作答，於是「68 分／班級平均 74.3／−6.3」
+  // 三個數字對不起來。那正是 compareToClass 特地「先四捨五入再算
+  // 差距」要避免的事。
+  const rows = [
+    ...tries('a1', 'busy', [0, 0, 90]), // 只有最後一次算數
+    { assignmentId: 'a1', userId: 'b', totalScore: 70, attemptNo: 1 },
+    { assignmentId: 'a1', userId: 'c', totalScore: 80, attemptNo: 1 },
+  ];
+  const stat = classMeansFromAttempts(rows).get('a1');
+  assert.equal(stat.peers, 3);
+  assert.equal(stat.mean, 80, '(90 + 70 + 80) / 3');
+});
+
+test('算數的是最近一次交出去的，與孩子自己看到的那一份同一個口徑', () => {
+  // 挑最高分的話，班級平均會系統性地高於每個人自己看到的分數，
+  // 而家長讀到的是「我孩子低於平均」——一個由統計口徑製造出來的結論。
+  const stat = classMeansFromAttempts(tries('a1', 'u', [95, 40])).get('a1');
+  assert.equal(stat.mean, 40, '取的不是最後一次');
+  assert.equal(stat.peers, 1);
+});
+
+test('沒有分數的作答不算人頭', () => {
+  // 交了但還沒計分的那一列如果算進來，`peers` 會在平均還沒成形時
+  // 就跨過門檻。
+  const rows = [
+    { assignmentId: 'a1', userId: 'u1', totalScore: 70, attemptNo: 1 },
+    { assignmentId: 'a1', userId: 'u2', totalScore: null, attemptNo: 1 },
+    { assignmentId: 'a1', userId: 'u3', totalScore: undefined, attemptNo: 1 },
+  ];
+  const stat = classMeansFromAttempts(rows).get('a1');
+  assert.equal(stat.peers, 1);
+  assert.equal(stat.mean, 70);
+});
+
+test('五個不同的人才給得出平均', () => {
+  // 門檻本身沒有放寬——修的方向是「人數不夠就不給數字」，
+  // 不是「把門檻調低」。
+  const five = ['a', 'b', 'c', 'd', 'e'].map((u, i) => ({
+    assignmentId: 'a1',
+    userId: u,
+    totalScore: 70 + i,
+    attemptNo: 1,
+  }));
+  const stat = classMeansFromAttempts(five).get('a1');
+  assert.equal(stat.peers, PEER_FLOOR);
+  assert.equal(compareToClass({ score: 68, maxScore: 100, ...stat }).show, true);
+
+  const four = classMeansFromAttempts(five.slice(0, 4)).get('a1');
+  assert.equal(compareToClass({ score: 68, maxScore: 100, ...four }).show, false);
+});
+
+// ── 空狀態：「已經離開」與「還沒編班」不是同一件事 ───────────
+
+test('學年度結算之後，不會叫全補習班的家長打電話給櫃檯', () => {
+  // `closeAcademicYear` 一句 updateMany 把全部班籍寫上 leftAt，
+  // 於是每一個孩子的 className 都變成 null。舊的判斷只看「有沒有
+  // 班」，所以那個晚上兩百位家長會同時讀到「還沒有編進任何班級，
+  // 請告訴櫃檯」——而那句話明確叫她們打電話問一件系統自己做的事。
+  const closed = { inClass: false, taskCount: 0, submittedCount: 0, scoredCount: 0 };
+  assert.equal(noDataReason({ ...closed, everInClass: true }), 'BETWEEN_CLASSES');
+  // 從來沒進過任何班的那一種才是要找櫃檯的。
+  assert.equal(noDataReason({ ...closed, everInClass: false }), 'NO_CLASS');
+});
+
+test('轉學走了不會永遠停在「還沒有編進任何班級」', () => {
+  // `archiveStudent` 不動 GuardianLink，而舊的判斷也不看 status，
+  // 所以媽媽的帳號會**永遠**顯示那一句，唯一的出口是櫃檯手動逐條
+  // 移除連結。而「已經離開」在資料上與「還沒編班」長得一模一樣。
+  assert.equal(
+    noDataReason({
+      inClass: false,
+      taskCount: 0,
+      submittedCount: 0,
+      scoredCount: 0,
+      hasLeft: true,
+      everInClass: true,
+    }),
+    'LEFT',
+  );
+  // 已經離開排在最前面：它是其他每一種狀況的原因。
+  assert.equal(
+    noDataReason({ inClass: true, taskCount: 3, submittedCount: 2, scoredCount: 1, hasLeft: true }),
+    'LEFT',
+  );
+});
+
+test('剛換班的孩子不會被說成「老師還沒有派任何作業」', () => {
+  // 轉班之後舊班的作業與成績從家長端消失（任務清單只看還在的班籍），
+  // 而空狀態會說「老師還沒有派任何作業或考試」——對一個上了兩年的
+  // 孩子，那是假話，家長讀到的是「兩年的紀錄不見了」。
+  const empty = { inClass: true, taskCount: 0, submittedCount: 0, scoredCount: 0 };
+  assert.equal(noDataReason({ ...empty, changedClass: true }), 'NEW_CLASS');
+  assert.equal(noDataReason(empty), 'NO_TASK', '沒換過班的還是原來那一句');
+});
+
+test('新加的原因不影響原本那四種', () => {
+  // 舊的呼叫端（與這一支測試上面那幾格）不帶新參數，行為必須完全不變。
+  const base = { inClass: true, taskCount: 3, submittedCount: 2, scoredCount: 1 };
+  assert.equal(noDataReason({ ...base, inClass: false }), 'NO_CLASS');
+  assert.equal(noDataReason({ ...base, taskCount: 0 }), 'NO_TASK');
+  assert.equal(noDataReason({ ...base, submittedCount: 0 }), 'NOT_SUBMITTED');
+  assert.equal(noDataReason({ ...base, scoredCount: 0 }), 'NOT_RELEASED');
+  assert.equal(noDataReason(base), null);
+});
+
+// ── 「看不到連結」與「進不去」：這一次真的驗頁面 ─────────────
+
+/**
+ * 導覽項 → 那一區的入口頁面。
+ *
+ * # 為什麼要有這張表
+ *
+ * 因為上面那一格（`mayUse('GUARDIAN', href)` 全部是 false）驗的是
+ * `lib/nav.ts` 那張表，**一個字都沒有碰到頁面**。而 `/take` 曾經
+ * 就是那樣：清單裡列著它、斷言是綠的，而頁面上全頁沒有任何存取
+ * 判定——家長直接打網址進得去，看到「我的任務／王小美家長」與
+ * 一句「如果你知道有一份但這裡沒有，請告訴班級老師」，然後照著
+ * 打電話。沒有資料外洩，但那是導覽列與頁面兩件事只做了一件。
+ *
+ * # 這裡沒有列 /admission、/interview、/portfolio
+ *
+ * 那三頁的判定現在寫成 `systemRole !== 'STUDENT'` 的二分法（家長被
+ * 當成老師），而它們不屬於這一批改動。**列進來會讓這一格對別人的
+ * 檔案紅**，而一條指著別人的紅燈不會被修，只會被關掉。修好之後
+ * 把它們加進來。
+ */
+const AREA_PAGE = {
+  '/take': 'app/(app)/take/page.tsx',
+  '/ability': 'app/(app)/ability/page.tsx',
+  '/bank': 'app/(app)/bank/page.tsx',
+  '/import': 'app/(app)/import/page.tsx',
+  '/papers': 'app/(app)/papers/page.tsx',
+  '/assignments': 'app/(app)/assignments/page.tsx',
+  '/grades': 'app/(app)/grades/page.tsx',
+  '/classes': 'app/(app)/classes/page.tsx',
+  '/knowledge': 'app/(app)/knowledge/page.tsx',
+  '/settings/years': 'app/(app)/settings/years/page.tsx',
+  '/settings/subjects': 'app/(app)/settings/subjects/page.tsx',
+  '/settings/staff': 'app/(app)/settings/staff/page.tsx',
+};
+
+test('家長進不去的每一區，頁面自己也擋——不是只有導覽列不畫', async () => {
+  const { mayUse } = await import('../lib/nav.ts');
+  for (const [href, file] of Object.entries(AREA_PAGE)) {
+    assert.equal(mayUse('GUARDIAN', href), false, `nav.ts 讓家長進得去 ${href}`);
+    const src = read(file);
+
+    // 判定要走 `lib/nav.ts` 那張表：直接 `mayUse`，或包一層
+    // （`mayComposeArea`）但參數仍然是那條路徑。頁面自己手寫一份
+    // 角色清單的話，改角色的時候沒有人會記得跟著改。
+    const guard = new RegExp(`!\\s*may\\w*\\(\\s*user\\.systemRole,\\s*(?:AREA|'${href}')`);
+    assert.match(src, guard, `${file} 沒有頁面層的存取判定（家長直接打網址就進得去）`);
+    if (/!\s*may\w*\(\s*user\.systemRole,\s*AREA/.test(src)) {
+      assert.match(
+        src,
+        new RegExp(`const AREA = '${href}'`),
+        `${file} 用了 AREA 但它不是 ${href}`,
+      );
+    }
+    // 擋下來要說得出為什麼。一個空白的畫面會變成一通電話。
+    assert.match(src, /<Denied/, `${file} 擋了但沒有說明`);
+  }
+});
+
+test('/take 擋家長但不擋老師——「不擋老師」不等於「誰都不擋」', () => {
+  // nav.ts 寫得很清楚：老師偶爾會被指定為作答對象（自己先試考一份
+  // 再派出去），所以導覽列不畫但網址進得去。那句話原本被實作成
+  // 「全頁沒有判定」。
+  const src = read('app/(app)/take/page.tsx');
+  assert.match(src, /!mayUse\(user\.systemRole, '\/take'\) && !staff/, '例外沒有寫成例外');
+  assert.match(src, /mayUse\(user\.systemRole, '\/bank'\)/, '職員那一條例外不見了');
+});
+
+test('/ability 不把「不是學生」全部當成老師', async () => {
+  // 系統有六種角色。二分法之下，家長看到的是「老師要看的是某一位
+  // 學生或某一個班的弱點，那在班級頁裡」與一顆「去班級」——
+  // 而 /classes 對她是拒絕。一句對她說的話，加上一顆按不動的按鈕。
+  const src = read('app/(app)/ability/page.tsx');
+  const code = src
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join('\n');
+  assert.ok(
+    !/systemRole !== 'STUDENT'/.test(code),
+    '/ability 還在用「不是學生就是老師」的二分法',
+  );
+  // 兩種人要看到不同的話，而且家長那一句要指向她按得動的地方。
+  assert.match(code, /mayUse\(user\.systemRole, '\/classes'\)/, '老師與家長被寫成同一句');
+  assert.match(code, /href="\/guardian"/, '家長那一句沒有指向她進得去的地方');
+});
+
+// ── 家長端的每一句「去找人」都要指得出一個人 ─────────────────
+
+test('家長端不再叫她去找一位沒有名字的「班級老師」', () => {
+  // 這一頁上有孩子的名字、班名、任務名稱、分數——在導師的姓名出現
+  // 之前，沒有任何一位老師的名字、沒有電話、沒有補習班的聯絡方式，
+  // 而收件匣是唯讀的。「請告訴班級老師」在那個情況下就是一句
+  // 指向系統外面而且沒有指路的話，而她讀完會打電話。
+  const src = read('app/(app)/guardian/page.tsx');
+  const code = src
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(l))
+    .join('\n');
+  assert.ok(
+    !/告訴櫃檯或班級老師|跟班級老師說|問老師/.test(code),
+    '還有一句沒有名字的「去找老師」',
+  );
+  assert.match(code, /contact\(picked\)/, '沒有用上導師的姓名');
+  // 姓名要真的查得出來，否則 `contact()` 永遠走 fallback。
+  const lib = read('lib/guardian.ts');
+  assert.match(lib, /isHomeroom: true/, 'childrenOf 沒有查導師');
+  assert.match(lib, /homeroomTeacher/, 'Child 沒有帶出導師姓名');
+});
+
+test('成績還沒開放時，不會要家長自己每天回來按一次', () => {
+  // 那一段原本寫「開放之後這裡就看得到」，而**開放的那一刻沒有任何
+  // 跡象**——她一個月只看兩次。現在家長也收得到放行通知，
+  // 所以這一句要說出來。
+  const src = read('app/(app)/guardian/page.tsx');
+  assert.match(src, /開放的時候系統會發一則通知給你/, '沒有告訴她會收到通知');
+});
+
+// ── 移除連結：對話框說的話要與程式做的事一樣 ─────────────────
+
+test('「正在看的畫面也會被登出」只出現在真的會被登出的那一邊', () => {
+  // `unlinkGuardian` 只在他一個孩子都不剩時才清 session（還有孩子
+  // 就不動帳號）。所以兩個孩子的家長不會被登出，而那句話原本對
+  // 所有人都說——同一個對話框裡兩句話對不起來，而按下去的人
+  // 以為自己知道會發生什麼。
+  const lib = read('lib/guardian.ts');
+  const body = lib.slice(lib.indexOf('export async function unlinkGuardian'));
+  const upTo = body.slice(0, body.indexOf('await audit('));
+  assert.match(upTo, /left === 0/, 'unlinkGuardian 的前提變了，這一格要重寫');
+  assert.match(upTo, /session\.deleteMany/);
+
+  // 註解拿掉再驗：這一格檢查的是**畫出來的字**，而說明為什麼要
+  // 這樣寫的註解裡本來就會出現「會被登出」這幾個字。
+  const dialog = read('app/(app)/classes/[classId]/Guardians.tsx')
+    .replace(/\{?\/\*[\s\S]*?\*\/\}?/g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  const at = dialog.indexOf('removing.children > 1');
+  assert.ok(at > 0, '找不到那個分支');
+  const [manyKids, onlyKid] = dialog.slice(at).split(') : (');
+  // 兩個孩子的那一邊要**明講不會被登出**（沉默不夠：上一句話剛說完
+  // 「立刻看不到任何資料」，讀的人會自己補上「所以被踢出去了」）。
+  assert.match(manyKids, /不會被登出/, '沒有說清楚他不會被登出');
+  assert.match(onlyKid.slice(0, 400), /也會立刻被登出/, '唯一的孩子那一邊沒有說會被登出');
+  // 而那句話也不可以留在分支外面（原本就在那裡，所以對所有人都說）。
+  assert.ok(!/登出/.test(dialog.slice(0, at)), '分支外面還有一句「會被登出」');
+});
+
+// ── 收件匣：第二頁也要標成已讀 ───────────────────────────────
+
+test('翻到第二頁時，標記已讀不會被上一頁的旗標擋掉', () => {
+  // `/inbox?before=…` 是同一個元件在 React 樹上的同一個位置，
+  // state 與 ref 都保留下來。記「送過了沒」的布林值在第一頁是對的，
+  // 第二頁起就永遠 return——導覽列上的數字停在 60 不動，
+  // 而收件匣那三道歸零機制裡的第一道從第二頁起就不作用了。
+  const src = read('app/(app)/inbox/MarkRead.tsx');
+  assert.match(src, /sentKey\.current === key/, '守衛沒有跟著這一頁的 id 走');
+  assert.match(src, /sentKey\.current = key/);
+  assert.ok(!/sent\.current = true/.test(src), '還是那個一次性的布林旗標');
 });

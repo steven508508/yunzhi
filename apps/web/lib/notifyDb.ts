@@ -48,11 +48,22 @@ import {
   enqueueMany,
   inboxPage,
   markRead as markReadCore,
+  notifiableGuardianIds,
+  taipeiDay,
   unreadCount as unreadCountCore,
   buildChannels,
   parseQuietHours,
 } from '@/lib/notify.mjs';
 import { prisma } from '@/lib/prisma';
+// 放行時機的唯一一份判斷。**這一個 import 的方向是有理由的**：
+// 「別人動了你的成績」這一則只該送給**現在已經看得到分數**的人，
+// 而那個問題只有 `maySeeResult` 答得出來。自己在這裡重寫一份
+// 「MANUAL 就看 releasedAt、ON_DUE 就看 dueAt」的話，就多了一份會
+// 與檢討頁分歧的規則，而分歧的方向是**在老師放行之前先告訴學生
+// 他的成績變了**。（`notifyTemplates.mjs` 刻意不 import 這個檔案，
+// 但那是為了一個格式化函式——為了四行字換一個相依沒有道理，
+// 為了一條放行規則有。）
+import { maySeeResult } from '@/lib/release.mjs';
 import { requireTenant } from '@/lib/tenant';
 
 // ─────────────────────────────────────────────────────────────────
@@ -233,15 +244,126 @@ export async function notifyGradeReleased(
 ): Promise<void> {
   await quietly('成績放行', async () => {
     if (info.recipientIds.length === 0) return;
+    // 型別寫出來而不是讓它從第一批推導：家長那一批的 payload 多兩個
+    // 欄位（孩子的名字與 id），而推導出來的窄型別會讓 `push` 變成
+    // 一個看起來莫名其妙的錯誤。
+    const specs: {
+      tenantId: string;
+      recipientId: string;
+      templateKey: string;
+      scope: string;
+      payload: Record<string, unknown>;
+    }[] = info.recipientIds.map((userId) => ({
+      tenantId: info.tenantId,
+      recipientId: userId,
+      templateKey: 'grade.released',
+      // 一份任務放行一次就是一次。老師收回再放行不會再送——
+      // 學生已經知道了，而第二則說的是同一件事。
+      scope: assignmentId,
+      payload: { assignmentId, title: info.title },
+    }));
+
+    // 家長也要收到。**同一件事對兩種人的意義相同**：家長端那一頁在
+    // 放行之前寫的是「老師還沒有開放成績」，而開放的那一刻同樣沒有
+    // 任何跡象——沒有這一段，那一頁等於要她每天回來按一次，
+    // 而她一個月只看兩次。學生那一則的設計理由逐字適用於家長。
+    //
+    // 收件人一律走 `notifiableGuardianIds`（未確認交付的連結不算），
+    // 而**不是自己再查一次 guardianLink**：那條規則擋的是「把成績
+    // 交給一個沒有人確認過的信箱」，只可以有一份實作。
+    const guardians = await notifiableGuardianIds(prisma, [...info.recipientIds]);
+    if (guardians.size > 0) {
+      const children = await prisma.user.findMany({
+        where: { id: { in: [...guardians.keys()] } },
+        select: { id: true, displayName: true },
+      });
+      const nameOf = new Map(children.map((c) => [c.id, c.displayName]));
+      for (const [studentId, list] of guardians) {
+        for (const g of list) {
+          // 跨租戶不可能發生（連結建立時在同一個租戶脈絡下），
+          // 但寫下去的那一列帶著 tenantId，對不上就是把一家補習班的
+          // 資料放進另一家。不修正、直接跳過。
+          if (g.tenantId !== info.tenantId) continue;
+          specs.push({
+            tenantId: g.tenantId,
+            recipientId: g.id,
+            templateKey: 'grade.released.guardian',
+            // 一位家長兩個孩子時要兩則（名字與連結不同），
+            // 所以 scope 帶上 studentId。
+            scope: `${assignmentId}:${studentId}`,
+            // **沒有 assignmentId。** 家長那一則的連結指向 `/guardian`，
+            // 不指向任何一份任務——那一頁上一個 id 都沒有（見
+            // `lib/guardianView.mjs` 的 `GUARDIAN_TASK_FIELDS`），
+            // 而白名單（`GUARDIAN_PAYLOAD_KEYS`）也不收它。
+            payload: {
+              title: info.title,
+              childName: nameOf.get(studentId) ?? '孩子',
+              studentId,
+            },
+          });
+        }
+      }
+    }
+
+    await enqueueMany(prisma, specs);
+  });
+}
+
+/**
+ * 老師改了標準答案或送分，全班重算之後有人的分數變了。
+ *
+ * # 為什麼只送給「分數真的變了、而且他本來就看得到」的那幾位
+ *
+ * **分數沒變的不送**：一份 30 人的卷子改一題答案，可能只有 6 個人的
+ * 總分會動。另外 24 個人收到「你的分數重新算過」只會去確認一次一個
+ * 沒有變化的數字，而下一次真的變了的時候他已經學會忽略這一則。
+ *
+ * **本來沒有分數的不送**（`from` 是 null）：那不是「別人動了你的
+ * 成績」，那是成績第一次算出來。它有自己的路徑（放行通知）。
+ *
+ * **還沒放行的整批不送**：MANUAL 或 ON_DUE 的任務在放行之前，學生
+ * 自己的畫面上只有一句「老師還沒有開放」。這時候告訴他「你的分數
+ * 重新算過了」，等於在老師決定的時刻之前先說出「你考完了、而且
+ * 分數動過」——那是放行時機要擋的事。放行之後他看到的就是最新的
+ * 分數，而那時他不需要這一則。
+ *
+ * 判斷走 `maySeeResult`，不自己重寫一份放行規則。理由見檔頭的 import。
+ */
+export async function notifyGradeChanged(
+  assignmentId: string,
+  info: {
+    tenantId: string;
+    title: string;
+    /** 分數真的變了的那幾位。`from` 是變動前的分數。 */
+    changed: readonly { userId: string; from: number | null }[];
+  },
+): Promise<void> {
+  await quietly('重新計分', async () => {
+    const recipients = [
+      ...new Set(info.changed.filter((c) => c.from != null).map((c) => c.userId)),
+    ];
+    if (recipients.length === 0) return;
+
+    const asg = await prisma.assignment.findFirst({
+      where: { id: assignmentId },
+      select: { releasePolicy: true, releasedAt: true, dueAt: true },
+    });
+    if (!asg) return;
+    // 收件人全部是已經交出去的作答（`regradeAssignment` 只重算
+    // SUBMITTED / GRADED），所以整批的放行狀態相同，問一次就夠。
+    const visible = maySeeResult(asg, { status: 'GRADED' }) as { level: string };
+    if (visible.level === 'NONE') return;
+
     await enqueueMany(
       prisma,
-      info.recipientIds.map((userId) => ({
+      recipients.map((userId) => ({
         tenantId: info.tenantId,
         recipientId: userId,
-        templateKey: 'grade.released',
-        // 一份任務放行一次就是一次。老師收回再放行不會再送——
-        // 學生已經知道了，而第二則說的是同一件事。
-        scope: assignmentId,
+        templateKey: 'grade.changed',
+        // **一天一則。** 老師一個下午改三次答案是常見的（改完發現
+        // 另一題也錯了），而三則一模一樣的「你的分數重新算過」
+        // 只會把收件匣裡別的事情擠出去。台灣日期的理由見 `dedupeKey`。
+        scope: `${assignmentId}:${taipeiDay(new Date())}`,
         payload: { assignmentId, title: info.title },
       })),
     );

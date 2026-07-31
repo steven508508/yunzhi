@@ -46,19 +46,21 @@ import { createPgShim } from './pg-shim.mjs';
 import {
   MAX_PER_WINDOW,
   MAX_RETRY,
+  NOTIFICATION_RETENTION_DAYS,
   deliverDue,
   enqueueMany,
   examBusy,
   generateAll,
   inboxPage,
   markRead,
+  purgeOldNotifications,
   sweepDueSoon,
   sweepGrading,
   sweepImports,
   sweepOverdue,
   unreadCount,
 } from '../apps/web/lib/notify.mjs';
-import { render } from '../apps/web/lib/notifyTemplates.mjs';
+import { GUARDIAN_PAYLOAD_KEYS, render } from '../apps/web/lib/notifyTemplates.mjs';
 import { withTenant, withoutTenantScope } from '../apps/web/lib/tenantContext.mjs';
 
 const prisma = createPgShim({
@@ -939,15 +941,12 @@ async function mainFlow({ mine: f, other, now }) {
   });
 
   await test('家長那一則的 payload 欄位是一份白名單', async () => {
-    const allowed = new Set([
-      'childName',
-      'studentId',
-      'count',
-      'titles',
-      'title',
-      'dueAt',
-      'canStillSubmit',
-    ]);
+    // **用共用的那一份清單，不再在這裡抄一份。** 抄的那一份與正本
+    // 分歧時，分歧的方向是「這裡是綠的而正本已經放寬了」——而這一格
+    // 存在的理由正是「真的寫進資料庫的那一列長什麼樣」。
+    // 新增欄位的把關在 `GUARDIAN_PAYLOAD_KEYS` 那段註解上：它要求
+    // 說出為什麼那個欄位不是逐題作答、對話或監考資料。
+    const allowed = new Set(GUARDIAN_PAYLOAD_KEYS);
     const rows = await withTenant(f.tenant.id, () => inboxOf(f.parent.id));
     for (const row of rows) {
       for (const key of Object.keys(row.payload ?? {})) {
@@ -1063,6 +1062,174 @@ async function mainFlow({ mine: f, other, now }) {
     for (const row of second.rows) {
       assert.equal(ids.has(row.id), false, '第二頁不可以重複第一頁的東西');
     }
+  });
+
+  // ── 十二、送出前重新確認事實 ───────────────────────────────────
+  //
+  // 產生與送出之間可以隔八個小時（免打擾 22:00–07:00），而通知的內容
+  // 在**產生**的那一刻就寫死了。這一段驗的是那個窗口：排隊期間孩子
+  // 補交了，早上七點還會不會送出去。
+  //
+  // 這件事在單元測試裡用假的資料庫驗過分支，但**真正會出錯的地方在
+  // 這裡**：payload 是 jsonb（進去出來還是不是同一個陣列）、
+  // `attempt` 的比對是跨兩張表的、而 `deliverDue` 是工作者真的會跑的
+  // 那一支。
+
+  section('排隊期間事實變了');
+
+  await test('排到早上七點的催繳，孩子半夜補交之後就不送了', async () => {
+    await withoutTenantScope('端到端：排隊期間補交', async () => {
+      // 乾淨的起點：這位家長與學生前面幾段已經收過東西了。
+      await prisma.notification.deleteMany({ where: { recipientId: f.parent.id } });
+      await prisma.notification.deleteMany({ where: { recipientId: f.student.id } });
+      await prisma.attempt.deleteMany({ where: { assignmentId: f.soon.id } });
+
+      // 三天後的深夜那一輪：`soon`（12 小時後截止的那一份）這時已經
+      // 逾期，而且還在三天的回看視窗內，所以家長與學生各一則。
+      const night = new Date(+now + 3 * DAY);
+      const gen = await sweepOverdue(prisma, { now: night });
+      assert.ok(gen.created >= 2, `逾期掃描沒有產生通知：${JSON.stringify(gen)}`);
+
+      const before = await prisma.notification.findMany({
+        where: { recipientId: f.parent.id, status: 'QUEUED' },
+      });
+      assert.equal(before.length, 1, '家長那一則沒有排進佇列');
+      // 送出前要重新確認的那幾份**真的存進去了**（jsonb 進出之後
+      // 還是一個陣列）。少了它，重新確認會走「舊格式，照送」那一條，
+      // 而每一格都會是綠的。
+      assert.ok(
+        Array.isArray(before[0].payload.assignmentIds) &&
+          before[0].payload.assignmentIds.includes(f.soon.id),
+        `payload 沒有帶要重新確認的那幾份：${JSON.stringify(before[0].payload)}`,
+      );
+
+      // 半小時後：王大明補交了。
+      await prisma.attempt.create({
+        data: {
+          assignmentId: f.soon.id,
+          userId: f.student.id,
+          attemptNo: 1,
+          status: 'SUBMITTED',
+          startedAt: night,
+          submittedAt: new Date(+night + 30 * 60_000),
+          late: true,
+        },
+      });
+
+      // 早上七點：工作者送出這一輪。
+      // **這一輪是跨租戶的**（工作者不屬於任何一家補習班），所以
+      // 前面幾段留下來的列也會一起被送出——斷言要落在這兩則本身，
+      // 不是整輪的總數。
+      const out = await deliverDue(prisma, { now: new Date(+night + 8 * HOUR) });
+      assert.ok(out.suppressed >= 2, `應該兩則都攔下來：${JSON.stringify(out)}`);
+
+      for (const uid of [f.parent.id, f.student.id]) {
+        const rows = await prisma.notification.findMany({ where: { recipientId: uid } });
+        assert.equal(rows.length, 1);
+        // **不是刪掉**：查得到才答得出「為什麼那天早上沒有收到催繳」。
+        assert.equal(rows[0].status, 'SUPPRESSED', `${uid} 那一則還是送出去了`);
+        assert.match(rows[0].failReason ?? '', /不成立/, '沒有寫下原因');
+      }
+      // 而收件匣裡看不到它——SUPPRESSED 的不畫（`inboxPage` 只撈 SENT）。
+      const { rows } = await inboxPage(prisma, f.parent.id, { take: 10 });
+      assert.equal(rows.length, 0, '被攔下來的那一則出現在收件匣裡了');
+    });
+  });
+
+  await test('三份裡只補交一份的時候照送——下一步仍然成立', async () => {
+    await withoutTenantScope('端到端：只補交其中一份', async () => {
+      await prisma.notification.deleteMany({ where: { recipientId: f.parent.id } });
+      await prisma.notification.deleteMany({ where: { recipientId: f.student.id } });
+
+      // 兩份都落在「四天後」那一輪的回看視窗內。
+      const mk = async (title, dueAt) => {
+        const a = await prisma.assignment.create({
+          data: {
+            tenantId: f.tenant.id,
+            paperId: f.paper.id,
+            title,
+            mode: 'EXAM',
+            maxAttempts: 1,
+            dueAt,
+            createdBy: f.teacher.id,
+          },
+        });
+        await prisma.assignmentTarget.create({
+          data: { assignmentId: a.id, classId: f.klass.id },
+        });
+        return a;
+      };
+      const one = await mk('本校·兩天後的作業', new Date(+now + 2 * DAY));
+      await mk('本校·三天後的作業', new Date(+now + 3 * DAY));
+
+      const night = new Date(+now + 4 * DAY);
+      await sweepOverdue(prisma, { now: night });
+      const queued = await prisma.notification.findMany({
+        where: { recipientId: f.parent.id, status: 'QUEUED' },
+      });
+      assert.equal(queued.length, 1);
+      assert.equal(queued[0].payload.count, 2, '摘要應該是兩份');
+
+      // 只補交其中一份。
+      await prisma.attempt.create({
+        data: {
+          assignmentId: one.id,
+          userId: f.student.id,
+          attemptNo: 1,
+          status: 'SUBMITTED',
+          startedAt: night,
+          submittedAt: new Date(+night + 30 * 60_000),
+        },
+      });
+
+      const out = await deliverDue(prisma, { now: new Date(+night + 8 * HOUR) });
+      assert.ok(out.sent >= 2, `還有一份沒交，這一則應該照送：${JSON.stringify(out)}`);
+      const rows = await prisma.notification.findMany({
+        where: { recipientId: f.parent.id },
+      });
+      assert.equal(rows[0].status, 'SENT');
+    });
+  });
+
+  // ── 十三、保存期限 ─────────────────────────────────────────────
+
+  section('保存期限');
+
+  await test('過了期限的通知真的被刪掉，卡在佇列裡的留著', async () => {
+    await withoutTenantScope('端到端：保存期限', async () => {
+      await prisma.notification.deleteMany({ where: { recipientId: f.leaver.id } });
+      const old = new Date(+now - (NOTIFICATION_RETENTION_DAYS + 30) * DAY);
+      const mk = (tag, status, createdAt) =>
+        prisma.notification.create({
+          data: {
+            tenantId: f.tenant.id,
+            recipientId: f.leaver.id,
+            channel: 'IN_APP',
+            templateKey: 'assignment.overdue',
+            payload: {},
+            status,
+            scheduledAt: createdAt,
+            createdAt,
+            dedupeKey: `retention:${f.leaver.id}:${tag}`,
+          },
+        });
+      await mk('old-sent', 'SENT', old);
+      await mk('old-failed', 'FAILED', old);
+      await mk('old-queued', 'QUEUED', old);
+      await mk('fresh', 'SENT', now);
+
+      const r = await purgeOldNotifications(prisma, { now });
+      assert.ok(r.deleted >= 2, `該刪的沒有刪：${JSON.stringify(r)}`);
+      const left = await prisma.notification.findMany({ where: { recipientId: f.leaver.id } });
+      const keys = left.map((x) => x.dedupeKey).sort();
+      // 卡在佇列裡一年的那一列是一個症狀，刪掉它等於把唯一的線索
+      // 清乾淨，而卡住的原因會繼續存在。
+      assert.deepEqual(
+        keys,
+        [`retention:${f.leaver.id}:fresh`, `retention:${f.leaver.id}:old-queued`],
+        '刪錯了東西',
+      );
+    });
   });
 }
 

@@ -1,6 +1,6 @@
 import Link from 'next/link';
 
-import { Empty } from '@/components/Feedback';
+import { Denied, Empty } from '@/components/Feedback';
 import { listStudentTasks, type StudentTask } from '@/lib/attempt';
 import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
@@ -23,19 +23,48 @@ export const dynamic = 'force-dynamic';
  *
  * 「已錯過」那幾份仍然列出來並且說明原因。藏起來的話學生會以為
  * 自己沒有那份作業，而老師那邊記的是一次未交。
+ *
+ * # 誰進得來
+ *
+ * 學生（`nav.ts` 的 LEARNER）與職員。**職員是唯一的例外，而例外
+ * 不等於沒有規則**：`nav.ts` 寫得很清楚，老師偶爾會被指定為作答
+ * 對象（自己先試考一份再派出去），所以導覽列不畫但網址進得去。
+ * 這一頁原本把那句話實作成「誰都不擋」，於是家長直接打 `/take`
+ * 會看到「我的任務／王小美家長」與一句「如果你知道有一份但這裡
+ * 沒有，請告訴班級老師」——沒有資料外洩，但她會照著打電話，
+ * 而那通電話問的是一個不存在的問題。
  */
 export default async function TakePage() {
   return scopedPage(async (user) => {
+    // 老師與管理員也進得來（他們可能被指定為作答對象，例如試考一份），
+    // 但多數情況下他們的清單是空的。空畫面要說得出為什麼，
+    // 否則看起來像壞掉。
+    const staff = mayUse(user.systemRole, '/bank');
+
+    // 「看不到連結」與「進不去」必須是同一份規則（見 `lib/nav.ts`
+    // 的檔頭）。這一行就是那份規則在這一頁的那一半——少了它，
+    // 導覽列上的過濾只是把入口藏起來。
+    if (!mayUse(user.systemRole, '/take') && !staff) {
+      return (
+        <main className="yz-panel">
+          <Denied
+            what="作答"
+            why={
+              <>
+                這一頁是學生自己的任務清單。家長要看孩子交了沒有、
+                考得怎麼樣，在<Link href="/guardian">「孩子的狀況」</Link>那一頁。
+              </>
+            }
+          />
+        </main>
+      );
+    }
+
     const tasks = await listStudentTasks(user.id);
 
     const inProgress = tasks.filter((t) => t.state === 'IN_PROGRESS');
     const todo = tasks.filter((t) => ['OPEN', 'UPCOMING', 'MISSED'].includes(t.state));
     const done = tasks.filter((t) => t.state === 'DONE');
-
-    // 老師與管理員也進得來（他們可能被指定為作答對象，例如試考一份），
-    // 但多數情況下他們的清單是空的。空畫面要說得出為什麼，
-    // 否則看起來像壞掉。
-    const staff = mayUse(user.systemRole, '/bank');
 
     return (
       <main className="yz-panel">

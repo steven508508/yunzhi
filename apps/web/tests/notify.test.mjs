@@ -30,6 +30,8 @@ import { test } from 'node:test';
 import { countByAssignment } from '../lib/scope.mjs';
 import {
   MAX_PER_WINDOW,
+  NOTIFICATION_RETENTION_DAYS,
+  RECHECKED,
   THROTTLE_WINDOW_MS,
   UNREAD_HORIZON_DAYS,
   UNREADY_REASON,
@@ -37,12 +39,16 @@ import {
   buildChannels,
   channelReady,
   dedupeKey,
+  deliverDue,
   inQuietHours,
   isDuplicate,
   parseQuietHours,
+  purgeOldNotifications,
   quietUntil,
   recipientsByAssignment,
   scheduleFor,
+  staleReason,
+  subjectOf,
   taipeiDay,
   taipeiMinutes,
   throttle,
@@ -281,14 +287,45 @@ test('節流與免打擾一起生效：半夜累積的通知不會在七點一�
 // 四、必收：關不掉的那幾則
 // ─────────────────────────────────────────────────────────────────
 
-test('必收清單就是「別人動了你的成績」那三件事', () => {
+test('必收清單就是「別人動了你的成績」那幾件事', () => {
   // 這一格是整支測試最重要的一格。任一則從清單上掉下來，症狀是
   // 學生關掉之後**永遠不知道自己的卷子出了事**，而他的設定畫面
   // 看起來完全正常。
+  //
+  // `grade.changed` 是後來補上的，而它原本不在清單裡**不是一個決定**：
+  // `regradeAssignment` 真的改寫了學生的分數（老師改標準答案、送分），
+  // 卻連一則可關可不關的通知都沒有——他下次自己點進去才會發現 78
+  // 變成 72。那條規則自己說得出口的東西漏掉了一項。
   assert.deepEqual(
     [...MANDATORY].sort(),
-    ['attempt.finalized_by_teacher', 'attempt.unvoided', 'attempt.voided'].sort(),
+    [
+      'attempt.finalized_by_teacher',
+      'attempt.unvoided',
+      'attempt.voided',
+      'grade.changed',
+    ].sort(),
   );
+});
+
+test('分數被改寫的那幾則通知都存在，而且都關不掉', () => {
+  // 「別人動了你的成績」在系統裡有四條路徑，而每一條都要有一則
+  // 通知。少了任何一則，學生會在成績單上看到一個他無法解釋的數字，
+  // 而系統裡沒有任何一條路徑能讓他知道「有事發生過」。
+  for (const key of [
+    'attempt.voided', // 作廢
+    'attempt.unvoided', // 撤銷作廢
+    'attempt.finalized_by_teacher', // 代為結算
+    'grade.changed', // 改標準答案／送分之後重算
+  ]) {
+    assert.ok(TEMPLATES[key], `${key} 這一則不見了`);
+    assert.equal(mayTurnOff(key), false, `${key} 關得掉`);
+  }
+  // 重算那一則**不可以把新舊分數寫進內文**：收件人裡有一種人現在
+  // 還不該看到分數（MANUAL／ON_DUE 尚未放行），而放行時機是老師的
+  // 決定。觸發那一端會再擋一次，這裡擋的是文案本身。
+  const v = render('grade.changed', { title: '第三次模擬考', from: 78, to: 72 });
+  assert.ok(!v.body.includes('78') && !v.body.includes('72'), '重算通知把分數寫進內文了');
+  assert.match(v.body, /重新算過|重算/);
 });
 
 test('必收的關不掉，其餘的關得掉', () => {
@@ -608,33 +645,20 @@ test('逾期未交的下一步分兩種，而且差很多', () => {
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * 兩支函式的 where 條件必須一模一樣。
+ * 「哪一位成年人收得到一個孩子的資料」**只可以有一份實作**。
  *
- * `lib/guardian.ts` 的 `notifiableGuardians` 是網頁端的入口，
- * `lib/notify.mjs` 的 `notifiableGuardianIds` 是工作者的（工作者是
- * 純 node，import 不了 .ts）。而這條規則管的是**哪一位成年人收得到
- * 一個孩子的資料**——放寬其中一個條件的後果是把成績推給一個
- * 沒有被確認過的信箱，也就是陌生人。
+ * 這條規則放寬的後果是把成績推給一個沒有被確認過的信箱，也就是
+ * 陌生人。而它原本有兩份：`lib/notify.mjs` 的 `notifiableGuardianIds`
+ * （工作者的，工作者是純 node、import 不了 .ts）與 `lib/guardian.ts`
+ * 的 `notifiableGuardians`（網頁端的）。這一格原本逐條比對兩支的
+ * where 條件，而那擋得住「改了一邊忘了另一邊」，擋不住現況：
+ * **正式環境跑的一直只有工作者那一份**，網頁端那一支除了端到端
+ * 測試沒有任何呼叫端——一份沒有人在跑的規則遲早與真的在跑的那一份
+ * 不一樣。
  *
- * 用「必要 ∩ 允許」兩份清單而不是逐字比對：逐字比對會被排版與
- * 批次化（`studentId` 對 `studentIds`）弄壞，而這兩份清單同時擋住
- * 「少了一個條件」與「多了一個條件」。
+ * 所以現在驗的是更強的一件事：只有一份實作，另一支是它的殼。
  */
 const GUARDIAN_REQUIRED = ['verifiedAt', 'not', 'systemRole', 'status', 'deletedAt'];
-const GUARDIAN_ALLOWED = [
-  ...GUARDIAN_REQUIRED,
-  'studentId',
-  'studentIds',
-  'guardianId',
-  'id',
-  'in',
-  'where',
-  'select',
-  'tenantId',
-  'username',
-  'displayName',
-  'email',
-];
 
 /** 抽出一支函式的內文（到下一個 top-level `export ` 或檔尾）。 */
 function bodyOf(src, signature) {
@@ -645,29 +669,52 @@ function bodyOf(src, signature) {
   return rest.slice(0, end > 0 ? end : rest.length);
 }
 
-test('家長是否收得到通知：兩支實作用同一組條件', () => {
-  const pairs = [
-    [read('lib/guardian.ts'), 'export async function notifiableGuardians('],
-    [read('lib/notify.mjs'), 'export async function notifiableGuardianIds('],
-  ];
-  for (const [src, sig] of pairs) {
-    const body = bodyOf(src, sig);
-    const keys = new Set([...body.matchAll(/(\w+):/g)].map((m) => m[1]));
-    for (const need of GUARDIAN_REQUIRED) {
-      assert.ok(
-        keys.has(need),
-        `${sig} 少了 ${need} 這個條件。` +
-          `未驗證、停權或已刪除的家長帳號會開始收到孩子的成績通知。`,
-      );
+test('家長收不收得到通知：規則寫在 notify.mjs，而且四個條件都在', () => {
+  const body = bodyOf(read('lib/notify.mjs'), 'export async function notifiableGuardianIds(');
+  const keys = new Set([...body.matchAll(/(\w+):/g)].map((m) => m[1]));
+  for (const need of GUARDIAN_REQUIRED) {
+    assert.ok(
+      keys.has(need),
+      `notifiableGuardianIds 少了 ${need} 這個條件。` +
+        `未驗證、停權或已刪除的家長帳號會開始收到孩子的成績通知。`,
+    );
+  }
+});
+
+test('lib/guardian.ts 沒有第二份「誰收得到通知」', () => {
+  const body = bodyOf(read('lib/guardian.ts'), 'export async function notifiableGuardians(');
+  assert.match(
+    body,
+    /notifiableGuardianIds\(/,
+    'notifiableGuardians 要委派給 notify.mjs 那一支，不是自己再查一次',
+  );
+  // 殼裡那一句查詢只挑顯示欄位。出現 `verifiedAt` 或 `systemRole`
+  // 就代表又長出了一份平行的規則——而兩份規則遲早會不一樣，
+  // 不一樣的方向是一位沒有被確認過的成年人開始收到孩子的成績。
+  for (const dup of ['verifiedAt', 'systemRole', 'status']) {
+    assert.ok(
+      !new RegExp(`${dup}\\s*:`).test(body),
+      `notifiableGuardians 又自己判了 ${dup}。這條規則只可以有一份實作。`,
+    );
+  }
+});
+
+test('每一支送給家長的通知都經過 notifiableGuardianIds', () => {
+  // 家長那一側的收件人**不可以**用「查一下 guardianLink」湊出來：
+  // 那樣會漏掉 `verifiedAt`，而那一欄擋的正是「把成績寄給陌生人」。
+  // 通知模組裡任何一處查 guardianLink 都要就是那一支本身。
+  for (const file of ['lib/notify.mjs', 'lib/notifyDb.ts']) {
+    const src = read(file);
+    const hits = [...src.matchAll(/(prisma|tx)\s*\.\s*guardianLink\b/g)];
+    if (file === 'lib/notifyDb.ts') {
+      assert.equal(hits.length, 0, 'notifyDb.ts 自己查了 guardianLink，繞過了那道確認');
+      assert.match(src, /notifiableGuardianIds\(/, 'notifyDb.ts 沒有用那一支算收件人');
+      continue;
     }
-    for (const got of keys) {
-      assert.ok(
-        GUARDIAN_ALLOWED.includes(got),
-        `${sig} 多了 ${got} 這個條件，而另一支沒有。` +
-          `「哪一位成年人收得到一個孩子的資料」不可以有兩個答案——` +
-          `兩邊都改，並把新條件加進 tests/notify.test.mjs 的兩份清單。`,
-      );
-    }
+    // notify.mjs 裡唯一一處必須落在 `notifiableGuardianIds` 內。
+    const body = bodyOf(src, 'export async function notifiableGuardianIds(');
+    assert.equal(hits.length, 1, 'notify.mjs 有第二處查 guardianLink');
+    assert.match(body, /guardianLink/, '那一處不在 notifiableGuardianIds 裡');
   }
 });
 
@@ -734,4 +781,295 @@ test('標成已讀一定同時比對收件人', () => {
   for (const w of wheres) {
     assert.match(w, /recipientId/, `這一條 where 沒有比對收件人：${w}`);
   }
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 十、送出前的重新確認
+//
+// 產生與送出之間可以隔八個小時（免打擾 22:00–07:00），而通知的內容
+// 在**產生**的那一刻就寫死了。這一節驗的是「排隊期間事實變了」的
+// 那幾種，而它們的共同症狀是：家長早上讀到一件已經不成立的事，
+// 然後去做一件白做的事。
+// ─────────────────────────────────────────────────────────────────
+
+const overdueRow = (over = {}) => ({
+  id: 'n1',
+  templateKey: 'assignment.overdue',
+  recipientId: 'stu_1',
+  channel: 'IN_APP',
+  status: 'QUEUED',
+  retryCount: 0,
+  scheduledAt: utc(2026, 9, 9, 23, 0),
+  createdAt: utc(2026, 9, 8, 15, 10),
+  payload: { count: 1, titles: ['數學小考'], assignmentIds: ['asg_1'] },
+  ...over,
+});
+
+test('補交了就不再送那一則催繳', () => {
+  // 23:10 判定逾期、排到隔天 07:00；23:40 補交了。07:00 照樣送出去的話，
+  // 家長讀到的是一件已經不成立的事，而她的下一步（去催孩子）是白做的。
+  const row = overdueRow();
+  assert.equal(staleReason(row, new Set()), null, '還沒交就該照送');
+  const why = staleReason(row, new Set(['asg_1|stu_1']));
+  assert.ok(why, '補交之後還是送出去了');
+  assert.match(why, /不成立/);
+});
+
+test('三份裡補交一份，催繳照送——下一步仍然成立', () => {
+  // 「2 份」配上三個名稱比原來那句更糟（payload 只留了前三個名稱，
+  // 重算不出一句準確的話），而還有一份沒交時，「去問孩子」完全成立。
+  const row = overdueRow({ payload: { count: 3, assignmentIds: ['a1', 'a2', 'a3'] } });
+  assert.equal(staleReason(row, new Set(['a1|stu_1'])), null);
+  assert.ok(staleReason(row, new Set(['a1|stu_1', 'a2|stu_1', 'a3|stu_1'])));
+});
+
+test('家長那一則看的是孩子交了沒，不是家長自己', () => {
+  // 收件人是媽媽，而事實是王小美的。拿 recipientId 去比對的話，
+  // 永遠找不到作答記錄，於是每一則都會被判成「還成立」——
+  // 這個錯誤的方向是催繳照樣送出，而且完全沒有症狀。
+  const row = overdueRow({
+    templateKey: 'assignment.overdue.guardian',
+    recipientId: 'mom_1',
+    payload: { count: 1, assignmentIds: ['asg_1'], studentId: 'stu_1', childName: '王小美' },
+  });
+  assert.equal(subjectOf(row), 'stu_1');
+  assert.ok(staleReason(row, new Set(['asg_1|stu_1'])), '孩子補交了，媽媽還是收到催繳');
+  assert.equal(staleReason(row, new Set(['asg_1|mom_1'])), null, '比對到了錯的人');
+});
+
+test('已經發生過的事件不重新確認', () => {
+  // 作廢、代為結算、放行不會因為時間過去而變成沒發生。給它們加一道
+  // 重新確認只是多一個會出錯的地方。
+  for (const key of ['attempt.voided', 'grade.released', 'import.ready', 'grade.changed']) {
+    assert.equal(RECHECKED[key], undefined, `${key} 不該被重新確認`);
+    assert.equal(staleReason({ templateKey: key, recipientId: 'u', payload: {} }, new Set()), null);
+  }
+});
+
+test('舊格式（沒有 assignmentIds）一律照送', () => {
+  // 這一欄是後來才加的，佇列裡可能躺著上一版產生的列。驗不了就照送——
+  // 把驗不了的通通擋下來，等於在改版那一天讓所有排隊中的催繳消失。
+  const row = overdueRow({ payload: { count: 1, titles: ['數學小考'] } });
+  assert.equal(staleReason(row, new Set(['asg_1|stu_1'])), null);
+});
+
+test('催繳的 payload 真的帶得出要重新確認的那幾份', () => {
+  // 上面那幾格驗的是判斷，這一格驗的是**判斷用得到的資料真的在**。
+  // 少了它，重新確認永遠走到「舊格式，照送」那一條，而每一格都是綠的。
+  const src = read('lib/notify.mjs');
+  const body = src.slice(src.indexOf('function digestPayload('));
+  assert.match(body.slice(0, 500), /assignmentIds/, '摘要 payload 沒有帶 assignmentIds');
+});
+
+/**
+ * 一個小小的假資料庫。
+ *
+ * 為什麼不是真的 Postgres：這一支是單元測試，跑在沒有資料庫的地方
+ * （`npm test`）。真的跨越資料庫邊界之後還對不對由 `tools/e2e-notify.mjs`
+ * 驗。這裡要驗的是 `deliverDue` 的**分支**：撿起來之後有沒有先問
+ * 一次「這件事還成不成立」，而那件事與 SQL 無關。
+ */
+function fakeDb({ notifications = [], attempts = [] }) {
+  const rows = notifications.map((n) => ({ ...n }));
+  const hit = (row, where) =>
+    Object.entries(where ?? {}).every(([k, cond]) => {
+      const v = row[k];
+      if (cond && typeof cond === 'object' && !(cond instanceof Date)) {
+        if ('in' in cond) return cond.in.includes(v);
+        if ('lt' in cond) return v != null && new Date(v) < new Date(cond.lt);
+        if ('gt' in cond) return v != null && new Date(v) > new Date(cond.gt);
+        if ('not' in cond) return v !== cond.not;
+      }
+      return v === cond;
+    });
+  return {
+    rows,
+    notification: {
+      async findMany({ where, take }) {
+        const out = rows.filter((r) => hit(r, where));
+        return (take ? out.slice(0, take) : out).map((r) => ({ ...r }));
+      },
+      async updateMany({ where, data }) {
+        let count = 0;
+        for (const r of rows) {
+          if (!hit(r, where)) continue;
+          Object.assign(r, data);
+          count++;
+        }
+        return { count };
+      },
+      async deleteMany({ where }) {
+        const doomed = rows.filter((r) => hit(r, where));
+        for (const d of doomed) rows.splice(rows.indexOf(d), 1);
+        return { count: doomed.length };
+      },
+    },
+    attempt: {
+      async findMany({ where }) {
+        return attempts.filter((a) => hit(a, where)).map((a) => ({ ...a }));
+      },
+    },
+  };
+}
+
+test('deliverDue 送出前真的問過一次，不成立的標成 SUPPRESSED 而不是刪掉', async () => {
+  const db = fakeDb({
+    notifications: [
+      overdueRow({ id: 'stale' }),
+      overdueRow({ id: 'fresh', recipientId: 'stu_2', payload: { assignmentIds: ['asg_1'] } }),
+      overdueRow({ id: 'event', templateKey: 'attempt.voided', payload: {} }),
+    ],
+    // stu_1 已經補交了，stu_2 沒有。
+    attempts: [{ assignmentId: 'asg_1', userId: 'stu_1', status: 'SUBMITTED' }],
+  });
+  const r = await deliverDue(db, { now: utc(2026, 9, 10, 0, 0) });
+
+  assert.equal(r.suppressed, 1, '已經不成立的那一則還是送出去了');
+  assert.equal(r.sent, 2, '還成立的與事件型的都該照送');
+  const byId = new Map(db.rows.map((x) => [x.id, x]));
+  assert.equal(byId.get('stale').status, 'SUPPRESSED');
+  // **不刪掉**：查得到才答得出「為什麼那天早上沒有收到催繳」。
+  assert.match(byId.get('stale').failReason, /不成立/);
+  assert.equal(byId.get('fresh').status, 'SENT');
+  assert.equal(byId.get('event').status, 'SENT');
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 十一、家長也收得到「成績開放了」
+// ─────────────────────────────────────────────────────────────────
+
+test('成績開放的通知有家長那一份，而且不含分數', () => {
+  // 家長端那一頁在放行之前寫的是「老師還沒有開放成績」，而**開放的
+  // 那一刻沒有任何跡象**——這是學生那一則自己寫下的理由，一個字
+  // 不必改就適用於家長。少了它，那一頁等於要她每天回來按一次。
+  const t = TEMPLATES['grade.released.guardian'];
+  assert.ok(t, '家長沒有「成績開放」的通知');
+  assert.equal(t.audience, AUDIENCE.GUARDIAN);
+  const v = render('grade.released.guardian', {
+    childName: '王大明',
+    studentId: 's1',
+    title: '第三次模擬考',
+    // 就算呼叫端誤傳，文案也不可以用它——分數要在 /guardian 那一頁上
+    // 看，那裡才有「人數太少就不給班級平均」那道防線。
+    totalScore: 68,
+    answerKeys: [3],
+  });
+  assert.match(v.title, /王大明/);
+  assert.ok(!v.body.includes('68'), '把分數推到家長手機上了');
+  assert.match(v.href, /^\/guardian/, '家長的連結不可以指向作答或檢討');
+});
+
+test('放行的觸發點真的把家長算進去', () => {
+  const body = bodyOf(read('lib/notifyDb.ts'), 'export async function notifyGradeReleased(');
+  assert.match(body, /grade\.released\.guardian/, '放行只通知了學生');
+  assert.match(body, /notifiableGuardianIds\(/, '家長的收件人沒有走那道確認');
+  // 一位家長兩個孩子時要兩則，所以去重鍵要帶 studentId；
+  // 少了它，第二個孩子的那一則會被第一個吃掉。
+  assert.match(body, /scope: `\$\{assignmentId\}:\$\{studentId\}`/, '去重鍵沒有帶孩子的 id');
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 十二、保存期限
+// ─────────────────────────────────────────────────────────────────
+
+test('過了保存期限的通知會被刪掉，沒過的不會', async () => {
+  // 這張表只進不出：逾期未交一天一則，三年之後每個帳號都拖著幾百列
+  // 沒有人會讀的歷史。文件 01 §16 定了保存期限卻沒有實作。
+  const old = new Date(Date.UTC(2024, 0, 1));
+  const recent = new Date(Date.UTC(2026, 6, 1));
+  const db = fakeDb({
+    notifications: [
+      { id: 'old_sent', status: 'SENT', createdAt: old },
+      { id: 'old_suppressed', status: 'SUPPRESSED', createdAt: old },
+      { id: 'old_failed', status: 'FAILED', createdAt: old },
+      { id: 'old_queued', status: 'QUEUED', createdAt: old },
+      { id: 'recent', status: 'SENT', createdAt: recent },
+    ],
+  });
+  const r = await purgeOldNotifications(db, { now: utc(2026, 7, 30, 0, 0) });
+  assert.equal(r.deleted, 3);
+  const left = db.rows.map((x) => x.id).sort();
+  // **卡在佇列裡一年的那一列留著**：那是一個症狀，刪掉它等於把唯一
+  // 的線索清乾淨，而卡住的原因會繼續存在。
+  assert.deepEqual(left, ['old_queued', 'recent']);
+});
+
+test('清理有筆數上限，剩下的下一輪再刪', async () => {
+  // 第一次跑的時候表裡可能躺著三年份，而一次刪幾十萬列的交易
+  // 會跟考試搶同一個資料庫。
+  const old = new Date(Date.UTC(2024, 0, 1));
+  const db = fakeDb({
+    notifications: Array.from({ length: 5 }, (_, i) => ({
+      id: `n${i}`,
+      status: 'SENT',
+      createdAt: old,
+    })),
+  });
+  const r = await purgeOldNotifications(db, { now: utc(2026, 7, 30, 0, 0), limit: 2 });
+  assert.equal(r.deleted, 2);
+  assert.equal(r.more, true, '沒有說出還沒清完');
+  assert.equal(db.rows.length, 3);
+});
+
+test('保存期限有一個合理的長度，而且工作者真的會去跑', () => {
+  // 三十天太短（家長在期末問「你們有沒有通知我」時要撈得出來），
+  // 而沒有上限就是沒有實作。
+  assert.ok(
+    NOTIFICATION_RETENTION_DAYS >= 180 && NOTIFICATION_RETENTION_DAYS <= 1095,
+    '保存期限不合理',
+  );
+  const worker = read('scripts/worker.mjs');
+  assert.match(worker, /registerJob\('notify-cleanup'/, '工作者沒有註冊清理工作');
+  assert.match(worker, /purgeOldNotifications/, '清理工作沒有真的呼叫那一支');
+});
+
+// ─────────────────────────────────────────────────────────────────
+// 十三、未接的渠道：說法要與現況一致
+// ─────────────────────────────────────────────────────────────────
+
+test('沒有任何呼叫端傳 channel，所以那段保證的說明要講清楚這件事', () => {
+  // 「未接的渠道不會安靜地卡在 QUEUED」這條保證是對的，但它在正式
+  // 環境**一列都產生不出來**——每一則都是預設的 IN_APP。櫃檯真的被
+  // 問「為什麼家長沒收到 email」時，資料庫裡撈不到任何線索，
+  // 而那個答案是「系統從來沒有嘗試過寄信」。
+  //
+  // 這一格盯著兩件事：說明有沒有講出這件事，以及第一個接上 EMAIL
+  // 的人會不會被叫回來改那段說明。
+  const files = ['lib/notify.mjs', 'lib/notifyDb.ts', 'lib/guardian.ts', 'lib/scoring.ts'];
+  for (const f of files) {
+    const src = read(f);
+    for (const m of src.matchAll(/channel:\s*'(\w+)'/g)) {
+      assert.equal(
+        m[1],
+        'IN_APP',
+        `${f} 開始送 ${m[1]} 了——回去把 READY_CHANNELS 那段「今天走不到這裡」的說明改成現況。`,
+      );
+    }
+  }
+  const doc = read('lib/notify.mjs');
+  const at = doc.indexOf('export const READY_CHANNELS');
+  const head = doc.slice(Math.max(0, at - 2600), at);
+  assert.match(head, /沒有任何呼叫端傳/, 'READY_CHANNELS 的說明沒有講出「現在走不到」');
+});
+
+test('全班重新計分之後真的會發出通知', () => {
+  // 沒有這一行的話，`Regrade.tsx` 那個確認視窗上的承諾只兌現了一半：
+  // 分數確實「立刻反映在他們自己看得到的成績上」，而學生要下一次
+  // 自己點進去才會發現 78 變成 72——沒有任何線索說明為什麼。
+  const src = read('lib/scoring.ts');
+  const body = src.slice(
+    src.indexOf('export async function regradeAssignment'),
+    src.indexOf('// ─────────────────────────────────────────────────────────────\n// 逐題人工給分'),
+  );
+  assert.match(body, /notifyGradeChanged\(/, '重算完沒有通知任何人');
+  // 收件人是分數真的變了的那幾位。全班都通知的話，沒變的那些人
+  // 會去確認一個沒有變化的數字，而下一次真的變了時他已經學會忽略。
+  assert.match(body, /deltas\.map/, '通知了不該通知的人（分數沒變的）');
+  assert.match(read('lib/scoring.ts'), /import \{ notifyGradeChanged, notifyVoided \}/);
+
+  // 觸發那一端要擋放行：MANUAL／ON_DUE 還沒放行時，學生自己的畫面上
+  // 只有一句「老師還沒有開放」，這時告訴他分數變了等於繞過放行時機。
+  const trigger = bodyOf(read('lib/notifyDb.ts'), 'export async function notifyGradeChanged(');
+  assert.match(trigger, /maySeeResult\(/, '沒有問過「他現在看得到分數嗎」');
+  assert.match(trigger, /from != null/, '第一次算出分數不是「別人動了你的成績」');
 });

@@ -63,6 +63,7 @@ import { requireTenant } from '@/lib/tenant';
 // 帶副檔名的 import 拿到的是 JS 推導出來的型別，而 `.d.ts` 只服務
 // 不帶副檔名的那條路徑——於是同一個函式在兩個呼叫端有兩種型別。
 import {
+  classMeansFromAttempts,
   compareToClass,
   noDataReason,
   projectTask,
@@ -71,6 +72,10 @@ import {
   type ClassComparison,
   type GuardianTask,
 } from '@/lib/guardianView.mjs';
+// 「哪一位家長收得到通知」只有一份實作，而它在 `lib/notify.mjs`
+// （工作者是純 node，載不動 .ts）。這裡不再寫第二份，理由見
+// 底下的 `notifiableGuardians`。
+import { notifiableGuardianIds } from '@/lib/notify.mjs';
 
 // ─────────────────────────────────────────────────────────────────
 // 錯誤
@@ -155,28 +160,36 @@ export function guardianFailure(e: unknown): {
  * **三、不得作為任何推播出去的收件人。** 這是 `verifiedAt` 真正
  * 擋住東西的地方，而它擋的正是「把成績寄給陌生人」——通知是推出去
  * 的，收件人不需要持有密碼，所以上面第一條的理由在這裡不成立。
- * 通知模組（藍圖 B5）還沒有做，但這一條**不是一句註解**：
- * `notifiableGuardians` 就是那個唯一的入口，而它有測試。
- * 一個綠燈的假保證比沒有保證更糟。
+ * 這一條**不是一句註解**：規則寫在 `lib/notify.mjs` 的
+ * `notifiableGuardianIds`，而通知模組的每一個入口都走它。
  *
  * **四、家長端首頁會告訴家長這件事**，而且順帶問一句「如果這不是
  * 你的孩子請立刻告訴補習班」。打錯的信箱因此會在第一次登入時被
  * 發現，而不是等到期末。
+ *
+ * # 為什麼這一支只是一層殼
+ *
+ * 它本來自己寫了一份一模一樣的 where（`verifiedAt` 不是 null、
+ * `systemRole = GUARDIAN`、`status = ACTIVE`、`deletedAt = null`），
+ * 而測試靠「逐字對照兩支的原始碼」來保證兩份不分歧。那個做法擋得住
+ * 「改了一邊忘了另一邊」，擋不住**兩邊各自演化**——而現況是：正式
+ * 環境跑的一直是工作者那一份，這一支除了端到端測試沒有任何呼叫端，
+ * 檔頭卻寫著「它就是那個唯一的入口」。一份沒有人在跑的規則遲早
+ * 與真的在跑的那一份不一樣，而不一樣的方向是**一位沒有被確認過的
+ * 成年人開始收到一個孩子的成績**。
+ *
+ * 所以現在只有一份規則（`notifiableGuardianIds`），這裡補的是
+ * 顯示用的欄位。多一次查詢換掉一份會分歧的複製品，划算。
  */
 export async function notifiableGuardians(studentId: string) {
   requireTenant();
-  const links = await prisma.guardianLink.findMany({
-    where: { studentId, verifiedAt: { not: null } },
-    select: { guardianId: true },
-  });
-  if (links.length === 0) return [];
+  const byStudent = await notifiableGuardianIds(prisma, [studentId]);
+  const ids = (byStudent.get(studentId) ?? []).map((g: { id: string }) => g.id);
+  if (ids.length === 0) return [];
+  // 這一句只挑顯示欄位，**不再過濾**：能不能收通知已經在上面判完了，
+  // 在這裡多一個條件就是多一份會分歧的規則。
   return prisma.user.findMany({
-    where: {
-      id: { in: links.map((l) => l.guardianId) },
-      systemRole: 'GUARDIAN',
-      status: 'ACTIVE',
-      deletedAt: null,
-    },
+    where: { id: { in: ids } },
     select: { id: true, username: true, displayName: true, email: true },
   });
 }
@@ -920,6 +933,29 @@ export type Child = {
   className: string | null;
   /** 這位家長的連結驗證過了沒。首頁上要說出來，見上面的長註解。 */
   delivered: boolean;
+  /**
+   * 這個學生帳號還在用嗎。
+   *
+   * `false` 代表停用（轉學、結業、櫃檯手動停用）。**這一欄存在的
+   * 唯一理由是文案**：沒有它的話，一個已經離開的孩子與一個還沒編班
+   * 的孩子在家長端長得一模一樣，而系統會叫前者的家長去打電話。
+   */
+  active: boolean;
+  /**
+   * 現在沒有班籍時，上一個待過的班；有班籍時是「轉進來之前那一個」。
+   * 沒有任何歷史班籍就是 null。
+   */
+  formerClassName: string | null;
+  /** 現在這個班之前，他待過別的班。轉班與學年度換班都算。 */
+  changedClass: boolean;
+  /**
+   * 現在這個班的導師姓名。沒有指定導師的班是 null。
+   *
+   * 家長端每一條死路的下一步都是「告訴班級老師」，而在這一欄出現
+   * 之前，整個系統從頭到尾沒有給過家長任何一位老師的名字——
+   * 一句指向系統外面而且沒有指路的話。
+   */
+  homeroomTeacher: string | null;
 };
 
 /**
@@ -927,7 +963,9 @@ export type Child = {
  * 的地方**，所以「家長看得到誰」這個問題只有一個答案。
  *
  * 已經被個資刪除的孩子不列出來（`eraseStudent` 本來就會把連結一起
- * 刪掉，這裡是第二道）。
+ * 刪掉，這裡是第二道）。**停用的孩子仍然列出來**：他的家長還接在
+ * 上面，而把他從清單上拿掉只會讓那個帳號變成一片空白——那正是
+ * 「說不出原因的空畫面」，也就是一通電話。
  */
 export async function childrenOf(guardianId: string): Promise<Child[]> {
   requireTenant();
@@ -944,14 +982,18 @@ export async function childrenOf(guardianId: string): Promise<Child[]> {
       systemRole: 'STUDENT',
       deletedAt: null,
     },
-    select: { id: true, displayName: true },
+    select: { id: true, displayName: true, status: true },
   });
   const byId = new Map(students.map((s) => [s.id, s]));
 
+  // **連離開的班籍一起撈**（沒有 `leftAt: null` 這個條件）。
+  // 只撈在籍的話，「學年度結算了」與「這個孩子從來沒進過任何班」
+  // 在這裡就永遠分不開了——而那兩件事家長要做的完全相反。
   const memberships = students.length
     ? await prisma.classMembership.findMany({
-        where: { userId: { in: students.map((s) => s.id) }, leftAt: null, role: 'STUDENT' },
-        select: { userId: true, classId: true },
+        where: { userId: { in: students.map((s) => s.id) }, role: 'STUDENT' },
+        select: { userId: true, classId: true, leftAt: true, joinedAt: true },
+        orderBy: { joinedAt: 'asc' },
       })
     : [];
   const classes = memberships.length
@@ -961,21 +1003,70 @@ export async function childrenOf(guardianId: string): Promise<Child[]> {
       })
     : [];
   const className = new Map(classes.map((c) => [c.id, c.name]));
-  const classOf = new Map<string, string>();
+
+  /** 學生 → 現在在籍的那一個班。 */
+  const nowIn = new Map<string, { classId: string; name: string }>();
+  /** 學生 → 已經離開的班，照離開時間排（最近的在最後）。 */
+  const past = new Map<string, { classId: string; name: string; leftAt: Date }[]>();
   for (const m of memberships) {
     const name = className.get(m.classId);
-    if (name && !classOf.has(m.userId)) classOf.set(m.userId, name);
+    if (!name) continue;
+    if (m.leftAt == null) {
+      if (!nowIn.has(m.userId)) nowIn.set(m.userId, { classId: m.classId, name });
+    } else {
+      const arr = past.get(m.userId) ?? [];
+      arr.push({ classId: m.classId, name, leftAt: m.leftAt });
+      past.set(m.userId, arr);
+    }
+  }
+  for (const arr of past.values()) arr.sort((a, b) => a.leftAt.getTime() - b.leftAt.getTime());
+
+  // 導師：只查現在在籍的那幾個班。**這是家長端唯一一個「人」的
+  // 出口**，所以查得到就一定要帶出去；查不到（那個班沒有指定導師）
+  // 時頁面上會換一句不指名的話，而不是留一個叫不到的人。
+  const currentClassIds = [...new Set([...nowIn.values()].map((c) => c.classId))];
+  const homerooms = currentClassIds.length
+    ? await prisma.classMembership.findMany({
+        where: {
+          classId: { in: currentClassIds },
+          role: 'TEACHER',
+          isHomeroom: true,
+          leftAt: null,
+        },
+        select: { classId: true, userId: true },
+      })
+    : [];
+  const teachers = homerooms.length
+    ? await prisma.user.findMany({
+        where: { id: { in: homerooms.map((h) => h.userId) }, deletedAt: null, status: 'ACTIVE' },
+        select: { id: true, displayName: true },
+      })
+    : [];
+  const teacherName = new Map(teachers.map((t) => [t.id, t.displayName]));
+  const homeroomOf = new Map<string, string>();
+  for (const h of homerooms) {
+    const name = teacherName.get(h.userId);
+    if (name && !homeroomOf.has(h.classId)) homeroomOf.set(h.classId, name);
   }
 
   const out: Child[] = [];
   for (const l of links) {
     const s = byId.get(l.studentId);
     if (!s) continue;
+    const current = nowIn.get(s.id) ?? null;
+    const history = past.get(s.id) ?? [];
+    const lastLeft = history.length > 0 ? history[history.length - 1] : null;
     out.push({
       studentId: s.id,
       displayName: s.displayName,
-      className: classOf.get(s.id) ?? null,
+      className: current?.name ?? null,
       delivered: l.verifiedAt != null,
+      active: s.status === 'ACTIVE',
+      formerClassName: lastLeft?.name ?? null,
+      // 同一個班轉出去又轉回來（`transferStudent` 會把 `leftAt` 清掉，
+      // 但舊資料可能留著）不算換班——對家長來說那不是一件事。
+      changedClass: current != null && history.some((h) => h.classId !== current.classId),
+      homeroomTeacher: current ? (homeroomOf.get(current.classId) ?? null) : null,
     });
   }
   return out;
@@ -1005,8 +1096,21 @@ export type ChildView = {
   child: Child;
   summary: ChildSummary;
   tasks: ChildTask[];
-  /** 為什麼現在沒有東西可以看。有東西時是 null。 */
-  emptyReason: 'NO_CLASS' | 'NO_TASK' | 'NOT_SUBMITTED' | 'NOT_RELEASED' | null;
+  /**
+   * 為什麼現在沒有東西可以看。有東西時是 null。
+   *
+   * 代號的意思與挑選順序見 `lib/guardianView.mjs` 的 `noDataReason`。
+   * **每一種的下一步都不一樣**，而其中只有 `NO_CLASS` 該把家長送到櫃檯。
+   */
+  emptyReason:
+    | 'LEFT'
+    | 'BETWEEN_CLASSES'
+    | 'NO_CLASS'
+    | 'NEW_CLASS'
+    | 'NO_TASK'
+    | 'NOT_SUBMITTED'
+    | 'NOT_RELEASED'
+    | null;
 };
 
 /**
@@ -1048,15 +1152,27 @@ export async function childView(guardianId: string, studentId: string): Promise<
       taskCount: tasks.length,
       submittedCount: tasks.filter((t) => t.lastSubmittedAt).length,
       scoredCount: summary.scored,
+      // 這三個把「沒有班級」與「沒有任務」各自拆成兩種。少了它們，
+      // 學年度結算的那個晚上全補習班的家長會同時被叫去打電話，
+      // 而轉學走了的那一位永遠停在同一句話上。見 `noDataReason`。
+      hasLeft: !child.active,
+      everInClass: child.formerClassName !== null,
+      changedClass: child.changedClass,
     }),
   };
 }
 
 /**
- * 這幾份任務的班級平均與交卷人數。
+ * 這幾份任務的班級平均與**交卷人數**。
  *
  * **只算學生的作答**，與 `classStats` 及學生歷程頁同一條規則：
  * 老師自己試考的那一份會把平均拉高，而那個數字看起來完全正常。
+ *
+ * **一個學生只算一次**（他最近交出去的那一份），去重與加總在
+ * `classMeansFromAttempts` 裡——那是純函式，有測試。這裡只負責
+ * 「撈哪幾列」。少了那一步的後果不是平均差一點：一份可作答三次的
+ * 練習卷上，兩個學生就湊得出 `peers = 6`，於是 `PEER_FLOOR` 那道
+ * 「人數太少就不給數字」的防線整個失效，而畫面上完全正常。
  *
  * 兩句查詢而不是一句帶關聯條件的：`where: { user: { systemRole } }`
  * 在 Prisma 上是一次 join，讀起來比較短，但這一段在
@@ -1076,7 +1192,11 @@ async function classMeans(
       status: { in: ['SUBMITTED', 'GRADED'] },
       totalScore: { not: null },
     },
-    select: { assignmentId: true, userId: true, totalScore: true },
+    // `attemptNo` 是「哪一次算數」的依據——與孩子自己那一欄同一個
+    // 口徑（`listStudentTasks` 取最後一次交出去的）。照它排序，
+    // 讓去重那一步在讀不到次數時也拿得到「後來的那一列」。
+    select: { assignmentId: true, userId: true, totalScore: true, attemptNo: true },
+    orderBy: { attemptNo: 'asc' },
   });
   if (attempts.length === 0) return out;
 
@@ -1086,18 +1206,7 @@ async function classMeans(
   });
   const isStudent = new Set(students.map((s) => s.id));
 
-  const bucket = new Map<string, { sum: number; n: number }>();
-  for (const a of attempts) {
-    if (!isStudent.has(a.userId)) continue;
-    const b = bucket.get(a.assignmentId) ?? { sum: 0, n: 0 };
-    b.sum += a.totalScore as number;
-    b.n += 1;
-    bucket.set(a.assignmentId, b);
-  }
-  for (const [id, b] of bucket) {
-    if (b.n > 0) out.set(id, { mean: b.sum / b.n, peers: b.n });
-  }
-  return out;
+  return classMeansFromAttempts(attempts.filter((a) => isStudent.has(a.userId)));
 }
 
 // ─────────────────────────────────────────────────────────────────

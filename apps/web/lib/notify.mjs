@@ -65,8 +65,24 @@ import { TEMPLATES, mayTurnOff } from './notifyTemplates.mjs';
  * 學生多半沒有登記 email；家長有信箱（名冊 CSV 收得到）但一樣寄不
  * 出去，而**那才是危險的地方**：老師會以為家長收到了成績通知。
  *
- * 日後真的接上時，改這一行、在 `deliverDue` 的 `send` 裡多一個分支，
- * 其餘不必動。
+ * # 現在的實際狀況，講清楚免得下一個人誤會
+ *
+ * **全系統沒有任何呼叫端傳過 `channel`**（`NotifySpec.channel` 一律
+ * 取預設值 IN_APP），所以底下那條「未接的渠道標成 SUPPRESSED」的
+ * 分支在正式環境**一列都產生不出來**。也就是說：櫃檯被問到
+ * 「為什麼家長沒收到 email」時，資料庫裡撈不到任何一列——不是因為
+ * 那一列被藏起來了，而是因為**系統從來沒有嘗試過寄信**。
+ *
+ * 那條分支不是死程式碼，它是**接上渠道那一天的第一道保護**（也是
+ * `deliverDue` 遇到舊版遺留的 QUEUED 時的處置），而且有測試。
+ * 但在那之前，誠實的說法是這一段而不是「未接的渠道會被記下來」。
+ * `tests/notify.test.mjs` 有一條測試盯著「沒有呼叫端傳 channel」，
+ * 所以第一個接上 EMAIL 的人會被提醒回來改這一段說明。
+ *
+ * 真的要接上 email 需要的不只是改這一行：對外 SMTP（機房那一側的
+ * 決定）、寄件人網域與退信處理、以及 `deliverDue` 的 `send` 分支。
+ * `/settings/notifications` 上那四個渠道現在標著「未接」，那是使用者
+ * 看得到的同一件事。
  */
 export const READY_CHANNELS = Object.freeze(['IN_APP']);
 
@@ -596,6 +612,10 @@ export async function enqueueMany(prisma, specs, opts = {}) {
       //
       // 所以：建立、立刻標成 SUPPRESSED、把原因寫進 failReason。
       // 查得到、算得出來、而且 `deliverDue` 永遠不會撿到它。
+      //
+      // **今天走不到這裡**：沒有任何呼叫端傳 `channel`，所以每一則
+      // 都是 IN_APP。這一段是接上 EMAIL／LINE 的那一天的第一道保護，
+      // 不是現在正在保護什麼——完整說明見 `READY_CHANNELS`。
       status = 'SUPPRESSED';
       failReason = UNREADY_REASON[channel] ?? `渠道 ${channel} 沒有接。這一則沒有送出。`;
     } else if (turnedOff(pref?.channels ?? null, spec.templateKey, channel)) {
@@ -651,6 +671,159 @@ export function enqueue(prisma, spec, opts = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// 送出前的重新確認
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * 送出前要重新確認事實的那幾則，以及「事實是誰的」。
+ *
+ * # 為什麼需要這一段
+ *
+ * 因為**產生與送出之間可以隔八個小時**。媽媽把免打擾設成 22:00–07:00，
+ * 23:10 那一輪掃描判定王小美逾期未交、建立通知並排到隔天 07:00；
+ * 23:40 王小美補交了。07:00 `deliverDue` 照樣把它標成 SENT，媽媽
+ * 早上讀到「……已經過了截止時間還沒有交」——一件已經不成立的事，
+ * 而她的下一步（去催孩子）是白做的。
+ *
+ * `enqueueMany` 在**產生**的那一刻就把 payload 定死，`deliverDue`
+ * 原本只做狀態轉換，中間沒有任何重新驗證的掛勾。免打擾愈長、
+ * 節流排得愈後面，這個窗口愈大。
+ *
+ * # 為什麼不是「送出前重算一次 payload」
+ *
+ * 因為重算需要的東西 payload 裡不全：`digestPayload` 只留前三個
+ * 任務名稱，所以「3 份裡有 1 份補交了」時算不出一句準確的話——
+ * 而一句「2 份」配上三個名稱比原來那句更糟。所以規則只有一條：
+ * **整件事都不成立了就不送，還剩一份沒交就照送。** 後者的下一步
+ * （問孩子、跟老師談補交）仍然完全成立。
+ *
+ * # 沒有列在這裡的一律照送
+ *
+ * 作廢、代為結算、放行、匯入完成——那些是**已經發生的事件**，
+ * 不會因為時間過去而變成沒發生。給它們加一道重新確認只會多一次
+ * 查詢與一個會出錯的地方。
+ *
+ * 值是「這一則講的是誰的事」：`RECIPIENT` 是收件人自己，
+ * `CHILD` 是 payload 裡那個孩子（家長那幾則）。
+ */
+export const RECHECKED = Object.freeze({
+  'assignment.due_soon': 'RECIPIENT',
+  'assignment.overdue': 'RECIPIENT',
+  'assignment.overdue.guardian': 'CHILD',
+});
+
+/**
+ * 這個樣板代號要不要重新確認，以及事實是誰的。認不得的回 null。
+ *
+ * 用 `Object.hasOwn` 而不是直接索引：`templateKey` 來自資料庫的一欄
+ * 字串，而 `RECHECKED['constructor']` 在原型鏈上是有值的——那會讓
+ * 一個怪名字的樣板走進重新確認的分支，然後對著一個不存在的學生
+ * 判定「事實不成立」而把通知擋掉。
+ */
+function recheckKind(templateKey) {
+  return typeof templateKey === 'string' && Object.hasOwn(RECHECKED, templateKey)
+    ? RECHECKED[templateKey]
+    : null;
+}
+
+/** payload 讀成物件。讀不出來就是空物件，不猜。 */
+function plainPayload(raw) {
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? /** @type {Record<string, unknown>} */ (raw)
+    : {};
+}
+
+/**
+ * 這一列通知講的事情是誰的。認不得的回 null。
+ *
+ * @param {{templateKey: string, recipientId: string, payload?: unknown}} row
+ * @returns {string|null}
+ */
+export function subjectOf(row) {
+  const kind = recheckKind(row?.templateKey);
+  if (!kind) return null;
+  if (kind === 'RECIPIENT') return row.recipientId ?? null;
+  const sid = plainPayload(row.payload).studentId;
+  return typeof sid === 'string' && sid !== '' ? sid : null;
+}
+
+/**
+ * 這一列講的事情現在還成不成立。**純函式**：外面的世界濃縮成
+ * `submitted` 這一個集合。
+ *
+ * @param {{templateKey: string, recipientId: string, payload?: unknown}} row
+ * @param {ReadonlySet<string>} submitted 已經交出去的 `${assignmentId}|${userId}`
+ * @returns {string|null} `null` = 還成立、照送；字串 = 不成立的原因
+ */
+export function staleReason(row, submitted) {
+  if (!recheckKind(row?.templateKey)) return null;
+  const subject = subjectOf(row);
+  if (!subject) return null;
+
+  const ids = plainPayload(row.payload).assignmentIds;
+  // **舊格式（沒有 assignmentIds）一律照送。** 這一欄是後來才加的，
+  // 而佇列裡可能還躺著上一版產生的列。驗不了就當成還成立——
+  // 把驗不了的通通擋下來，等於在改版的那一天讓所有排隊中的催繳
+  // 安靜地消失，而那比送出一則過時的通知糟得多。
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+
+  const left = ids.filter((id) => typeof id === 'string' && !submitted.has(`${id}|${subject}`));
+  if (left.length > 0) return null;
+  return (
+    '排進佇列之後這件事已經不成立了：' +
+    `這 ${ids.length} 份在送出前都交出去了，所以沒有送。` +
+    '（通知是在產生的那一刻寫死內容的，免打擾時段可能讓它等上幾個小時。）'
+  );
+}
+
+/**
+ * 一批待送的通知裡，哪幾列的事實已經不成立了。
+ *
+ * 一句查詢問完整批，不是一列一問：一輪投遞上限 200 列，而這個模組
+ * 跟考試搶的是同一個資料庫（見檔頭第四條）。
+ *
+ * @param {any} prisma
+ * @param {readonly {id: string, templateKey: string, recipientId: string, payload?: unknown}[]} rows
+ * @returns {Promise<Map<string, string>>} 通知 id → 不成立的原因
+ */
+export async function staleRows(prisma, rows) {
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  const watched = (rows ?? []).filter((r) => recheckKind(r.templateKey));
+  if (watched.length === 0) return out;
+
+  /** @type {Set<string>} */
+  const assignmentIds = new Set();
+  /** @type {Set<string>} */
+  const userIds = new Set();
+  for (const r of watched) {
+    const subject = subjectOf(r);
+    if (!subject) continue;
+    const ids = plainPayload(r.payload).assignmentIds;
+    if (!Array.isArray(ids)) continue;
+    userIds.add(subject);
+    for (const id of ids) if (typeof id === 'string' && id) assignmentIds.add(id);
+  }
+  if (assignmentIds.size === 0 || userIds.size === 0) return out;
+
+  const done = await prisma.attempt.findMany({
+    where: {
+      assignmentId: { in: [...assignmentIds] },
+      userId: { in: [...userIds] },
+      status: { in: ['SUBMITTED', 'GRADED'] },
+    },
+    select: { assignmentId: true, userId: true },
+  });
+  const submitted = new Set(done.map((d) => `${d.assignmentId}|${d.userId}`));
+
+  for (const r of watched) {
+    const why = staleReason(r, submitted);
+    if (why) out.set(r.id, why);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // 資料層：投遞
 // ─────────────────────────────────────────────────────────────────
 
@@ -679,6 +852,14 @@ export function enqueue(prisma, spec, opts = {}) {
  * **三、搶下來卻沒有結果的會被放回去。** 行程被 kill（OOM、部署重啟）
  * 的那一列會永遠停在 SENDING，而沒有人再碰它。做法與
  * `detect-stuck-imports` 相同：超過時限就放回 QUEUED。
+ *
+ * # 送出前會重新確認一次事實
+ *
+ * 催繳類的通知在**產生**的那一刻就把內容寫死，而免打擾可以讓它在
+ * 佇列裡等八個小時——這中間學生可能已經補交了。所以撿起來之後
+ * 先問一次「這件事還成不成立」（`staleRows`），不成立的標成
+ * SUPPRESSED 並寫下原因。**不是刪掉**：查得到才答得出「為什麼
+ * 那天早上沒有收到催繳」。
  *
  * @param {any} prisma
  * @param {{ now?: Date, limit?: number, send?: (row: any) => Promise<void> }} [opts]
@@ -718,12 +899,31 @@ export async function deliverDue(prisma, opts = {}) {
     },
   });
 
+  // **在搶之前先問完整批。** 一列一問的話，一輪 200 列就是 200 次
+  // 往返，而這個模組跟考試搶同一個資料庫。算出來的結果在下面的
+  // 迴圈裡用——中間如果剛好有人交卷，那一則會照送，而下一輪的
+  // 掃描不會再產生它（去重鍵還在）。晚一輪不影響任何人的下一步。
+  const stale = await staleRows(prisma, rows);
+
   for (const row of rows) {
     const claimed = await prisma.notification.updateMany({
       where: { id: row.id, status: 'QUEUED' },
       data: { status: 'SENDING' },
     });
     if (claimed.count === 0) continue; // 別人搶走了
+
+    const why = stale.get(row.id);
+    if (why) {
+      // 與「未接的渠道」同一種處置：建立過的列不刪，標成 SUPPRESSED
+      // 並寫下原因。刪掉的話，「為什麼那天早上沒有收到催繳」
+      // 在資料庫裡一列都撈不到。
+      await prisma.notification.updateMany({
+        where: { id: row.id },
+        data: { status: 'SUPPRESSED', failReason: why },
+      });
+      out.suppressed++;
+      continue;
+    }
 
     if (!channelReady(row.channel)) {
       // 理論上進不來（`enqueueMany` 已經擋掉了），但渠道清單會改版，
@@ -842,6 +1042,78 @@ export async function inboxPage(prisma, recipientId, opts = {}) {
     },
   });
   return { rows: rows.slice(0, take), hasMore: rows.length > take };
+}
+
+/**
+ * 通知留多久。
+ *
+ * # 為什麼一定要有一個期限
+ *
+ * 因為這張表只進不出。逾期未交一天一則、快到期一天一則，一個學生
+ * 一年就是幾百列；三年之後每個帳號都拖著一份沒有人會讀的歷史，
+ * 而 `/inbox` 的「更早的」可以一路翻回三年前。規格書文件 01 §16
+ * 定了保存期限（作答至畢業後兩年、稽核五年）卻沒有任何實作，
+ * 而**到期不清理不只是資料庫膨脹，它本身就違反個資最小保存原則**
+ * （文件 14 第 7.2 節）。
+ *
+ * # 為什麼是一年，不是三十天也不是畢業後兩年
+ *
+ * 三十天太短：`UNREAD_HORIZON_DAYS` 是三十天沒錯，但那管的是「紅點
+ * 算不算它」，不是「還查不查得到」。家長在期末問「你們有沒有通知
+ * 我小孩三次沒交作業」時，答案必須撈得出來，而那個問題跨學期。
+ *
+ * 畢業後兩年太長：那是**作答與成績**的期限（那些是爭議時的證據），
+ * 而通知只是「這件事被告知過」的記錄，它指向的成績本身留得比它久。
+ *
+ * 一年蓋得住一個完整的學年度加上一次期末結算，而且讓每個帳號的
+ * 收件匣停在一個翻得完的長度。
+ *
+ * **這個數字目前不能按補習班調整**：那需要一個機構設定欄位，
+ * 而 schema 這一輪不動。要調的話改這一行，全系統一起改。
+ */
+export const NOTIFICATION_RETENTION_DAYS = 365;
+
+/** 一次清理最多刪幾列。理由與 `DELIVER_BATCH` 相同：考試優先。 */
+export const PURGE_BATCH = 2000;
+
+/**
+ * 刪掉過了保存期限的通知。
+ *
+ * # 只刪已經有結局的那幾種
+ *
+ * SENT / SUPPRESSED / FAILED 才刪。一列 QUEUED 或 SENDING 放了一年
+ * 代表投遞卡住了——那是一個症狀，刪掉它等於把唯一的線索清乾淨，
+ * 而卡住的原因會繼續存在。**留著讓人查得到**，反正那種列不會多。
+ *
+ * # 為什麼是「撈出來再刪」而不是一句 deleteMany
+ *
+ * 因為 `deleteMany` 沒有筆數上限。第一次跑（表裡躺著三年份）會是
+ * 一次刪幾十萬列的交易，而它跟考試搶同一個資料庫。分批之後每一輪
+ * 都是一次小交易，剩下的下一輪再刪——這與投遞的 `DELIVER_BATCH`
+ * 同一條原則。回傳的 `more` 讓呼叫端知道還沒清完。
+ *
+ * @param {any} prisma
+ * @param {{ now?: Date, days?: number, limit?: number }} [opts]
+ * @returns {Promise<{deleted: number, more: boolean}>}
+ */
+export async function purgeOldNotifications(prisma, opts = {}) {
+  const now = opts.now ?? new Date();
+  const days = opts.days ?? NOTIFICATION_RETENTION_DAYS;
+  const limit = opts.limit ?? PURGE_BATCH;
+  const cutoff = new Date(now.getTime() - days * 86_400_000);
+
+  const rows = await prisma.notification.findMany({
+    where: {
+      createdAt: { lt: cutoff },
+      status: { in: ['SENT', 'SUPPRESSED', 'FAILED'] },
+    },
+    select: { id: true },
+    take: limit,
+  });
+  if (rows.length === 0) return { deleted: 0, more: false };
+
+  const r = await prisma.notification.deleteMany({ where: { id: { in: rows.map((x) => x.id) } } });
+  return { deleted: r.count ?? 0, more: rows.length >= limit };
 }
 
 /**
@@ -1055,12 +1327,25 @@ async function pendingByStudent(prisma, assignments) {
   return out;
 }
 
-/** 摘要文案要的那幾個欄位。最多三個名稱，其餘用數字帶過。 */
+/**
+ * 摘要文案要的那幾個欄位。最多三個名稱，其餘用數字帶過。
+ *
+ * `assignmentIds` **不是給文案看的**——文案一個字都不會用到它
+ * （家長那幾則只讀 `GUARDIAN_PAYLOAD_KEYS` 白名單，而它不在裡面）。
+ * 它是給 `staleRows` 用的：送出前要確認「這幾份現在還是沒交嗎」，
+ * 而問這句話需要知道是哪幾份。少了它，一則排到早上七點的催繳
+ * 沒有任何辦法知道半夜已經補交了。
+ *
+ * 全部帶上而不是只帶前三個：驗的是「有沒有任何一份還沒交」，
+ * 少帶一個就可能把一件仍然成立的事判成不成立，而那個方向是
+ * **該催的沒有催**。
+ */
 function digestPayload(items) {
   return {
     count: items.length,
     titles: items.slice(0, 3).map((a) => a.title),
     dueAt: items[0]?.dueAt ? new Date(items[0].dueAt).toISOString() : null,
+    assignmentIds: items.map((a) => a.id),
   };
 }
 

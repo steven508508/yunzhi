@@ -13,7 +13,13 @@ import { PrismaClient } from '@prisma/client';
 import { UnrecoverableError, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { runImport, stageLabel } from './import-pipeline.mjs';
-import { deliverDue, examBusy, generateAll } from '../lib/notify.mjs';
+import {
+  NOTIFICATION_RETENTION_DAYS,
+  deliverDue,
+  examBusy,
+  generateAll,
+  purgeOldNotifications,
+} from '../lib/notify.mjs';
 import { tenantScoped } from '../lib/prismaClient.mjs';
 import { withoutTenantScope } from '../lib/tenantContext.mjs';
 
@@ -164,6 +170,34 @@ registerJob('notify-generate', 15 * 60 * 1000, async () => {
  * 每一輪都跑（tick 是 30 秒），因為老師按下放行之後學生應該很快
  * 看得到。查詢很輕：`(status, scheduledAt)` 有索引，而且有數量上限。
  */
+/**
+ * 清掉過了保存期限的通知。
+ *
+ * # 為什麼這件事需要一個工作，而不是「反正也沒多少列」
+ *
+ * 因為這張表只進不出：逾期未交一天一則，三年之後每個帳號都拖著
+ * 幾百列沒有人會讀的歷史，而收件匣的「更早的」可以一路翻回三年前。
+ * 規格書文件 01 §16 定了保存期限卻沒有任何實作，而**到期不清理
+ * 本身就違反個資最小保存原則**，不只是效能問題。
+ *
+ * 六小時一次而不是每天一次：期限是以「天」為單位的，跑多幾次不會
+ * 多刪任何東西（過期的才刪），但一天一次的工作在一台每天重啟的
+ * 機器上可能永遠等不到它的那一刻——那是這個排程器的實作方式
+ * （`lastRun` 存在記憶體裡）決定的，不是猜的。
+ *
+ * 分批刪，剩下的下一輪再刪：第一次跑的時候表裡可能躺著三年份，
+ * 而一次刪幾十萬列的交易會跟考試搶同一個資料庫。
+ */
+registerJob('notify-cleanup', 6 * 60 * 60 * 1000, async () => {
+  const r = await purgeOldNotifications(prisma);
+  if (r.deleted > 0) {
+    console.log(
+      `[notify-cleanup] 刪除 ${r.deleted} 則超過 ${NOTIFICATION_RETENTION_DAYS} 天的通知` +
+        (r.more ? '（還有，下一輪繼續）' : ''),
+    );
+  }
+});
+
 registerJob('notify-deliver', EVERY_TICK, async () => {
   const r = await deliverDue(prisma);
   if (r.rescued > 0) {

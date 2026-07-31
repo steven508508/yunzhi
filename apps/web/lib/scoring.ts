@@ -38,7 +38,7 @@ import {
   isManualScore,
   manualScoreNote,
 } from '@/lib/examOps.mjs';
-import { notifyVoided } from '@/lib/notifyDb';
+import { notifyGradeChanged, notifyVoided } from '@/lib/notifyDb';
 import { prisma } from '@/lib/prisma';
 import { requireTenant } from '@/lib/tenant';
 import { gradeAttempt, roundScore } from '@/lib/grading.mjs';
@@ -426,6 +426,18 @@ export async function regradeAssignment(
         failures: failures.slice(0, 20),
       } as Prisma.InputJsonValue,
     },
+  });
+
+  // **分數變了要讓學生知道。** 這裡改寫的是他已經看過的數字，而在
+  // 這一行出現之前，他下一次自己點進去才會發現 78 變成 72——沒有
+  // 任何線索說明為什麼，而重算頁上的確認視窗卻寫著「會立刻反映在
+  // 他們自己看得到的成績上」。收件人怎麼算、放行前要不要送、
+  // 文案吃哪幾個欄位，全部在 `lib/notifyDb.ts`；那一支自己吞掉所有
+  // 例外，所以重算不會因為通知失敗而失敗。
+  await notifyGradeChanged(assignmentId, {
+    tenantId,
+    title: assignment.title,
+    changed: deltas.map((d) => ({ userId: d.userId, from: d.from })),
   });
 
   return {

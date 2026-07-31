@@ -898,6 +898,138 @@ await withTenant(tenant.id, async () => {
     assert.equal(r.status, 403, '學生查得到同學的家長聯絡資料');
   });
 
+  section('班級平均：數的是人，不是作答次數');
+
+  await test('可作答三次的練習卷上，兩個學生不會湊成六位同學', async () => {
+    // 六列 GRADED、`peers = 6` → 門檻過關 → 「班級平均」出現在媽媽的
+    // 手機上，而扣掉自己只剩**一個人**：她知道自己孩子的分數，
+    // `2×平均 − 自己` 就是另一個孩子的分數。這一格對真的 SQL 跑，
+    // 因為「哪一次算數」是靠 `attemptNo` 排序決定的。
+    const exam = await prisma.assignment.findFirst({ where: { id: ctx.exam.id } });
+    const practice = await prisma.assignment.create({
+      data: {
+        tenantId: tenant.id,
+        paperId: exam.paperId,
+        title: '練習卷（可作答三次）',
+        mode: 'PRACTICE',
+        releasePolicy: 'ON_SUBMIT',
+        maxAttempts: 3,
+        createdBy: ctx.admin.id,
+      },
+    });
+    await prisma.assignmentTarget.create({
+      data: { assignmentId: practice.id, classId: ctx.classA.id },
+    });
+    const threeTries = async (user, scores) => {
+      for (const [i, score] of scores.entries()) {
+        await prisma.attempt.create({
+          data: {
+            assignmentId: practice.id,
+            userId: user.id,
+            attemptNo: i + 1,
+            status: 'GRADED',
+            startedAt: new Date(`2026-09-0${i + 1}T01:00:00Z`),
+            submittedAt: new Date(`2026-09-0${i + 1}T02:00:00Z`),
+            totalScore: score,
+            autoScore: score,
+            gradedAt: new Date(`2026-09-0${i + 1}T02:01:00Z`),
+          },
+        });
+      }
+    };
+    await threeTries(ctx.daming, [40, 55, 68]);
+    await threeTries(ctx.xiaohua, [70, 80, 90]);
+
+    const view = await guardianLib.childView(mom.id, ctx.daming.id);
+    const row = view.tasks.find((t) => t.title === '練習卷（可作答三次）');
+    assert.ok(row, '找不到那一份練習卷');
+    assert.equal(row.score, 68, '孩子那一欄用的是最後一次交卷');
+    assert.equal(row.compare.show, false, '兩個人的平均被交出去了');
+    assert.equal(row.compare.mean, null);
+    // 說出來的人數也要是人數——「6 位同學交卷」是假的。
+    assert.match(row.compare.why, /2 位/, `人數說成作答次數了：${row.compare.why}`);
+  });
+
+  section('沒有班級的三種，下一步完全不同');
+
+  await test('學年度結算之後，不會叫全補習班的家長打電話給櫃檯', async () => {
+    // `closeAcademicYear` 一句 updateMany 把全部班籍寫上 leftAt，
+    // 所以這裡直接做同一件事。舊的判斷只看「現在有沒有班」，
+    // 於是那個晚上兩百位家長同時讀到「還沒有編進任何班級，請告訴
+    // 櫃檯」——而那句話明確叫她們打電話問一件系統自己做的事。
+    await prisma.classMembership.updateMany({
+      where: { classId: ctx.classA.id, userId: ctx.daming.id, role: 'STUDENT' },
+      data: { leftAt: new Date('2027-07-31T16:00:00Z') },
+    });
+    const kid = (await guardianLib.childrenOf(mom.id)).find(
+      (k) => k.studentId === ctx.daming.id,
+    );
+    assert.equal(kid.className, null);
+    assert.equal(kid.formerClassName, '高三甲', '上一個班要說得出來');
+
+    const view = await guardianLib.childView(mom.id, ctx.daming.id);
+    assert.equal(view.emptyReason, 'BETWEEN_CLASSES', '結算被說成「從來沒有編過班」');
+
+    await prisma.classMembership.updateMany({
+      where: { classId: ctx.classA.id, userId: ctx.daming.id, role: 'STUDENT' },
+      data: { leftAt: null },
+    });
+  });
+
+  await test('帳號停用的孩子仍然列得出來，而且說得出他已經離開', async () => {
+    // `archiveStudent` 不動 GuardianLink，而舊的 `childrenOf` 也不看
+    // status——媽媽的帳號會永遠顯示「還沒有編進任何班級」，
+    // 唯一的出口是櫃檯手動逐條移除連結。
+    await prisma.user.update({
+      where: { id: ctx.xiaomei.id },
+      data: { status: 'ARCHIVED' },
+    });
+    await prisma.classMembership.updateMany({
+      where: { classId: ctx.classA.id, userId: ctx.xiaomei.id, role: 'STUDENT' },
+      data: { leftAt: new Date('2026-10-01T00:00:00Z') },
+    });
+
+    const kids = await guardianLib.childrenOf(mom.id);
+    const kid = kids.find((k) => k.studentId === ctx.xiaomei.id);
+    assert.ok(kid, '停用的孩子從清單上消失了——那會讓家長端變成一片空白');
+    assert.equal(kid.active, false);
+    const view = await guardianLib.childView(mom.id, ctx.xiaomei.id);
+    assert.equal(view.emptyReason, 'LEFT');
+
+    await prisma.user.update({ where: { id: ctx.xiaomei.id }, data: { status: 'ACTIVE' } });
+    await prisma.classMembership.updateMany({
+      where: { classId: ctx.classA.id, userId: ctx.xiaomei.id, role: 'STUDENT' },
+      data: { leftAt: null },
+    });
+  });
+
+  await test('家長端說得出導師是誰', async () => {
+    // 這一頁上每一條死路的下一步都是「告訴班級老師」，而在這一欄
+    // 出現之前，系統從頭到尾沒有給過家長任何一位老師的名字。
+    const before = (await guardianLib.childrenOf(mom.id)).find(
+      (k) => k.studentId === ctx.daming.id,
+    );
+    assert.equal(before.homeroomTeacher, null, '還沒有指定導師時不該憑空生一個名字');
+
+    await prisma.classMembership.create({
+      data: {
+        classId: ctx.classA.id,
+        userId: ctx.teacher.id,
+        role: 'TEACHER',
+        isHomeroom: true,
+      },
+    });
+    const kid = (await guardianLib.childrenOf(mom.id)).find(
+      (k) => k.studentId === ctx.daming.id,
+    );
+    assert.equal(kid.homeroomTeacher, '數學老師');
+    // 而且**只有姓名**：老師的登入代號（就是他的信箱）不可以跟著出去。
+    assert.ok(
+      !JSON.stringify(kid).includes('@example.com'),
+      '把老師的信箱帶到家長那一份上了',
+    );
+  });
+
   section('移除連結');
 
   await test('職員移除之後，家長立刻看不到那個孩子', async () => {

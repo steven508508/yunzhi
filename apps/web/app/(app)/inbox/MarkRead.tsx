@@ -52,15 +52,22 @@ export default function MarkRead({
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
-  // 送過了就不再送。React 在開發模式會把 effect 跑兩次，而第二次
-  // 是一次沒有意義的往返（伺服器端的 where 帶了 readAt: null，
+  // 送過的**那一組 id** 不再送。React 在開發模式會把 effect 跑兩次，
+  // 而第二次是一次沒有意義的往返（伺服器端的 where 帶了 readAt: null，
   // 所以不會出錯，但也不必打）。
-  const sent = useRef(false);
+  //
+  // **記的是 id 的組合，不是一個「送過了沒」的布林值。** 布林值在
+  // 第一頁是對的，翻到第二頁就失效：`/inbox?before=…` 是同一個元件
+  // 在 React 樹上的同一個位置，state 與 ref 都保留下來，於是 `ids`
+  // 換了一整批而 effect 直接 return——第二頁之後的通知永遠不會被
+  // 標成已讀，導覽列上的數字停在 60 不動。收件匣那三道歸零機制裡
+  // 的第一道，從第二頁起就不作用了。
+  const sentKey = useRef<string | null>(null);
 
   const key = ids.join(',');
   useEffect(() => {
-    if (sent.current || ids.length === 0) return;
-    sent.current = true;
+    if (ids.length === 0 || sentKey.current === key) return;
+    sentKey.current = key;
     void fetch('/api/notifications/read', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
