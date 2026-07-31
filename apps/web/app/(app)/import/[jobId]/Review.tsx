@@ -23,6 +23,7 @@ import {
   toggleAnswerKey,
 } from '@/lib/reviewState.mjs';
 import CustomTypes from './CustomTypes';
+import { DeleteJob } from './DeleteJob';
 
 /**
  * 題本匯入校對。
@@ -99,6 +100,7 @@ export default function Review({
   pages,
   knowledgePoints,
   reviewSeconds: initialReviewSeconds,
+  committedCount,
 }: {
   jobId: string;
   title: string;
@@ -111,6 +113,8 @@ export default function Review({
   knowledgePoints: { id: string; name: string }[];
   /** 之前累計的校對用時（秒）。 */
   reviewSeconds: number;
+  /** 這份題本已入庫的題目數，供刪除對話框說明連帶影響。 */
+  committedCount: number;
 }) {
   const [items, setItems] = useState(initial);
   const [cur, setCur] = useState(() => {
@@ -491,6 +495,7 @@ export default function Review({
           >
             {indicator.label}
           </span>
+          <DeleteJob jobId={jobId} title={title} committedCount={committedCount} />
           {indicator.urgent && (
             <button type="button" className="yz-btn yz-btn--quiet" onClick={() => void flush()}>
               立刻重試

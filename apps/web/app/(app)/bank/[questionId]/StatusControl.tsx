@@ -64,6 +64,7 @@ export default function StatusControl({
   const router = useRouter();
   const { busy, error, clearError, run } = useAction();
   const [retiring, setRetiring] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [reason, setReason] = useState('');
 
   function change(next: string, why?: string) {
@@ -73,6 +74,22 @@ export default function StatusControl({
       });
       setRetiring(false);
       router.refresh();
+    });
+  }
+
+  /**
+   * 刪除。
+   *
+   * **與下架是兩件事。** 下架讓題目留在題庫裡、不再被選進新卷子，
+   * 既有的卷子與成績照常；刪除是把它從資料庫抹掉，只有「從來沒被
+   * 用過」的題目才做得到——已在卷子上或已有作答的，資料庫層就會擋
+   * （onDelete: Restrict）。這裡先用 usedBy 判斷是為了不讓老師按下
+   * 一顆必定失敗的按鈕。
+   */
+  function remove() {
+    return run(async () => {
+      await submitJson(`/api/questions/${questionId}`, { method: 'DELETE' });
+      router.push('/bank');
     });
   }
 
@@ -188,6 +205,43 @@ export default function StatusControl({
           </>
         }
         onConfirm={() => void change('RETIRED', reason.trim() || undefined)}
+      />
+
+      {/* 刪除。只在沒有人用過的時候給按——按了必定失敗的按鈕
+          比沒有按鈕更糟，老師會以為系統壞了。 */}
+      {usedBy.length === 0 && (
+        <button
+          type="button"
+          className="yz-btn yz-btn--quiet"
+          style={{ marginTop: 8, color: 'var(--mark)' }}
+          onClick={() => {
+            clearError();
+            setDeleting(true);
+          }}
+          disabled={busy}
+        >
+          刪除這一題
+        </button>
+      )}
+
+      <ConfirmDialog
+        open={deleting}
+        onClose={() => !busy && setDeleting(false)}
+        title="刪除這一題"
+        confirmLabel="刪除"
+        busy={busy}
+        consequence={
+          <>
+            題幹、選項、標準答案、詳解、知識點連結會一併刪除，
+            <strong>不能復原</strong>。
+            <br />
+            <br />
+            只是不想再讓它被選進新卷子的話，請改用<strong>下架</strong>——
+            那會保留題目與所有既有的卷子和成績。
+            {error && <p className="yz-field__err">{error}</p>}
+          </>
+        }
+        onConfirm={() => void remove()}
       />
     </div>
   );

@@ -16,6 +16,7 @@ import { z } from 'zod';
 
 import {
   QuestionError,
+  deleteQuestion,
   loadQuestionDetail,
   requireEditable,
   updateQuestion,
@@ -95,3 +96,22 @@ function fail(e: unknown) {
     { status: 400 },
   );
 }
+
+/**
+ * 刪掉一題。
+ *
+ * 規則在 `lib/question.ts` 的 `deleteQuestion`——這一層只把
+ * QuestionError 翻成狀態碼。已在卷子上或已有人作答的會拿到 409
+ * 與「請改用下架」的說明。
+ */
+export const DELETE = scopedRoute<{ questionId: string }>(async (_req, { user, params }) => {
+  try {
+    const result = await deleteQuestion(params.questionId, user);
+    return NextResponse.json({ ok: true, ...result });
+  } catch (e) {
+    if (e instanceof QuestionError) {
+      return NextResponse.json({ error: e.message }, { status: e.status });
+    }
+    throw e;
+  }
+});

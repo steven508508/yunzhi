@@ -1203,3 +1203,47 @@ function sameOptions(
     a.every((o, i) => o.order === b[i].order && o.label === b[i].label && o.content === b[i].content)
   );
 }
+
+/**
+ * 刪掉一題。
+ *
+ * **不自己發明安全規則——資料庫已經有了。** `ExamPaperItem` 與
+ * `AttemptAnswer` 對 Question 都是 `onDelete: Restrict`，所以「已經在
+ * 卷子上」或「已經有人作答」的題目，刪除會在資料庫層被擋下來。
+ * 這裡先查一次只是為了**給人看得懂的訊息**：外鍵錯誤長成
+ * `Foreign key constraint failed on the field: ...`，那句話對科目代表
+ * 老師沒有任何意義。
+ *
+ * 附屬資料（選項、知識點、教科書連結、詳解、rubric、重複題成員）
+ * 是 Cascade，跟著走，不必手動清。
+ *
+ * **不做軟刪除。** `User.deletedAt` 那條路的教訓是：有讀取端、沒有
+ * 寫入端，欄位形同虛設而唯一鍵永遠被佔著（見 docs/功能清單.md）。
+ * 題目要留痕跡的話用 RETIRED 狀態，那是既有且真的有人讀的機制。
+ */
+export async function deleteQuestion(questionId: string, user: SessionUser) {
+  await requireEditable(questionId, user);
+
+  const [onPapers, answered] = await Promise.all([
+    prisma.examPaperItem.count({ where: { questionId } }),
+    prisma.attemptAnswer.count({ where: { questionId } }),
+  ]);
+
+  if (onPapers > 0 || answered > 0) {
+    const why = [
+      onPapers > 0 ? `已被 ${onPapers} 份卷子使用` : null,
+      answered > 0 ? `已有 ${answered} 筆學生作答` : null,
+    ]
+      .filter(Boolean)
+      .join('、');
+    throw new QuestionError(
+      `這一題${why}，不能刪除——刪掉會讓那些卷子與成績失去依據。` +
+        `要讓它不再被選入新卷子，請改用「下架」（狀態改為 RETIRED），` +
+        `既有的卷子與成績不受影響。`,
+      409,
+    );
+  }
+
+  await prisma.question.delete({ where: { id: questionId } });
+  return { id: questionId };
+}
