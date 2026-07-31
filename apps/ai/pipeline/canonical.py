@@ -941,6 +941,73 @@ _FIGURE_MENTION = re.compile(
 _MD_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 
 
+def asset_render_issues(doc: ImportDocument) -> list[Issue]:
+    """
+    引用得到、卻印不出任何東西的資產。**要在裁圖之後才呼叫。**
+
+    # 為什麼不放在 validate_document 裡
+
+    因為那一支驗的是「這份文件作為一份文件合不合理」——id 唯一、
+    參照解得開、數學分隔符成對。`storage_key` 不是文件的性質，是
+    **管線跑到哪一步**的性質：模型剛讀完那一刻每一張圖都還沒有鍵，
+    那時候報「印不出來」是假警報。所以它獨立一支，由
+    `routes_import.py` 在裁圖之後呼叫。
+
+    # 這一支在防什麼
+
+    **id 對得上不等於畫得出來。** 裁圖那一步在沒有 bbox（表格很常
+    沒有）、bbox 太小、或裁切失敗時就 `continue` 過去了，`storage_key`
+    留在 None——而內容裡的 `![[a:t1]]` 原封不動。症狀是整條路都回報
+    成功，學生在題幹中間看到一行「這裡有一張附圖，但系統找不到它」。
+
+    這裡是**最早**看得出這件事的地方，離原稿最近；下游（Node 端的
+    匯入管線、入庫、題庫的發布前檢查）各自也有一道，但那時候已經
+    問不出「原稿第 7 頁那個位置到底是什麼」了。
+
+    有 `table_markdown` 的不算：那種下游會把表格內容直接排進文字裡
+    （見 `apps/web/scripts/import-pipeline.mjs` 的 `inlineTableAssets`）。
+    """
+    by_id = {a.id: a for a in doc.assets}
+
+    def broken(referenced: set[str]) -> list[str]:
+        return sorted(
+            aid
+            for aid in referenced
+            if aid in by_id and not by_id[aid].storage_key and not by_id[aid].table_markdown
+        )
+
+    def what(aid: str) -> str:
+        return "表格" if by_id[aid].kind is AssetKind.TABLE else "圖"
+
+    found: list[Issue] = []
+    for q in doc.questions:
+        referenced = {m.group(1) for m in ASSET_REF.finditer(q.stem)}
+        for o in q.options:
+            referenced |= {m.group(1) for m in ASSET_REF.finditer(o.content)}
+        referenced |= set(q.asset_ids)
+        for aid in broken(referenced):
+            found.append(Issue(
+                code="asset_not_rendered", severity=Severity.ERROR,
+                detail=f"題目 {q.id} 引用的{what(aid)} {aid} 既沒有裁出影像、"
+                       f"也沒有 table_markdown，印不出任何東西。"
+                       f"表格請把內容寫進 table_markdown，圖請確認 bbox 框得到它",
+                question_id=q.id, page=q.placement.page,
+            ))
+
+    # 圖表題的表就掛在題組素材上，而且它是整組題目唯一的條件——子題的
+    # asset_ids 是空的，所以只查題目那一圈會完全漏掉這一種。
+    for g in doc.groups:
+        for aid in broken({m.group(1) for m in ASSET_REF.finditer(g.stimulus)}):
+            found.append(Issue(
+                code="asset_not_rendered", severity=Severity.ERROR,
+                detail=f"題組 {g.id} 的共用素材引用的{what(aid)} {aid} 既沒有裁出影像、"
+                       f"也沒有 table_markdown，印不出任何東西。"
+                       f"這一組的每一道子題都會少掉唯一的條件",
+                page=g.placement.page,
+            ))
+    return found
+
+
 def validate_document(doc: ImportDocument) -> list[Issue]:
     """
     跨物件的完整性檢查。回傳的 issue 會併進 `doc.issues`。
@@ -1008,6 +1075,7 @@ def validate_document(doc: ImportDocument) -> list[Issue]:
             add("asset_not_listed",
                 f"題目 {q.id} 的內容引用了 {sorted(missing)}，但沒有列進 asset_ids",
                 question_id=q.id, page=q.placement.page)
+
 
         # ── 兩個選項一模一樣 ────────────────────────────────────
         #

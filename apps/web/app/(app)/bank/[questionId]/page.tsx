@@ -29,7 +29,7 @@ import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { prisma } from '@/lib/prisma';
 import { loadQuestionDetail, mayEditQuestion } from '@/lib/question';
-import { TYPE_LABELS, checkRetire } from '@/lib/questionEdit.mjs';
+import { TYPE_LABELS, checkPublish, checkRetire } from '@/lib/questionEdit.mjs';
 import { loadRubricForGrading, rubricTemplates } from '@/lib/rubric';
 import QuestionEditor from './QuestionEditor';
 import { RubricEditor } from './RubricEditor';
@@ -141,6 +141,27 @@ export default async function QuestionPage({
       })),
       new Date(),
     );
+
+    // 發布現在會不會被擋，以及被哪一條。**與下架做成對稱的**：
+    // 在這之前發布是無條件的——一題沒有標準答案的單選題可以入庫 →
+    // 發布 → 被組進卷子 → 全班考完掛在「需人工確認」，而老師是在
+    // 成績出不來的那一天才發現的。
+    const publish = checkPublish({
+      type: q.type,
+      content: q.content,
+      score: q.score,
+      answerKeys: q.answerKeys,
+      answerSlots: q.answerSlots,
+      answerText: q.answerText,
+      options: q.options.map((o) => ({ ...o, assets: optionAssets.get(o.order) ?? null })),
+      assets: media?.contentAssets ?? null,
+      stimulus: q.group?.stimulus ?? null,
+      stimulusAssets: media?.group?.stimulusAssets ?? null,
+      knowledgePointCount: q.knowledgePointIds.length,
+      // 老師自己寫的那一份，加上這個畫面編不了的（AI 改寫、原文收錄）。
+      // 只算自己寫的話，一題已經有出版社詳解的題目會被提醒「還沒有解析」。
+      explanationCount: (q.explanation ? 1 : 0) + q.foreignExplanations,
+    });
 
     return (
       <main className="yz-panel" style={{ maxWidth: 900 }}>
@@ -278,6 +299,8 @@ export default async function QuestionPage({
             questionId={q.id}
             status={q.status}
             usedBy={retire.blocking.map((b) => ({ title: b.title, why: b.why }))}
+            publishBlocking={publish.blocking}
+            publishWarnings={publish.warnings}
           />
         ) : (
           <p className="yz-grade-hint">

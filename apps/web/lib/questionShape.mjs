@@ -86,6 +86,145 @@ export function normalizeOptions(raw, answerKeys = []) {
   return { options, answerKeys: mapped, dropped, duplicates };
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 附圖的歸屬
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * 附圖標記。`![[a:fig1]]` 指向資產清單裡 id 為 `fig1` 的那一張。
+ *
+ * **這條規則全系統有三份，寬窄必須一模一樣**：這裡、`lib/math.mjs` 的
+ * `ASSET_REF`（畫面上真的把圖排出來的那一支）、`apps/ai/pipeline/canonical.py`
+ * 的 `ASSET_REF`（管線那邊驗「圖都對得起來」的那一支）。
+ *
+ * 為什麼不直接用 `lib/math.mjs` 匯出的那一份：這個檔案刻意零相依
+ * （理由見檔頭——`tools/commit-shim.mjs` 是直接跑在 node 上的），而
+ * math.mjs 匯入 katex 與 mhchem。為了共用一個正規表示式把整個 KaTeX
+ * 拉進入庫路徑不划算。代價是三份要同步，所以
+ * `tests/questionShape.test.mjs` 有一條測試把這裡與 math.mjs 的行為
+ * 釘在一起——寬窄一旦分歧，症狀是「管線說圖都對得起來，畫面上卻
+ * 印出一串 ![[a:...]]」，而那串東西看起來就像 AI 抽壞了字。
+ *
+ * **已知的唯一差異**：math.mjs 是先切數學式再找標記，所以寫在
+ * `$…$` 裡面的標記那邊不算、這裡算。方向是安全的（這裡比較嚴，
+ * 只會多擋不會少放），完整的理由與代價寫在那條測試裡。
+ */
+const ASSET_REF = /!\[\[a:([A-Za-z0-9_-]{1,32})\]\]/g;
+
+/** 這一段文字引用了哪幾張附圖，依出現順序、去重。 */
+export function referencedAssetIds(text) {
+  const src = text == null ? '' : String(text);
+  const out = [];
+  for (const m of src.matchAll(ASSET_REF)) {
+    if (!out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * 這一段文字裡**指不到任何一張圖**的標記 id。
+ *
+ * 給已經分好欄位的資料用（題庫裡的題目：`Question.contentAssets`、
+ * `QuestionOption.assets`、`QuestionGroup.stimulusAssets` 各存各的），
+ * 那時候沒有一個平的清單可以餵給 `partitionAssets`。
+ *
+ * 有值就代表學生會在那個位置看到一行「這裡有一張附圖，但系統找不到它」。
+ */
+export function missingAssetRefs(text, assets) {
+  const known = new Set();
+  for (const a of Array.isArray(assets) ? assets : []) {
+    if (a && typeof a === 'object' && typeof a.id === 'string' && a.id) known.add(a.id);
+  }
+  return referencedAssetIds(text).filter((id) => !known.has(id));
+}
+
+/**
+ * 把一題的附圖分給它該去的地方：題組素材、題幹、各個選項。
+ *
+ * # 為什麼要分
+ *
+ * 匯入管線把一題用到的圖**全部放在一個平的清單**上
+ * （`ImportCandidate.assets`），因為那時候還不知道它們會被寫進哪一欄。
+ * 資料庫這一端則是分三處存的：`QuestionGroup.stimulusAssets`、
+ * `Question.contentAssets`、`QuestionOption.assets`——而渲染端
+ * （`<MathText assets={…}>`）一次只收一段文字與它自己的那一份清單。
+ *
+ * 不分的後果不是「圖少了一張」，是**整題無法作答**：物理題四個選項
+ * 是四張力圖時，選項各自印一行「〔這裡有一張附圖，但系統找不到它〕」，
+ * 而那四張圖因為 id 沒被題幹用到，會被 `MathText` 的 `rest` 一起堆到
+ * 題幹後面——四張沒有標號的圖配四個沒有圖的選項。
+ *
+ * # 為什麼是「算出來」而不是「存一份在選項裡」
+ *
+ * 另一個看起來也合理的選項是讓管線在 `options` 這個 Json 裡就多存一個
+ * `assets` 欄位。不選它的理由是**那會有兩份真相**：標記寫在文字裡、
+ * 歸屬存在旁邊，而老師在校對頁把 `![[a:o1]]` 從甲選項剪到乙選項時
+ * 只會改到文字。歸屬由文字算出來的話，剪貼之後自然就對了。
+ *
+ * 同一個函式同時被校對頁（畫預覽）與入庫（寫資料庫）呼叫，這是
+ * 「校對畫面等於學生畫面」這條驗收標準唯一守得住的作法。
+ *
+ * # 沒有被任何標記指到的圖去哪裡
+ *
+ * 跟著題幹（`contentAssets`）。講義那條路用垂直重疊把圖分派給題目，
+ * 產出的圖本來就沒有 id、題幹裡也沒有標記，而 `MathText` 會把它們
+ * 排在題幹後面——那是主要路徑，不是補漏（見 components/MathText.tsx）。
+ *
+ * @param {{assets?: unknown, stimulus?: unknown, content?: unknown,
+ *          options?: unknown}} input
+ * @returns {{stimulusAssets: object[], contentAssets: object[],
+ *            optionAssets: {order:number,label:string,assets:object[]}[],
+ *            missing: {where:string,id:string}[]}}
+ *          `missing` 是**指向不存在的圖的標記**。有值就代表學生會在
+ *          那個位置看到一行「這裡有一張附圖，但系統找不到它」。
+ */
+export function partitionAssets({ assets, stimulus, content, options } = {}) {
+  const list = Array.isArray(assets)
+    ? assets.filter((a) => Boolean(a) && typeof a === 'object')
+    : [];
+  const byId = new Map();
+  for (const a of list) {
+    if (typeof a.id === 'string' && a.id && !byId.has(a.id)) byId.set(a.id, a);
+  }
+
+  const used = new Set();
+  const missing = [];
+  /** 一段文字要的那幾張圖，依標記出現的順序。 */
+  const pick = (text, where) => {
+    const out = [];
+    for (const id of referencedAssetIds(text)) {
+      const a = byId.get(id);
+      if (!a) {
+        missing.push({ where, id });
+        continue;
+      }
+      used.add(id);
+      out.push(a);
+    }
+    return out;
+  };
+
+  const stimulusAssets = pick(stimulus, '題組前導敘述');
+  const contentAssets = pick(content, '題幹');
+
+  const rows = Array.isArray(options) ? options : [];
+  const optionAssets = rows.map((o, i) => {
+    const order = Number(o?.order) || i + 1;
+    const label = String(o?.label ?? order);
+    return { order, label, assets: pick(o?.content, `選項 (${label})`) };
+  });
+
+  // 沒有被任何標記指到的一律跟著題幹。**順序照原清單**，不是照
+  // 被發現的順序——`figureAlt` 用索引編號（「本題附圖（2）」），
+  // 順序抖動的話同一張圖在兩個畫面上會有兩個編號。
+  for (const a of list) {
+    if (typeof a.id === 'string' && a.id && used.has(a.id)) continue;
+    contentAssets.push(a);
+  }
+
+  return { stimulusAssets, contentAssets, optionAssets, missing };
+}
+
 /**
  * 題目附圖，入庫時的形狀。
  *

@@ -13,6 +13,7 @@
  * 盲目重試三次就是白燒三倍的前四階段。所以 502（設定錯）
  * 直接放棄並把原因寫給老師看，只有 503（限流、暫時故障）才重試。
  */
+import { referencedAssetIds } from '../lib/questionShape.mjs';
 import { withTenant, withoutTenantScope } from '../lib/tenantContext.mjs';
 
 const AI_URL = (process.env.AI_SERVICE_URL ?? 'http://ai:8000').replace(/\/+$/, '');
@@ -515,6 +516,62 @@ function mergeUsage(a, b) {
 }
 
 /**
+ * 這張資產有沒有「就算沒裁出影像也印得出來」的內容。
+ *
+ * 目前只有表格：`apps/ai/pipeline/prompts.py` 要模型把表格標成
+ * `kind=TABLE` 並把內容寫進 `table_markdown`，而 `canonical.py` 的
+ * `Asset` 明文允許表格只有 `table_markdown` 而沒有裁出來的影像
+ * （表格常常沒有 bbox，裁圖那一步就 `continue` 過去了）。
+ */
+function tableText(a) {
+  const md = typeof a?.table_markdown === 'string' ? a.table_markdown.trim() : '';
+  return md || null;
+}
+
+/**
+ * 把「沒裁成圖、但有表格內容」的資產直接排進文字裡。
+ *
+ * # 為什麼是排進文字，不是留一個標記等別人處理
+ *
+ * 因為這一欄在資料庫裡沒有落腳處：`table_markdown` 全 repo 沒有任何
+ * 持久化，而 `QuestionOption.assets`／`contentAssets` 的形狀是「一張圖
+ * 加上它的物件鍵」，沒有鍵的項目在渲染端會被 `readAssets` 丟掉。
+ * 留著標記的結果是學生看到一行「這裡有一張附圖，但系統找不到它」，
+ * 而表格內容明明已經抽出來了——那是這條管線最不該發生的一種失敗。
+ *
+ * Markdown 表格本來就是這個格式收得下的寫法（`prompts.py` 的標記約定
+ * 裡就列著 `| 甲 | 乙 |`），所以排進去不是走後門，是回到同一個約定。
+ *
+ * # 為什麼不乾脆新增一個欄位存它
+ *
+ * 那是另一個看起來也合理的選項（`QuestionOption.tableMarkdown` 之類），
+ * 但它要動 schema、要動五個讀取端、還要在 `MathText` 裡多一條渲染路徑。
+ * 而表格排成文字**現在就看得見**：`.yz-take__stem` 是 `white-space:
+ * pre-wrap`，一行一列排出來讀得懂。先讓內容活下來，畫得更漂亮是之後
+ * 的事——反過來（等畫得漂亮才存）就是現在這個「安靜地丟掉」的局面。
+ *
+ * **已知的缺口**：`.yz-take__stimulus`、`.yz-take__optbody` 與校對頁的
+ * `.yz-mathpreview` 沒有 `white-space: pre-wrap`，所以表格排在題組素材
+ * 或選項裡時會被擠成一行（`| 甲 | 乙 | |---|---| | 1 | 2 |`）。讀得懂
+ * 但難看。那三條在 `apps/web/app/globals.css`，補它們是獨立的一步。
+ *
+ * @param {string|null|undefined} text
+ * @param {{id?: string, table_markdown?: string}[]} tables
+ */
+export function inlineTableAssets(text, tables) {
+  if (text == null || text === '') return text;
+  let out = String(text);
+  for (const a of tables ?? []) {
+    const md = tableText(a);
+    if (!md || !a.id) continue;
+    // 前後各補一個換行：表格若接在「根據下表回答」後面，不換行的話
+    // 第一列會黏在那句話尾巴，pre-wrap 也救不回來。
+    out = out.split(`![[a:${a.id}]]`).join(`\n${md}\n`);
+  }
+  return out;
+}
+
+/**
  * 把整頁閱讀的結果轉成候選題。
  *
  * 不呼叫 AI——模型在上一階段就把版面與內容一起讀完了。
@@ -522,8 +579,13 @@ function mergeUsage(a, b) {
  * 交叉驗證的結果掛在**每一題**的存疑理由上而不是只寫在工作層級：
  * 校對介面是逐題翻的，寫在工作層級的警告只有第一眼會被看到，
  * 翻到第 30 題時早就忘了。
+ *
+ * **匯出只是為了測試。** 這一支不碰資料庫也不呼叫 AI（模型在上一階段
+ * 就把版面與內容一起讀完了），純粹是形狀轉換——而它決定了「哪一張圖
+ * 跟著哪一段文字進資料庫」，錯了沒有錯誤訊息。整條管線要真的相依才
+ * 跑得起來（`tools/e2e-import.sh`），那一層太重，守不住這一段。
  */
-function fromReading(jobId, seg, existing) {
+export function fromReading(jobId, seg, existing) {
   const doc = seg.document;
   const rows = [];
 
@@ -543,6 +605,34 @@ function fromReading(jobId, seg, existing) {
     const g = q.group_id ? groups.get(q.group_id) : null;
     const printed = q.answer?.source === 'PRINTED';
 
+    // ── 這一題要哪幾張圖 ──────────────────────────────────────
+    //
+    // `asset_ids` 只有子題自己的。**題組共用的圖掛在題組素材上**
+    // （圖表題的表、閱讀題的插圖、實驗題的裝置圖），子題的 asset_ids
+    // 是空的——`apps/ai/pipeline/canonical.py` 的 `group_assets` 就是為了
+    // 這件事才存在。少了下面這一行，`stimulus` 被複製進候選題而它裡面的
+    // `![[a:fig1]]` 對不到任何一張圖，於是「根據上表回答」的那個上表
+    // 永遠是空的。
+    const wanted = [...new Set([
+      ...(q.asset_ids ?? []),
+      ...referencedAssetIds(g?.stimulus ?? ''),
+    ])];
+    const picked = wanted.map((id) => assets.get(id)).filter(Boolean);
+
+    // 沒有裁出影像的資產分兩種，處理方式完全不同：
+    //
+    //   有 table_markdown  → 表格內容抽到了，只是沒裁成圖。排進文字裡。
+    //   什麼都沒有         → 這張圖真的不見了。**留著標記**並在校對頁
+    //                        講出來，讓老師看得見；入庫那一關會擋下來
+    //                        （lib/commit.ts 的 partitionAssets.missing）。
+    //
+    // 之前這裡是一句 `.filter((a) => a && a.storage_key)`：兩種都被
+    // 靜默丟掉，而題幹裡的 `![[a:t1]]` 原封不動——地理／公民的圖表題
+    // 入庫後學生看到一行紅字，沒有任何人被通知。
+    const tables = picked.filter((a) => !a.storage_key && tableText(a));
+    const broken = picked.filter((a) => !a.storage_key && !tableText(a));
+    const inline = (text) => inlineTableAssets(text, tables);
+
     const reasons = [
       ...(q.confidence?.reasons ?? []).map((r) => ({
         code: r.code, detail: r.detail, severity: r.severity ?? 'warn',
@@ -553,6 +643,27 @@ function fromReading(jobId, seg, existing) {
       ...docIssues.map((x) => ({
         code: x.code, detail: x.detail, severity: x.severity ?? 'warn',
       })),
+      // severity 是 error 的理由在校對頁**一律顯示**，不會被信心分數
+      // 蓋掉（見 Review.tsx 的 `reasons`）。這一條必須是 error：
+      // 它代表這一題現在入庫會被退回。
+      ...broken.map((a) => ({
+        code: 'asset_not_cropped',
+        severity: 'error',
+        detail:
+          `第 ${a.placement?.page ?? '?'} 頁的 ${a.kind === 'TABLE' ? '表格' : '圖'}` +
+          `「${a.alt || a.caption || a.id}」沒有裁出影像（原稿上沒有框得出來的位置）。` +
+          `內容裡的 ![[a:${a.id}]] 現在指不到任何東西——` +
+          `表格請直接用 | 甲 | 乙 | 的寫法打進題幹，圖請重跑這一頁的判讀。`,
+      })),
+      ...(tables.length
+        ? [{
+            code: 'table_inlined',
+            severity: 'warn',
+            detail:
+              `有 ${tables.length} 個表格沒有裁成圖，已經把表格內容直接排進文字裡` +
+              `（一行一列的 Markdown 表格）。請對照原稿確認欄列沒有跑掉。`,
+          }]
+        : []),
     ];
 
     rows.push({
@@ -565,10 +676,10 @@ function fromReading(jobId, seg, existing) {
       // 複製的話重複題偵測會把整組看成互相重複，學生也會在
       // 第二題看到同一段又讀一次。
       groupKey: q.group_id ?? null,
-      stimulus: g?.stimulus || null,
+      stimulus: inline(g?.stimulus) || null,
       type: toDbType(q.kind),
-      content: q.stem,
-      options: q.options ?? [],
+      content: inline(q.stem),
+      options: (q.options ?? []).map((o) => ({ ...o, content: inline(o.content) })),
       answerSlots: q.answer?.slots?.length ? q.answer.slots : null,
       // **只收原稿印出來的答案。** 推導的答案走自答階段，
       // 那條路有多次投票與一致率把關。
@@ -580,9 +691,11 @@ function fromReading(jobId, seg, existing) {
         : null,
       // 詳解與題幹分開存：試題依著作權法第 9 條不受保護，詳解受保護。
       explanationRaw: q.explanation?.body || null,
-      assets: (q.asset_ids ?? [])
-        .map((id) => assets.get(id))
-        .filter((a) => a && a.storage_key)
+      // 真的裁出影像的那幾張。沒有物件鍵的圖在渲染端會被 `readAssets`
+      // 丟掉（沒有鍵就沒有網址可以指），所以留在這裡只會變成破圖。
+      // 它們不是被丟掉了——表格已經排進文字，其餘的寫進了 reasons。
+      assets: picked
+        .filter((a) => a.storage_key)
         .map((a) => ({
           // **id 一定要帶。** 題幹裡的 `![[a:fig1]]` 指的就是它，
           // 少了它那個標記在畫面上會變成「這裡有一張附圖，但系統

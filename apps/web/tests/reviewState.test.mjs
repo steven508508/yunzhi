@@ -156,6 +156,20 @@ test('入庫會被退回的毛病，在編輯當下就說', () => {
   assert.deepEqual(optionIssues(opts('a', 'b'), [1], 'SINGLE_CHOICE'), []);
 });
 
+test('「沒有答案」說的是需人工確認，不是判錯', () => {
+  // 這一條守的是**文案的真假**，不是程式的行為：
+  // `lib/grading.mjs` 的 `gradeSingleChoice` 對空的 correctKeys 回的是
+  // `review('這一題沒有標準答案')`，不是判錯。校對頁曾經寫「入庫後學生
+  // 一律會被判錯」，而老師是照著這句話決定要不要現在停下來補答案的。
+  // 說得比實際嚴重，下一次他就不信這一欄了；而真正的代價（全班四十份
+  // 要一份一份看）反而沒有被說出來。
+  const [issue] = optionIssues(opts('a', 'b'), [], 'SINGLE_CHOICE');
+  assert.equal(issue.code, 'no_answer');
+  assert.ok(!issue.detail.includes('一律會被判錯'), `這句話是假的：${issue.detail}`);
+  assert.ok(issue.detail.includes('不會被判錯'), issue.detail);
+  assert.ok(issue.detail.includes('需人工確認'), issue.detail);
+});
+
 // ─────────────────────────────────────────────────────────────────
 // 二、存檔佇列的狀態機
 // ─────────────────────────────────────────────────────────────────

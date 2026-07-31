@@ -17,6 +17,19 @@ export type CandidateView = {
   type: string | null;
   content: string | null;
   stimulus: string | null;
+  /**
+   * 選項。**這裡沒有 `assets`，是刻意的。**
+   *
+   * 物理題的四個選項可以是四張力圖（`![[a:o1]]` 寫在選項內容裡），
+   * 而校對頁與入庫都要知道「哪一張圖屬於哪一個選項」。另一個看起來
+   * 也合理的作法是在這個 Json 裡多存一個 `assets` 欄位，讓管線寫進去。
+   *
+   * 不選它的理由是**那會有兩份真相**：標記寫在文字裡、歸屬存在旁邊，
+   * 而老師在校對頁把 `![[a:o1]]` 從甲選項剪到乙選項時只會改到文字。
+   * 歸屬由文字算出來（`lib/questionShape.mjs` 的 `partitionAssets`）
+   * 的話，剪貼之後自然就對了，而且校對頁與 `lib/commit.ts` 用的是
+   * 同一支函式——「校對畫面等於學生畫面」才守得住。
+   */
   options: { order: number; label: string; content: string }[];
   answerKeys: number[];
   answerSlots: { slot: string; value: string }[] | null;
@@ -36,12 +49,18 @@ export type CandidateView = {
    */
   sourceBbox: { page?: number; x0: number; y0: number; x1: number; y1: number } | null;
   /**
-   * 這一題的附圖。幾何題沒有圖就是不能校的題目。
+   * 這一題的附圖，**一整包**：題幹的、選項的、題組素材的都在裡面。
+   * 幾何題沒有圖就是不能校的題目。
    *
-   * 原樣帶過去，不重新整形：校對介面把它直接餵給 `<MathText assets>`，
-   * 而那一支自己會濾掉壞掉的項目（見 lib/math.mjs 的 readAssets）。
-   * 在這裡多做一次「只留 key」的整形，結果是題幹裡的 `![[a:fig1]]`
-   * 對不到任何一張圖——**而那正是校對介面要老師確認的那件事**。
+   * 原樣帶過去，不重新整形：校對介面把它交給 `partitionAssets` 分到
+   * 各段文字上，再餵給 `<MathText assets>`，而那一支自己會濾掉壞掉的
+   * 項目（見 lib/math.mjs 的 readAssets）。在這裡多做一次「只留 key」
+   * 的整形，結果是題幹裡的 `![[a:fig1]]` 對不到任何一張圖——**而那正是
+   * 校對介面要老師確認的那件事**。
+   *
+   * 為什麼是一整包而不是分好的三份：`ImportCandidate` 只有一個
+   * `assets` 欄位，而分派要看文字裡的標記——那是入庫那一刻才定案的事
+   * （老師在校對時還會改文字）。分派的規則只有一份，在 questionShape.mjs。
    */
   assets: unknown[];
   /** 入庫時被退回的原因。寫得很好，而在這之前沒有任何畫面讀得到。 */

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MathText } from '@/components/MathText';
 import type { CandidateView, PageView } from '@/lib/candidates';
 import { hasMath } from '@/lib/math.mjs';
+import { partitionAssets } from '@/lib/questionShape.mjs';
 import {
   addOption,
   answerKeysForType,
@@ -235,6 +236,18 @@ export default function Review({
     }, 1000);
 
     // 離開前一定要送出。熱點網路下 sendBeacon 比 fetch 可靠。
+    //
+    // **不可以只聽 `beforeunload`。** 老師是在 iPad 上校對的，而 iOS
+    // Safari 在切 App、鎖屏、系統回收分頁時不會觸發它——作答頁早就
+    // 因為同一件事改聽 `pagehide` 與 `visibilitychange` 了
+    // （take/[assignmentId]/page.tsx 的 `beacon`），這一頁沒跟上。
+    // 定期存檔最短間隔是 8 秒，所以漏掉的是「最後 8 秒的修改」：
+    // 剛改完第 37 題的答案、按下 Home 鍵，那一筆就沒了，而畫面上
+    // 一直寫著「已儲存」。
+    //
+    // 送出去之後**不清空佇列**：beacon 不保證送達，而重複送是安全的
+    // （伺服器端是照 id 更新的）。切回來時佇列還在，下一輪定期存檔
+    // 會再送一次。丟掉才是不可回復的。
     const onLeave = () => {
       if (pending.current.size === 0) return;
       const sessionSec = Math.floor((Date.now() - startedAt.current) / 1000);
@@ -251,8 +264,21 @@ export default function Review({
         ),
       );
     };
+    // `visibilitychange` 只在真的隱藏時送。切到別的 App 又切回來
+    // （查一下課本、回一則訊息）在 iPad 上很常見，而多送一次是安全的。
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') onLeave();
+    };
     window.addEventListener('beforeunload', onLeave);
-    return () => { clearInterval(t); window.removeEventListener('beforeunload', onLeave); onLeave(); };
+    window.addEventListener('pagehide', onLeave);
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener('beforeunload', onLeave);
+      window.removeEventListener('pagehide', onLeave);
+      document.removeEventListener('visibilitychange', onHide);
+      onLeave();
+    };
   }, [flush, jobId]);
 
   /**
@@ -805,6 +831,21 @@ function Editor({
   const locked = Boolean(c.questionId);
   const multi = c.type === 'MULTI_CHOICE';
   const issues = optionIssues(c.options, c.answerKeys, c.type);
+  /**
+   * 每一段文字自己的附圖。
+   *
+   * **與 `lib/commit.ts` 是同一支函式**（`partitionAssets`），這一頁的
+   * 驗收標準才成立：20 分鐘校完 50 題靠的是「校對畫面等於學生畫面」，
+   * 而在這之前這一頁把整包 `c.assets` 一起餵給題幹、選項一張都不給。
+   * 症狀是物理題四張力圖全堆在題幹後面、四個選項空著——**而那正是
+   * 入庫之後學生會看到的樣子，老師卻在這裡看不出來**。
+   */
+  const media = partitionAssets({
+    assets: c.assets,
+    stimulus: c.stimulus,
+    content: c.content,
+    options: c.options,
+  });
   // severity 是 error 的理由**一律顯示**。舊版整塊側註被
   // `confidence >= 0.8` 擋掉，而「AI 自答失敗，這題沒有答案」
   // 正好發生在信心 0.90 的題目上——警告被信心分數吃掉了。
@@ -831,7 +872,10 @@ function Editor({
             onLive={(v) => onLive({ stimulus: v })}
             onCommit={(v) => onPatch({ stimulus: v })}
           />
-          <Preview source={c.stimulus} />
+          {/* 題組共用的圖（圖表題的表、實驗題的裝置圖）掛在素材上，
+              不在任何一個子題的題幹裡。不傳 assets 的話這裡只會印
+              一個「〔附圖〕」的小記號，而老師無從確認那張表對不對。 */}
+          <Preview source={c.stimulus} assets={media.stimulusAssets} label="題組素材" jobId={jobId} />
         </div>
       )}
 
@@ -853,15 +897,26 @@ function Editor({
               有沒有裁歪——堆在後面的話，「如右圖」到底指哪一張看不出來。 */}
           <Preview
             source={c.content}
-            assets={c.assets}
+            assets={media.contentAssets}
             label={`第 ${c.questionNo ?? c.order} 題`}
             jobId={jobId}
           />
 
-          {/(!\[\[a:)/.test(c.content ?? '') && c.assets.length === 0 && (
-            <p className="yz-hint">
-              題幹裡的 <code>![[a:…]]</code> 是附圖的位置標記，不是亂碼，<strong>請不要刪掉</strong>——
-              刪掉之後入庫就找不回是哪一張圖了。這份題本沒有裁出對應的圖。
+          {/* 標記指向一張不存在的圖。
+              **這一段之前寫的是「請不要刪掉」**——照著做的結果是這一題
+              帶著一個永遠對不到東西的標記入庫，學生看到一行紅字。
+              現在說的是真話：這一題入庫會被退回（lib/commit.ts 用同一支
+              `partitionAssets` 判斷），而且說得出老師可以怎麼辦。 */}
+          {media.missing.length > 0 && (
+            <p className="yz-note yz-note--error" style={{ marginTop: 8 }}>
+              {[...new Set(media.missing.map((m) => m.where))].join('、')}裡的{' '}
+              <code>![[a:{media.missing.map((m) => m.id).join('、')}]]</code>{' '}
+              指向這份題本<strong>沒有裁出來的圖</strong>。維持原樣入庫的話會被退回，
+              學生也會在那個位置看到一句「這裡有一張附圖，但系統找不到它」。
+              <br />
+              原稿上那是<strong>表格</strong>的話，可以直接用{' '}
+              <code>| 甲 | 乙 |</code> 一行一列打進去，再把標記刪掉；
+              是<strong>圖</strong>的話請重跑這一頁的判讀。
             </p>
           )}
 
@@ -894,7 +949,16 @@ function Editor({
                       onLive={(v) => onLive(dropDropped(setOptionContent(c.options, c.answerKeys, o.order, v)))}
                       onCommit={(v) => onPatch(dropDropped(setOptionContent(c.options, c.answerKeys, o.order, v)))}
                     />
-                    <Preview source={o.content} />
+                    {/* 選項自己的附圖。物理的「下列何者為合力」四個選項
+                        就是四張力圖，不傳的話這裡印的是「〔附圖〕」小記號
+                        ——老師看不出四張圖有沒有對到正確的選項，而那正是
+                        這一頁存在的理由。 */}
+                    <Preview
+                      source={o.content}
+                      assets={media.optionAssets[i]?.assets ?? []}
+                      label={`選項 (${o.label})`}
+                      jobId={jobId}
+                    />
                   </div>
                   {!locked && (
                     <span className="yz-opt__tools">

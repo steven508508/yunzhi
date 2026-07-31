@@ -851,6 +851,18 @@ def build_router(get_provider) -> APIRouter:
             page_count=len(req.pages),
         )
 
+        # ── 引用得到、卻印不出來的圖表 ──────────────────────────
+        #
+        # **一定要在裁圖之後跑。** 上面那一圈在沒有 bbox、bbox 太小、
+        # 或裁切失敗時是 `continue` 過去的——`storage_key` 留在 None，
+        # 而內容裡的 `![[a:t1]]` 原封不動。表格最常中招，因為表格常常
+        # 沒有框得出來的位置。
+        #
+        # 不補這一段的話，整條路都回報成功，而學生在題幹中間看到一行
+        # 「這裡有一張附圖，但系統找不到它」。這裡是最早看得出這件事
+        # 的地方（還知道是原稿第幾頁的哪一個位置）。
+        doc.issues.extend(canonical.asset_render_issues(doc))
+
         # ── 交叉驗證 ────────────────────────────────────────────
         disagreements: list[dict] = []
         if req.rule_blocks:

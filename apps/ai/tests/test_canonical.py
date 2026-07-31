@@ -53,6 +53,7 @@ from pipeline.canonical import (  # noqa: E402
     Severity,
     SubjectCode,
     assemble,
+    asset_render_issues,
     finalize,
     json_schema,
 )
@@ -275,6 +276,70 @@ def test_asset_referenced_in_text_must_be_listed():
         questions=[q("q1", stem="如圖 ![[a:f1]]")],   # 沒有列進 asset_ids
     ))
     assert "asset_not_listed" in [i.code for i in doc.issues]
+
+
+def test_referenced_asset_that_cannot_be_drawn_is_caught():
+    """
+    id 對得上不等於畫得出來。
+
+    裁圖那一步在沒有 bbox（表格很常沒有）、bbox 太小、或裁切失敗時
+    就跳過去了，`storage_key` 留在 None——而題幹裡的 `![[a:t1]]` 原封
+    不動。之前整條路只驗 id 對不對得上，於是每一步都回報成功，
+    而學生在題幹中間看到一行「這裡有一張附圖，但系統找不到它」。
+
+    這一支獨立於 `validate_document`，因為 `storage_key` 不是文件的
+    性質而是「管線跑到哪一步」的性質——模型剛讀完那一刻每一張圖都
+    還沒有鍵。呼叫端是裁圖之後的 `routes_import.py`。
+    """
+    doc = finalize(ImportDocument(
+        assets=[Asset(id="t1", kind=AssetKind.FIGURE, placement=Placement(page=1), alt="電路圖")],
+        questions=[q("q1", stem="如圖 ![[a:t1]]", asset_ids=["t1"])],
+    ))
+    # 格式檢查不該管這件事：那時候還沒裁圖。
+    assert "asset_not_rendered" not in [i.code for i in doc.issues]
+
+    bad = asset_render_issues(doc)
+    assert bad, "裁完圖之後仍然沒有鍵的圖要被抓出來"
+    assert bad[0].severity is Severity.ERROR
+    assert bad[0].question_id == "q1"
+    assert bad[0].page == 1
+
+    # 裁出來了就沒事
+    ok = finalize(ImportDocument(
+        assets=[Asset(id="t1", kind=AssetKind.FIGURE, placement=Placement(page=1),
+                      alt="電路圖", storage_key="k/t1.png")],
+        questions=[q("q1", stem="如圖 ![[a:t1]]", asset_ids=["t1"])],
+    ))
+    assert asset_render_issues(ok) == []
+
+    # 表格只有 table_markdown 也沒事：下游會把表格內容直接排進文字裡
+    # （apps/web/scripts/import-pipeline.mjs 的 inlineTableAssets）。
+    md = finalize(ImportDocument(
+        assets=[Asset(id="t1", kind=AssetKind.TABLE, placement=Placement(page=1),
+                      alt="死亡人數", table_markdown="| 甲 |\n|---|\n| 1 |")],
+        questions=[q("q1", stem="根據 ![[a:t1]]", asset_ids=["t1"])],
+    ))
+    assert asset_render_issues(md) == []
+
+
+def test_group_asset_that_cannot_be_drawn_is_caught():
+    """
+    圖表題的表掛在題組素材上，而它是整組唯一的條件——印不出來的話
+    三道子題全部無法作答。子題的 asset_ids 是空的，所以只查題目那一圈
+    會完全漏掉這一種。
+    """
+    doc = finalize(ImportDocument(
+        assets=[Asset(id="t1", kind=AssetKind.TABLE, placement=Placement(page=1),
+                      alt="死亡人數表", table_markdown="| 甲 |")],
+        groups=[Group(id="g1", stimulus="下表：![[a:t1]]", placement=Placement(page=1))],
+        questions=[q("q1", group_id="g1")],
+    ))
+    assert asset_render_issues(doc) == [], "有 table_markdown 就印得出來"
+
+    doc.assets[0].table_markdown = None
+    bad = asset_render_issues(doc)
+    assert bad, "題組共用的圖沒有被檢查到"
+    assert "題組" in bad[0].detail
 
 
 def test_unbalanced_math_delimiter_is_caught():

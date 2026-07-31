@@ -76,6 +76,7 @@ import { prisma } from '@/lib/prisma';
 import {
   bumpsVersion,
   checkOptionStructure,
+  checkPublish,
   checkRetire,
   checkTypeChange,
   readAward,
@@ -83,7 +84,8 @@ import {
   typeFamily,
   withAward,
 } from '@/lib/questionEdit.mjs';
-import type { Award, OptionRow, RetireBlocker } from '@/lib/questionEdit.mjs';
+import type { Award, OptionRow, PublishIssue, RetireBlocker } from '@/lib/questionEdit.mjs';
+import { partitionAssets } from '@/lib/questionShape.mjs';
 import { mayGrade, regradeAssignment } from '@/lib/scoring';
 import { requireTenant } from '@/lib/tenant';
 
@@ -438,7 +440,11 @@ export async function updateQuestion(
       answerSlots: true,
       answerText: true,
       status: true,
-      options: { select: { order: true, label: true, content: true }, orderBy: { order: 'asc' } },
+      contentAssets: true,
+      options: {
+        select: { order: true, label: true, content: true, assets: true },
+        orderBy: { order: 'asc' },
+      },
       knowledgePoints: { select: { knowledgePointId: true } },
     },
   });
@@ -518,7 +524,10 @@ export async function updateQuestion(
 
     if (!sameOptions(before.options, shaped.options)) {
       newOptions = shaped.options;
-      note('options', before.options, shaped.options);
+      // 稽核只留文字。`assets` 是一整包 bbox 與物件鍵，寫進去會讓
+      // 每一次改錯字的稽核列膨脹好幾 KB，而它從來不是「誰改了什麼」
+      // 要回答的問題。
+      note('options', before.options.map(textOnly), shaped.options);
     }
     if (!sameKeys(before.answerKeys, shaped.answerKeys)) {
       data.answerKeys = shaped.answerKeys;
@@ -530,7 +539,7 @@ export async function updateQuestion(
   // 與檢討頁會照樣把它們畫出來，而計分早就不看它們了。
   if (family !== 'CHOICE' && before.options.length > 0 && changed.has('type')) {
     newOptions = [];
-    note('options', before.options, []);
+    note('options', before.options.map(textOnly), []);
     if (before.answerKeys.length) {
       data.answerKeys = [];
       note('answerKeys', before.answerKeys, []);
@@ -610,12 +619,24 @@ export async function updateQuestion(
       // 更糟——那個數字看起來完全正常。
       await tx.questionOption.deleteMany({ where: { questionId } });
       if (newOptions.length) {
+        // **選項的附圖要一起搬過來。** 先刪再建的寫法會連 `assets`
+        // 一起刪掉，而編輯畫面根本沒有那一欄——老師只是改了一個錯字，
+        // 物理題四個選項的力圖就全部消失了，畫面上完全看不出來。
+        //
+        // 歸屬照**新的內容**重算（`partitionAssets` 看的是文字裡的
+        // `![[a:o1]]`），不是照索引對回去：老師把某一張圖的標記從
+        // (A) 剪到 (B) 時，圖要跟著標記走。索引對映在那一種情況下
+        // 會把圖留在 (A)，而那正是「看起來對、其實錯」的那一類。
+        const media = partitionAssets({ assets: assetPool(before), options: newOptions });
         await tx.questionOption.createMany({
-          data: newOptions.map((o) => ({
+          data: newOptions.map((o, i) => ({
             questionId,
             order: o.order,
             label: o.label,
             content: o.content,
+            assets: (media.optionAssets[i]?.assets.length
+              ? media.optionAssets[i].assets
+              : undefined) as Prisma.InputJsonValue | undefined,
           })),
         });
       }
@@ -669,6 +690,36 @@ export async function updateQuestion(
   };
 }
 
+/**
+ * 這一題現在手上有哪些附圖，收成一包。
+ *
+ * 選項的圖與題幹的圖都放進來，是因為同一張圖可以同時被題幹與某個
+ * 選項引用（`![[a:fig1]]` 寫在兩處）——只收選項那一份的話，重算歸屬時
+ * 那個標記會變成「對不到圖」，而學生會在選項裡看到一行紅字。
+ */
+function assetPool(before: {
+  contentAssets: Prisma.JsonValue | null;
+  options: { assets: Prisma.JsonValue | null }[];
+}): unknown[] {
+  const out: unknown[] = [];
+  const seen = new Set<string>();
+  const take = (raw: Prisma.JsonValue | null) => {
+    if (!Array.isArray(raw)) return;
+    for (const a of raw) {
+      if (!a || typeof a !== 'object') continue;
+      const id = (a as { id?: unknown }).id;
+      if (typeof id === 'string' && id) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+      }
+      out.push(a);
+    }
+  };
+  for (const o of before.options) take(o.assets);
+  take(before.contentAssets);
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 發布與下架
 // ─────────────────────────────────────────────────────────────
@@ -678,6 +729,11 @@ export type StatusResult = {
   from: string;
   to: string;
   blocking: RetireBlocker[];
+  /**
+   * 發布放行了，但這一題有幾件事會少一塊（沒標知識點、配分是 0、
+   * 沒有解析）。**不擋，但要說**——理由見 `checkPublish` 的說明。
+   */
+  warnings: PublishIssue[];
 };
 
 /**
@@ -705,10 +761,55 @@ export async function setQuestionStatus(
   const tenantId = requireTenant();
   const q = await prisma.question.findFirst({
     where: { id: questionId },
-    select: { id: true, status: true, content: true },
+    select: {
+      id: true,
+      status: true,
+      content: true,
+      // 以下這些只有發布前檢查用得到。多讀一次是划算的：少了它們，
+      // 「這一題能不能拿去考學生」就只能靠老師記得去看。
+      type: true,
+      score: true,
+      answerKeys: true,
+      answerSlots: true,
+      answerText: true,
+      contentAssets: true,
+      options: {
+        select: { order: true, label: true, content: true, assets: true },
+        orderBy: { order: 'asc' },
+      },
+      group: { select: { stimulus: true, stimulusAssets: true } },
+      _count: { select: { knowledgePoints: true } },
+      explanations: { where: { takedownAt: null }, select: { id: true } },
+    },
   });
   if (!q) throw new QuestionError('找不到這一題。', 404);
-  if (q.status === to) return { questionId, from: q.status, to, blocking: [] };
+  if (q.status === to) return { questionId, from: q.status, to, blocking: [], warnings: [] };
+
+  // 發布前檢查。**與下架是對稱的**：兩邊都有前置條件、兩邊都說得出
+  // 擋在哪一條。在這之前只有下架有，而發布才是把壞題目送到學生面前的
+  // 那一側（見 `checkPublish` 的說明）。
+  let warnings: PublishIssue[] = [];
+  if (to === 'PUBLISHED') {
+    const allowed = checkPublish({
+      type: q.type,
+      content: q.content,
+      score: q.score,
+      answerKeys: q.answerKeys,
+      // 原樣傳，不先過 `slotStrings`：那一支把物件形狀攤平成陣列，
+      // 而 `checkPublish` 要判的是「計分程式會不會覺得這是空的」，
+      // 判斷對象必須是資料庫裡真正的那一包。
+      answerSlots: q.answerSlots,
+      answerText: q.answerText,
+      options: q.options,
+      assets: q.contentAssets,
+      stimulus: q.group?.stimulus ?? null,
+      stimulusAssets: q.group?.stimulusAssets ?? null,
+      knowledgePointCount: q._count.knowledgePoints,
+      explanationCount: q.explanations.length,
+    });
+    warnings = allowed.warnings;
+    if (!allowed.ok) throw new QuestionError(allowed.error!);
+  }
 
   let blocking: RetireBlocker[] = [];
   if (to === 'RETIRED') {
@@ -751,7 +852,7 @@ export async function setQuestionStatus(
     });
   });
 
-  return { questionId, from: q.status, to, blocking };
+  return { questionId, from: q.status, to, blocking, warnings };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1086,6 +1187,11 @@ function slotStrings(raw: Prisma.JsonValue | null): string[] | null {
 
 function sameKeys(a: number[], b: number[]): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/** 稽核用的選項形狀：只留文字，不留附圖那一包 bbox 與物件鍵。 */
+function textOnly(o: { order: number; label: string; content: string }) {
+  return { order: o.order, label: o.label, content: o.content };
 }
 
 function sameOptions(

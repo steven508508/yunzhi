@@ -19,7 +19,7 @@
  *    帶著 questionId，重跑時跳過，不會產生重複題目。
  */
 import { prisma } from '@/lib/prisma';
-import { normalizeAssets, normalizeOptions } from '@/lib/questionShape.mjs';
+import { normalizeAssets, normalizeOptions, partitionAssets } from '@/lib/questionShape.mjs';
 import type { Prisma } from '@prisma/client';
 
 /** 允許原文收錄解析的權利基礎。其餘一律走 AI 改寫。 */
@@ -170,6 +170,50 @@ export async function commitJob(
         continue;
       }
 
+      // 附圖的歸屬。**一定要在建題目之前算**，因為它同時決定三件事：
+      // 題組素材的圖、題幹的圖、以及每一個選項自己的圖。
+      const media = partitionAssets({
+        assets: c.assets,
+        stimulus: c.stimulus,
+        content: c.content,
+        options,
+      });
+
+      // 標記指向一張不存在的圖 → 不入庫。
+      //
+      // 這一題入庫之後，學生會在題幹（或某個選項）中間看到一行
+      // 「〔這裡有一張附圖，但系統找不到它〕」，而題目寫著「如右圖」。
+      // 地理與公民的圖表題最常中招：模型把表格標成 `kind=TABLE` 卻
+      // 沒有 bbox，裁圖那一步就 `continue` 過去了（routes_import.py）。
+      //
+      // **在這裡擋，而不是入庫後再說。** 另一個看起來也合理的選項是
+      // 照樣入庫、把它標成 qualityFlags 讓老師事後處理——不選它是因為
+      // 「事後」在這套流程裡不存在：題目一進題庫就組得進卷子，而組卷
+      // 的人不會逐題打開來看有沒有紅字。校對頁那邊有同一份判斷
+      // （`partitionAssets` 的 missing），所以老師在按下入庫之前就看得到。
+      if (media.missing.length) {
+        const where = [...new Set(media.missing.map((m) => m.where))].join('、');
+        const ids = media.missing.map((m) => m.id).join('、');
+        await prisma.importCandidate.update({
+          where: { id: c.id },
+          data: {
+            state: 'FLAGGED',
+            reviewNote:
+              `${where}裡的 ![[a:${ids}]] 指向一張這份題本沒有裁出來的圖。` +
+              `入庫的話，學生會在那個位置看到一行「這裡有一張附圖，但系統找不到它」。` +
+              `請確認原稿上那張圖／表是什麼：表格可以直接用 | 甲 | 乙 | 的寫法打進題幹，` +
+              `圖則要重跑這一頁的判讀，或把用不到的標記刪掉。`,
+          },
+        });
+        result.skipped++;
+        result.errors.push({
+          candidateId: c.id,
+          label: c.label ?? c.questionNo ?? String(c.order),
+          message: `${where}引用的附圖 ${ids} 不存在，入庫後學生會看到一個空位`,
+        });
+        continue;
+      }
+
       if (dropped.length) {
         // 答案指向一個入庫後不存在的選項。多半是掃描漏抓了一個選項。
         // **不猜、不硬塞、不靜默丟掉**：留在待校對，把原因寫給老師。
@@ -195,7 +239,7 @@ export async function commitJob(
 
       await prisma.$transaction(async (tx) => {
         const groupId = c.groupKey
-          ? await ensureGroup(tx, job, c, groupIds)
+          ? await ensureGroup(tx, job, c, groupIds, media.stimulusAssets)
           : null;
 
         const question = await tx.question.create({
@@ -212,7 +256,14 @@ export async function commitJob(
             content: c.content ?? '',
             // 附圖跟著題目走。幾何題沒有圖就是不能用的題目，
             // 所以它與題幹一樣要在入庫時搬過去。
-            contentAssets: normalizeAssets(c.assets) as Prisma.InputJsonValue | undefined,
+            //
+            // **只放題幹要的那幾張**（含沒有標記、由渲染端排在題幹
+            // 後面的那些）。選項的圖搬到選項上，題組的圖搬到題組上——
+            // 全部塞在這裡的話，物理題那四張力圖會一起堆到題幹後面，
+            // 而四個選項各印一行「找不到這張圖」。
+            contentAssets: normalizeAssets(media.contentAssets) as
+              | Prisma.InputJsonValue
+              | undefined,
             score: c.score ?? 0,
             // 已依重新編號後的選項序號對映過（見 normalizeOptions）
             answerKeys,
@@ -255,11 +306,23 @@ export async function commitJob(
 
         if (options.length) {
           await tx.questionOption.createMany({
-            data: options.map((o) => ({
+            data: options.map((o, i) => ({
               questionId: question.id,
               order: o.order,
               label: o.label,
               content: o.content,
+              // **選項自己的附圖。** 物理的「下列何者為合力」四個選項
+              // 就是四張力圖，AI 把 `![[a:o1]]…![[a:o4]]` 寫進選項內容
+              // （見 apps/ai/pipeline/prompts.py 的標記約定）。這一欄
+              // 之前沒有任何一條路寫過，而 take／result／preview／
+              // 卷子預覽四個畫面都在讀它——結果是四個選項各印一行
+              // 「這裡有一張附圖，但系統找不到它」，那一題不可能作答。
+              //
+              // `media.optionAssets` 與 `options` 是同一次 map 出來的，
+              // 索引對得起來（見 partitionAssets）。
+              assets: normalizeAssets(media.optionAssets[i]?.assets) as
+                | Prisma.InputJsonValue
+                | undefined,
             })),
           });
         }
@@ -408,6 +471,16 @@ async function ensureGroup(
   job: { id: string; tenantId: string; subjectId: string },
   c: CandidateRow,
   cache: Map<string, string>,
+  /**
+   * 題組素材自己的附圖。圖表題、實驗題、閱讀測驗的圖掛在共用素材上，
+   * 不在任何一個子題的題幹裡——`apps/ai/pipeline/canonical.py` 的
+   * `group_assets` 就是為了它才存在。
+   *
+   * **這一欄在這行之前全 repo 沒有任何一處寫過**（欄位建好了、五個
+   * 讀取端也建好了，就是沒有人寫）。症狀是一份圖表題的卷子上，
+   * 「根據上表回答」的那個「上表」永遠是空的。
+   */
+  stimulusAssets: unknown[],
 ): Promise<string> {
   const key = c.groupKey!;
   const cached = cache.get(key);
@@ -420,6 +493,7 @@ async function ensureGroup(
       tenantId: job.tenantId,
       subjectId: job.subjectId,
       stimulus: c.stimulus ?? '',
+      stimulusAssets: normalizeAssets(stimulusAssets) as Prisma.InputJsonValue | undefined,
       label: key,
       sourceImportJobId: job.id,
       sourceGroupKey: key,

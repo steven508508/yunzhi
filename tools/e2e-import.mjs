@@ -1027,6 +1027,110 @@ async function mainScoped(fixture) {
     assert.equal(answer.content, '丁', '答案指到了別的選項');
   });
 
+  await test('選項與題組的附圖真的寫進資料庫', async () => {
+    // **在這之前 `question_options.assets` 與 `question_groups.stimulus_assets`
+    // 沒有任何一條路寫過**，而 take／result／卷子預覽／題目內頁／
+    // /api/assets 五個地方都在讀它。症狀是物理題四個選項各印一行
+    // 「這裡有一張附圖，但系統找不到它」，而那四張圖被堆到題幹後面
+    // ——四張沒有標號的圖配四個沒有圖的選項，那一題不可能作答。
+    //
+    // 沒有任何錯誤訊息：入庫回報成功、每一欄都有值。
+    const j7 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '力圖選項與圖表題組', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id, stageDetail: { stages: {} },
+      },
+    });
+    const asset = (id) => ({
+      id, key: `e2e/${id}.png`, page: 1, bbox: null,
+      alt: `${id} 的替代文字`, caption: '', labels: [],
+      width: 120, height: 90, kind: 'FIGURE',
+    });
+    await prisma.importCandidate.create({
+      data: {
+        jobId: j7.id, order: 1, type: 'SINGLE_CHOICE',
+        groupKey: 'g1',
+        stimulus: '下表為各都市死亡人數：![[a:tbl]]',
+        content: '根據上表，下列何者為合力？',
+        options: [
+          { order: 1, label: '(1)', content: '![[a:o1]]' },
+          { order: 2, label: '(2)', content: '![[a:o2]]' },
+        ],
+        answerKeys: [1],
+        assets: [asset('tbl'), asset('o1'), asset('o2')],
+        state: 'CONFIRMED', reviewedBy: teacher.id, reviewedAt: new Date(),
+      },
+    });
+
+    const r = await commitJob(prisma, j7.id, tenant.id, teacher.id);
+    assert.equal(r.committed, 1, `應該入庫一題：${JSON.stringify(r.errors)}`);
+
+    const q = await prisma.question.findFirst({ where: { sourceImportJobId: j7.id } });
+    const opts = await prisma.questionOption.findMany({ where: { questionId: q.id } });
+    const byOrder = new Map(opts.map((o) => [o.order, o]));
+    assert.deepEqual(
+      byOrder.get(1)?.assets?.map((a) => a.id),
+      ['o1'],
+      '選項 (1) 的附圖沒有寫進 question_options.assets',
+    );
+    assert.deepEqual(byOrder.get(2)?.assets?.map((a) => a.id), ['o2']);
+
+    // 選項的圖**不可以**同時留在題幹上：留著的話 MathText 會把它們
+    // 一起排在題幹後面（`rest`），變成重複兩次的圖。
+    assert.deepEqual(
+      (q.contentAssets ?? []).map((a) => a.id), [],
+      '選項的圖不該同時掛在題幹上',
+    );
+
+    const g = await prisma.questionGroup.findFirst({ where: { sourceImportJobId: j7.id } });
+    assert.ok(g, '題組沒有建出來');
+    assert.deepEqual(
+      (g.stimulusAssets ?? []).map((a) => a.id),
+      ['tbl'],
+      '題組共用的圖沒有寫進 question_groups.stimulus_assets',
+    );
+  });
+
+  await test('標記指向一張不存在的圖時，這一題不入庫', async () => {
+    // 表格沒有 bbox 就裁不出影像（routes_import.py 會 continue），
+    // 而題幹裡的 ![[a:t1]] 原封不動。照樣入庫的話學生看到的是
+    // 「這裡有一張附圖，但系統找不到它」——**安靜地丟掉是唯一
+    // 不可接受的結局**，所以擋在這裡並把原因寫給老師。
+    const j8 = await prisma.importJob.create({
+      data: {
+        tenantId: tenant.id, createdBy: teacher.id, subjectId: subject.id,
+        title: '沒裁出來的圖表', sourceType: 'TEACHER_ORIGINAL',
+        licenseScope: 'TENANT_EXPORTABLE', rightsBasis: 'OWNED',
+        rightsDeclaredBy: teacher.id, stageDetail: { stages: {} },
+      },
+    });
+    const c8 = await prisma.importCandidate.create({
+      data: {
+        jobId: j8.id, order: 1, type: 'SINGLE_CHOICE',
+        content: '根據 ![[a:t1]]，下列何者正確？',
+        options: [
+          { order: 1, label: '(1)', content: '甲' },
+          { order: 2, label: '(2)', content: '乙' },
+        ],
+        answerKeys: [1],
+        assets: null,
+        state: 'CONFIRMED', reviewedBy: teacher.id, reviewedAt: new Date(),
+      },
+    });
+
+    const r = await commitJob(prisma, j8.id, tenant.id, teacher.id);
+    assert.equal(r.committed, 0, '引用了不存在的圖的題目不該入庫');
+    assert.equal(r.skipped, 1);
+    const after = await prisma.importCandidate.findFirst({ where: { id: c8.id } });
+    assert.equal(after.state, 'FLAGGED');
+    assert.ok(
+      after.reviewNote?.includes('t1'),
+      `校對者要知道是哪一個標記對不上：${after.reviewNote}`,
+    );
+  });
+
   await test('原文收錄的詳解不可以標成公開', async () => {
     // 一份標成「歷屆試題／PUBLIC」的講義夾帶出版社教用版詳解。
     // 試題依著作權法第 9 條不受保護，**詳解受保護**。

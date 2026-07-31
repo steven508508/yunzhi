@@ -15,6 +15,17 @@
  * 下架**不會**把題目從已經考過的卷子上拿掉，也不動任何一份成績。
  * 這一句要寫在確認視窗裡：老師按下「下架」時想的往往是
  * 「把這題從考試裡拿掉」，而那是另一件事（去卷子上移除）。
+ *
+ * # 為什麼兩側的前置條件要長得一樣
+ *
+ * 下架被擋時老師看得到完整原因（被哪幾份卷子用著、怎麼辦），而發布
+ * 在這之前**一個條件都沒有**：一題沒有標準答案的單選題按一下就發布，
+ * 被組進卷子，全班考完掛在「需人工確認」。伺服器端現在會擋
+ * （`lib/questionEdit.mjs` 的 `checkPublish`），但只有伺服器擋是不夠的
+ * ——那會變成「按下去才知道」。這裡把同一份判斷先畫出來。
+ *
+ * 擋（blocking）與提醒（warnings）在畫面上要看得出不同：
+ * 前者讓按鈕按不下去，後者只是把話說完。分法的理由寫在 `checkPublish`。
  */
 'use client';
 
@@ -38,11 +49,17 @@ export default function StatusControl({
   questionId,
   status,
   usedBy,
+  publishBlocking = [],
+  publishWarnings = [],
 }: {
   questionId: string;
   status: string;
   /** 還在用的卷子與任務。下架的確認視窗要說得出被誰用著。 */
   usedBy: { title: string; why: string }[];
+  /** 現在發布會被伺服器擋下來的理由。有值就不給按。 */
+  publishBlocking?: { code: string; detail: string }[];
+  /** 發布得了，但有幾件事會少一塊。不擋，但要說。 */
+  publishWarnings?: { code: string; detail: string }[];
 }) {
   const router = useRouter();
   const { busy, error, clearError, run } = useAction();
@@ -64,9 +81,40 @@ export default function StatusControl({
       {error && <Note tone="error">{error}</Note>}
       <p className="yz-qstatus__now">{STATUS_NOTE[status] ?? status}</p>
 
+      {/* 發布的前置條件。**畫在按鈕上面**，不是按下去才說：
+          老師看到一顆按了必定失敗的按鈕，會以為系統壞了，而他要的
+          資訊（缺什麼、去哪裡補）就在這幾行。 */}
+      {status !== 'PUBLISHED' && publishBlocking.length > 0 && (
+        <Note tone="error">
+          <strong>這一題現在不能發布</strong>——發布之後它就會被組進卷子拿去考學生：
+          <ul style={{ margin: '6px 0 0 18px' }}>
+            {publishBlocking.map((b) => (
+              <li key={b.code}>{b.detail}</li>
+            ))}
+          </ul>
+        </Note>
+      )}
+      {status !== 'PUBLISHED' && publishBlocking.length === 0 && publishWarnings.length > 0 && (
+        <Note tone="warn">
+          發布得了，但這幾件事會少一塊：
+          <ul style={{ margin: '6px 0 0 18px' }}>
+            {publishWarnings.map((w) => (
+              <li key={w.code}>{w.detail}</li>
+            ))}
+          </ul>
+        </Note>
+      )}
+
       <div className="yz-actions">
         {status !== 'PUBLISHED' && (
-          <Button variant="primary" busy={busy} onClick={() => void change('PUBLISHED')}>
+          <Button
+            variant="primary"
+            busy={busy}
+            // 現在發布一定會被伺服器擋下來時，連按都不給按——與下架的
+            // `confirmDisabled` 同一條規則。
+            disabled={publishBlocking.length > 0}
+            onClick={() => void change('PUBLISHED')}
+          >
             {status === 'RETIRED' ? '重新啟用' : '發布'}
           </Button>
         )}

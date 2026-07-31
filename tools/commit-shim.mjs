@@ -16,8 +16,14 @@
  *   · `normalizeAssets` —— 附圖搬進題庫。少一個欄位的話，圖在校對介面
  *     上看起來好好的，入庫之後卻對不回題幹裡的 `![[a:fig1]]`——
  *     而這裡是整條路上唯一驗得到那件事的地方。
+ *   · `partitionAssets` —— 一張圖該寫進題組、題幹還是某個選項。分錯的
+ *     症狀是四個選項各印一行「找不到這張圖」，而四張圖堆在題幹後面。
  */
-import { normalizeAssets, normalizeOptions } from '../apps/web/lib/questionShape.mjs';
+import {
+  normalizeAssets,
+  normalizeOptions,
+  partitionAssets,
+} from '../apps/web/lib/questionShape.mjs';
 
 const VERBATIM_OK = new Set(['OWNED', 'LICENSED', 'OFFICIAL_PUBLIC']);
 
@@ -98,6 +104,39 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
         continue;
       }
 
+      // 與 lib/commit.ts 同步：附圖的歸屬要在建題目之前算出來。
+      const media = partitionAssets({
+        assets: c.assets,
+        stimulus: c.stimulus,
+        content: c.content,
+        options,
+      });
+
+      // 標記指向一張不存在的圖 → 不入庫。學生會在那個位置看到
+      // 一行「這裡有一張附圖，但系統找不到它」。
+      if (media.missing.length) {
+        const where = [...new Set(media.missing.map((m) => m.where))].join('、');
+        const ids = media.missing.map((m) => m.id).join('、');
+        await prisma.importCandidate.update({
+          where: { id: c.id },
+          data: {
+            state: 'FLAGGED',
+            reviewNote:
+              `${where}裡的 ![[a:${ids}]] 指向一張這份題本沒有裁出來的圖。` +
+              `入庫的話，學生會在那個位置看到一行「這裡有一張附圖，但系統找不到它」。` +
+              `請確認原稿上那張圖／表是什麼：表格可以直接用 | 甲 | 乙 | 的寫法打進題幹，` +
+              `圖則要重跑這一頁的判讀，或把用不到的標記刪掉。`,
+          },
+        });
+        result.skipped++;
+        result.errors.push({
+          candidateId: c.id,
+          label: c.label ?? c.questionNo ?? String(c.order),
+          message: `${where}引用的附圖 ${ids} 不存在，入庫後學生會看到一個空位`,
+        });
+        continue;
+      }
+
       let groupId = null;
       if (c.groupKey) {
         groupId = groupIds.get(c.groupKey) ?? null;
@@ -106,6 +145,9 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
             data: {
               tenantId, subjectId: job.subjectId,
               stimulus: c.stimulus ?? '', label: c.groupKey,
+              // 題組共用的圖（圖表題、實驗題）。掛在素材上，不在
+              // 任何一個子題的題幹裡——見 lib/commit.ts 的 ensureGroup。
+              stimulusAssets: normalizeAssets(media.stimulusAssets) ?? null,
               sourceImportJobId: jobId, sourceGroupKey: c.groupKey,
             },
           });
@@ -123,7 +165,8 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
           content: c.content ?? '',
           // 附圖跟著題目走。幾何題沒有圖就是不能用的題目，所以它與
           // 題幹一樣要在入庫時搬過去（與 lib/commit.ts 同一支函式）。
-          contentAssets: normalizeAssets(c.assets) ?? null,
+          // 只放題幹要的那幾張：選項的圖搬到選項上、題組的圖搬到題組上。
+          contentAssets: normalizeAssets(media.contentAssets) ?? null,
           score: c.score ?? 0,
           answerKeys,
           answerSlots: c.answerSlots ?? null,
@@ -146,11 +189,13 @@ export async function commitJob(prisma, jobId, tenantId, userId) {
 
       if (options.length) {
         await prisma.questionOption.createMany({
-          data: options.map((o) => ({
+          data: options.map((o, i) => ({
             questionId: question.id,
             order: o.order,
             label: o.label,
             content: o.content,
+            // 選項自己的附圖（物理的四張力圖）。與 lib/commit.ts 同步。
+            assets: normalizeAssets(media.optionAssets[i]?.assets) ?? null,
           })),
         });
       }

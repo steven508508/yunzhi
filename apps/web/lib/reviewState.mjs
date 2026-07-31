@@ -231,7 +231,19 @@ export function optionIssues(options, answerKeys, type) {
   }
 
   if (CHOICE_TYPES.includes(type) && !(answerKeys ?? []).length) {
-    out.push({ code: 'no_answer', detail: '這一題還沒有設定答案，入庫後學生一律會被判錯。' });
+    // **這裡曾經寫「入庫後學生一律會被判錯」，而那是假的。**
+    // `lib/grading.mjs` 的 `gradeSingleChoice` 對空的 correctKeys 回的是
+    // `review('這一題沒有標準答案')`——不判錯，掛在需人工確認。方向是
+    // 安全的（沒有人被誤判），但老師是照著這句話決定「這一題現在要不要
+    // 花時間補答案」的：以為會被判錯就會停下來補；知道只是「之後要一份
+    // 一份看」，就分不出這其實是全班 40 份的工作。說得比實際嚴重，
+    // 下一次他就不信這一欄了。
+    out.push({
+      code: 'no_answer',
+      detail:
+        '這一題還沒有設定答案。入庫後學生不會被判錯，' +
+        '但每一份作答都會掛在「需人工確認」，要老師一份一份看。',
+    });
   }
 
   return out;

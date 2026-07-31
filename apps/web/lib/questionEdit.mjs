@@ -30,7 +30,7 @@
  * 旗標存在 `Question.scoringRule.awardAll`，`lib/grading.mjs` 每次計分
  * 都會讀它，所以重算幾次結果都一樣。見 `readAward`。
  */
-import { normalizeOptions } from './questionShape.mjs';
+import { missingAssetRefs, normalizeOptions } from './questionShape.mjs';
 
 /**
  * 型別走 JSDoc，不另外寫一份 `.d.ts`（`lib/release.mjs` 也是這樣）。
@@ -67,6 +67,10 @@ import { normalizeOptions } from './questionShape.mjs';
  * @property {string} id
  * @property {string} title
  * @property {string} why
+ *
+ * @typedef {object} PublishIssue
+ * @property {string} code
+ * @property {string} detail
  *
  * @typedef {object} Award
  * @property {string|null} at
@@ -299,6 +303,210 @@ export const GRADING_FIELDS = [
 export function bumpsVersion(changed) {
   const set = changed instanceof Set ? changed : new Set(changed ?? []);
   return GRADING_FIELDS.some((f) => set.has(f));
+}
+
+// ─────────────────────────────────────────────────────────────
+// 發布
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * `lib/grading.mjs` 認得的題型。不在裡面的一律走
+ * `review('不認得的題型…')`——每一份作答都掛在需人工確認。
+ */
+const GRADABLE_TYPES = new Set(Object.keys(TYPE_LABELS));
+
+/**
+ * 沒有標準答案是**正常**的題型。作文、翻譯、簡答本來就是人工或 AI 閱卷
+ * （`lib/grading.mjs` 的 `MANUAL_TYPES`），拿「沒填標準答案」擋住它們
+ * 等於這三種題型永遠發布不了。
+ */
+const OPEN_ENDED_TYPES = new Set(['ESSAY', 'TRANSLATION', 'SHORT_ANSWER']);
+
+/**
+ * 這一題現在發布得了嗎。
+ *
+ * # 為什麼發布需要前置條件，而下架早就有了
+ *
+ * 因為兩邊擋的是同一件事的兩端，而只有一端被實作了。下架擋的是
+ * 「別讓還在考的卷子被抽掉題目」；發布擋的是**「別讓壞掉的題目進到
+ * 考卷上」**——而後者的代價大得多：一題沒有標準答案的單選題可以
+ * 入庫 → 發布 → 組進卷子 → 全班考完，四十份成績掛在「需人工確認」，
+ * 而老師是在成績出不來的那一天才發現的。
+ *
+ * 在這之前 `setQuestionStatus` 只在 `to === 'RETIRED'` 時檢查，
+ * `PUBLISHED` 一路直達；畫面上那顆按鈕也是無條件畫出來的。
+ *
+ * # BLOCK 與 WARN 怎麼分
+ *
+ * **只有一條線：這一題現在拿去考學生，會不會產生「沒有人看得出來
+ * 的錯誤結果」。** 會的就擋，不會的就提醒。
+ *
+ * 擋（BLOCK）——學生的作答會得到錯的或算不出來的結果：
+ *   · 題幹是空的：學生看到一片空白，而卷子上有這一題的分數
+ *   · 題型不認得：`gradeByType` 落到 `review('不認得的題型')`
+ *   · 選擇題沒有選項、或只有一個：這不是一道題目
+ *   · 選擇題沒有標準答案／答案指到不存在的選項／單選卻有多個答案：
+ *     三種都讓 `gradeSingleChoice` 回 `review`，全班掛在需人工確認
+ *   · 選填、填空沒有標準答案：同上
+ *   · 內容引用的附圖對不到：學生看到「這裡有一張附圖，但系統找不到它」，
+ *     而題目寫著「如右圖」——那一題根本無法作答
+ *
+ * 提醒（WARN）——題目本身是好的，只是某些功能會少一塊：
+ *   · **沒有知識點**：能力分析算不到這一題（學生的雷達圖上少一格），
+ *     但作答與計分完全正常。擋住它等於「老師想出一份考卷，得先把
+ *     知識點樹整理完」——那會把人推去繞過這個流程，而不是去標知識點。
+ *   · **配分是 0**：組卷時會自動變成 1 分
+ *     （`lib/paper.ts`：`question.score > 0 ? question.score : 1`），
+ *     所以不會出現「答對了得 0 分」。它只代表原稿的配分沒抽到，
+ *     老師在組卷時本來就會逐題設定。
+ *   · **沒有詳解**：學生檢討時看不到解析。解析可以事後補，而且權利
+ *     基礎未確認時本來就刻意不建（見 lib/commit.ts）——拿它擋發布
+ *     等於把著作權的保守作法變成一道功能障礙。
+ *
+ * @param {{type?: string, content?: string|null, score?: number|null,
+ *          answerKeys?: number[], answerSlots?: unknown, answerText?: string|null,
+ *          options?: {order:number,label:string,content:string,assets?:unknown}[],
+ *          assets?: unknown, stimulus?: string|null, stimulusAssets?: unknown,
+ *          knowledgePointCount?: number, explanationCount?: number}} q
+ * @returns {{ok: boolean, blocking: PublishIssue[], warnings: PublishIssue[],
+ *            error: string|null}}
+ */
+export function checkPublish(q) {
+  const blocking = [];
+  const warnings = [];
+  const block = (code, detail) => blocking.push({ code, detail });
+  const warn = (code, detail) => warnings.push({ code, detail });
+
+  const type = String(q?.type ?? '');
+  const options = Array.isArray(q?.options) ? q.options : [];
+  const keys = Array.isArray(q?.answerKeys) ? q.answerKeys : [];
+
+  if (!String(q?.content ?? '').trim()) {
+    block('empty_content', '題幹是空的。學生會看到一題只有分數、沒有內容的題目。');
+  }
+
+  if (!GRADABLE_TYPES.has(type)) {
+    block(
+      'unknown_type',
+      `題型「${type || '（空白）'}」不在計分程式認得的清單裡，每一份作答都會掛在「需人工確認」。`,
+    );
+  } else if (typeFamily(type) === 'CHOICE') {
+    if (options.length < 2) {
+      block(
+        'too_few_options',
+        `這是「${TYPE_LABELS[type]}」題，但只有 ${options.length} 個選項。` +
+          `多半是掃描漏抓了——請先把選項補齊。`,
+      );
+    }
+    if (keys.length === 0) {
+      block(
+        'no_answer',
+        '這一題沒有標準答案。學生不會被判錯，但每一份作答都會掛在「需人工確認」，' +
+          '要老師一份一份看——一個班就是四十份。',
+      );
+    } else {
+      const orders = new Set(options.map((o) => Number(o?.order)));
+      const orphan = keys.filter((k) => !orders.has(Number(k)));
+      if (orphan.length) {
+        block(
+          'answer_orphan',
+          `標準答案 (${orphan.join(')(')}) 指到不存在的選項（本題共 ${options.length} 個）。` +
+            `這樣計分會判定「題目資料要先修正」，全班都拿不到分數。`,
+        );
+      }
+      if (type !== 'MULTI_CHOICE' && keys.length > 1) {
+        block(
+          'multi_answer_on_single',
+          `這是「${TYPE_LABELS[type]}」題卻有 ${keys.length} 個標準答案。` +
+            `計分會停下來要求人工確認。要複選請把題型改成多選。`,
+        );
+      }
+    }
+  } else if (type === 'FILL_SLOT') {
+    // `answerSlots` 是 Json，三種形狀都可能：`['1','2']`、
+    // `{'13':'1','14':'2'}`（格位編號當鍵）、`'12'`（單格）。
+    // 判斷方式要與 `lib/grading.mjs` 的 `slotList` 一致——那一支
+    // 認定「空的」的時候，這裡就必須擋，否則老師會發布一題計分
+    // 永遠停在需人工確認的選填題。
+    //
+    // 不直接 import 那一支：`grading.mjs` 已經 import 這個檔案的
+    // `readAward`，反向匯入會形成循環。
+    const raw = q?.answerSlots;
+    const slots =
+      raw === null || raw === undefined
+        ? []
+        : Array.isArray(raw)
+          ? raw
+          : typeof raw === 'object'
+            ? Object.values(raw)
+            : [raw];
+    if (!slots.some((s) => String(s ?? '').trim() !== '')) {
+      block('no_answer', '選填題還沒有填格位答案，每一份作答都會掛在「需人工確認」。');
+    }
+  } else if (type === 'FILL_TEXT') {
+    if (!String(q?.answerText ?? '').trim()) {
+      block('no_answer', '填空題還沒有標準答案，每一份作答都會掛在「需人工確認」。');
+    }
+  } else if (!OPEN_ENDED_TYPES.has(type)) {
+    // 這一支落到這裡代表 TYPE_LABELS 加了新題型而這個函式沒跟上。
+    // 靜默放行的話，新題型會繞過整組前置條件——寧可吵。
+    block('unchecked_type', `題型「${type}」還沒有對應的發布前檢查，請先回報。`);
+  }
+
+  // 附圖標記對不到圖。
+  //
+  // 逐欄檢查而不是用 `partitionAssets`：題庫裡的題目**已經分好欄位**了
+  // （題幹、每個選項、題組素材各存各的），沒有一個平的清單可以餵給它。
+  // 那一支是給匯入用的（那時候還沒分）。
+  //
+  // 為什麼題庫這一側也要檢查：老師在題目編輯頁可以自己打
+  // `![[a:fig1]]`，那條路沒有經過入庫的那道關。
+  const missing = [
+    ...missingAssetRefs(q?.stimulus, q?.stimulusAssets).map((id) => ({ id, where: '題組前導敘述' })),
+    ...missingAssetRefs(q?.content, q?.assets).map((id) => ({ id, where: '題幹' })),
+    ...options.flatMap((o) =>
+      missingAssetRefs(o?.content, o?.assets).map((id) => ({ id, where: `選項 (${o?.label})` })),
+    ),
+  ];
+  if (missing.length) {
+    const where = [...new Set(missing.map((m) => m.where))].join('、');
+    block(
+      'missing_asset',
+      `${where}裡的 ![[a:${missing.map((m) => m.id).join('、')}]] 對不到任何一張圖。` +
+        `學生會在那個位置看到一句「這裡有一張附圖，但系統找不到它」，而題目寫著「如圖」。`,
+    );
+  }
+
+  if (!(Number(q?.knowledgePointCount) > 0)) {
+    warn(
+      'no_knowledge_point',
+      '還沒有標知識點。這一題照樣考得了，但能力分析算不到它——' +
+        '學生答錯之後，雷達圖上不會有任何一個章節變弱。',
+    );
+  }
+  if (!(Number(q?.score) > 0)) {
+    warn(
+      'zero_score',
+      '預設配分是 0 分（原稿的配分沒有抽到）。組卷時若不另外指定，' +
+        '系統會給它 1 分——不會出現「答對了得 0 分」，但那多半不是你要的分數。',
+    );
+  }
+  if (!(Number(q?.explanationCount) > 0)) {
+    warn(
+      'no_explanation',
+      '還沒有解析。學生交卷後看得到對錯，但看不到為什麼。',
+    );
+  }
+
+  if (blocking.length === 0) return { ok: true, blocking, warnings, error: null };
+  return {
+    ok: false,
+    blocking,
+    warnings,
+    error:
+      `這一題還不能發布——發布之後它就會被組進卷子拿去考學生：\n` +
+      blocking.map((b) => `　·　${b.detail}`).join('\n'),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
