@@ -195,15 +195,33 @@ test('存新版本時分享名單要繼承，否則每存一次就等於撤回',
 // 四、不用於任何形式的統計分析
 // ═════════════════════════════════════════════════════════════════
 
+/**
+ * 可以被聚合的兩張表，以及為什麼它們不算「這一區的資料」。
+ *
+ * 規格書 §9.5 的「不用於任何形式的統計分析」講的是**學生的個人陳述
+ * 與生涯敘事**：`PortfolioEssay`、`PortfolioItem`、`AiDisclosureLog`、
+ * `AiDisclosureStatement`、`InterviewPractice`。對那五張表做 groupBy
+ * 或 count，就是在拿他寫的東西算平均——而那正是這條規定要禁的事。
+ *
+ * · `interviewQuestion` 數的是**題庫有幾題**（租戶層級的設定，
+ *   用來判斷要不要匯入內建範本），與任何一位學生無關。
+ * · `aiUsageLog` 是**token 與成本**，裡面沒有一個字是學生寫的
+ *   （欄位是 provider／model／tokens／refType）。這個模組原本一列都
+ *   沒有寫，於是它的花費完全不在 `doctor.sh` 與 `OPERATIONS.md` 的
+ *   帳上；補上之後，月度預算判定必須 sum 那張表——tutor、
+ *   admissionRef、gradingProposal、import-pipeline 四處都是這樣做的，
+ *   而它們的檔頭寫明了為什麼真相是這張表而不是 `AiBudgetCounter`。
+ *
+ * 這份白名單是逐張表列的，不是「跳過所有聚合」：多一張表要有人動手，
+ * 動手的時候會看到這段說明。
+ */
+const AGGREGATABLE = ['interviewQuestion', 'aiUsageLog'];
+
 test('沒有對這幾張表做過任何聚合', () => {
-  // 規格書 §9.5：「不用於任何形式的統計分析」。
-  // `interviewQuestion.count` 是例外而且不算——它數的是題庫有幾題
-  // （租戶層級的設定），不是任何一位學生的資料。
   const aggregates = [...portfolioDb.matchAll(/prisma\.(\w+)\.(groupBy|aggregate|count)\(/g)];
   for (const [, model, op] of aggregates) {
-    assert.equal(
-      model,
-      'interviewQuestion',
+    assert.ok(
+      AGGREGATABLE.includes(model),
       `對 ${model} 做了 ${op}，而這一區的資料不做統計分析`,
     );
   }

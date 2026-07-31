@@ -49,7 +49,7 @@
  * 門檻訂得高（四字組的重疊率 0.82），因為「高度不同」的反面不是
  * 「有點像」——潤飾過的句子與原句有一半重疊，而潤飾就是代寫的一種。
  *
- * # 第一人稱敘述怎麼認：靠「你」這個字
+ * # 代寫的敘述怎麼認：靠「你」這個字，而**不是**靠人稱
  *
  * 最麻煩的誤擋是這一種：
  *
@@ -67,6 +67,27 @@
  * 經驗讓我學會了合作。」），整句話就變成「回饋的聲音」被放過去。所以
  * `normalizeForPortfolio()` 會先把**含「你」的括號整段拿掉**——那句
  * 插入語不是敘述的一部分，拿掉之後它就回到原本的樣子。
+ *
+ * ## 人稱是最容易換掉的東西，所以切段的時候不看它
+ *
+ * 第一版把「連續的敘述」與「第一人稱」綁在一起，結果三條規則同時只認
+ * 我／本人／筆者，而**這三步都讀得通、每一步在字串上完全不同**：
+ *
+ *     我在高二加入機器人社…  →  該生自高二起投入機器人社…
+ *     →（拿掉主詞）高二那年的專題研究成為一個明確的轉折點…
+ *
+ * 換完之後那一段對學生一樣貼得進去——他只要把「該生」換回「我」。
+ * 所以 `narrativeRuns()` **只問「這一句有沒有在對學生說話」**，人稱
+ * 留給呼叫端當條件：§13 那條 40 字的規則問第一人稱，它的鏡像問
+ * 「該生」，自傳口吻那條問「有沒有指到學生」，可整段貼走那條完全不問。
+ *
+ * ## 句子的邊界也是這一層的防線，而且它漏掉的是**整篇**
+ *
+ * `sentences()` 原本的邊界裡沒有半形句點，於是一整篇英文散文是「一個
+ * 句子」——最後補上一句「Does this match what you remember?」就讓
+ * 「這一句是對學生說話」變成「這一篇是對學生說話」，整篇自述豁免。
+ * 中文只用逗號、句尾補一個問句也複製得出來。這與下面第二點那個
+ * 「子句層級」的取捨是兩回事：那一種漏掉一個子句，這一種漏掉一整篇。
  *
  * # 揭露聲明必須走另一條路，否則這個功能會把自己擋掉
  *
@@ -89,6 +110,21 @@
  * 兩組規則的入口是同一支 `checkPortfolioOutput(feature, ...)`，
  * 所以呼叫端不可能忘記分流；忘了傳 feature 的話走的是**嚴的那一組**。
  *
+ * ## 這一組要看的是「那句話說了什麼」，不是「那幾個字在不在」
+ *
+ * 這份文件會被貼進學習歷程給招生委員看，所以它的每一個字與每一個數字
+ * 都要對得回記錄，而兩個方向都會出事：
+ *
+ *   · 只比對關鍵詞在不在，於是「文字具體性的檢視**亦由本人反覆進行**」
+ *     被算成揭露過了——那句話講的正好相反，它遮住的正是那十次。
+ *   · 同一個毛病反過來：「**未**使用 AI 協助挑選素材」被判成「宣稱用了
+ *     沒用過的功能」，而那是一句誠實話。冤枉三次之後學生會轉去用別的
+ *     工具，那才是最壞的結果——他用了、系統沒記錄、聲明上寫著沒用過。
+ *
+ * 所以規則二、三走 `aiClauses()`：逐子句判肯否，沒有線索的子句沿用
+ * 前一句（一份把三類都列出來的正確聲明，中間那兩個子句裡一個 AI 都
+ * 沒有）。次數則由 `disclosedTotal` 管——見 `disclosureFacts()`。
+ *
  * # 這一層擋不住的三件事
  *
  * 一、**擋不住「用問句代寫」。** 「你是不是想說，那次失敗讓你第一次
@@ -101,6 +137,9 @@
  *     「你寫『我從社團中學到很多』」這種引用切碎、開始誤擋最有用的
  *     那一種回饋。**在這個交換上寧可漏這一種。** 它也不是模型自然會
  *     寫出來的東西——那樣的句子讀起來是壞的，而模型傾向寫得通順。
+ *
+ *     這個交換的範圍是**一個子句**。同樣的招數放大到一整句、一整段、
+ *     一整篇就不在交換裡了，那是句子邊界要擋的（見上面）。
  * 三、**它不判斷回饋寫得好不好。** 它只驗證那段話沒有辦法被直接貼進
  *     檔案，不驗證它有沒有幫助。
  * 四、**它不能保證重新生成之後就變好。** 所以重試有上限，用完就退回
@@ -220,16 +259,53 @@ export const QUOTE_THRESHOLD = 0.82;
  * 這一點與一般的斷句需求不同：「你可以這樣寫：我從小就……」如果不在
  * 冒號斷開，整句話會因為含「你」而被當成回饋的聲音放過去，
  * 而冒號後面那一整段正是代寫。**框與被框的東西必須分開看。**
+ *
+ * # 半形句點也是邊界，而它漏掉的後果是**整篇層級**的
+ *
+ * 少了它，一整篇英文散文是「一個句子」——於是最後補上的一句
+ * 「Does this match what you remember?」把 `ADDRESSES_READER` 的意思
+ * 從「這一句是對學生說話」變成「這一篇是對學生說話」，整篇自述豁免。
+ * 檔頭第 97 行接受的是**子句層級**的那個交換（把「你」灑進每一個
+ * 子句），不是這一種。中文只用逗號、句尾補一個問句也複製得出來。
+ *
+ * **前面是數字的句點不算。** 「1. 我在高一參加了辯論社」的那個點是
+ * 條列的編號、「3.5MB」的那個點是小數點，切開它們會把一段連續的敘述
+ * 拆成幾段短的，然後那段代寫就掉到字數門檻底下——與漏掉句點方向相反、
+ * 後果一樣。
  */
-function sentences(text) {
+export function sentencesOf(text) {
   return String(text ?? '')
-    .split(/(?<=[。！？!?；;：:\n])|(?=[「『"“])/u)
+    .split(/(?<=[。！？!?；;：:\n])|(?<=[A-Za-z一-鿿)\]”’"'][.])(?=\s|$)|(?=[「『"“])/u)
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
+const sentences = sentencesOf;
+
 /** 第一人稱的標記。「本人」「筆者」是申請文件裡最常見的兩種變體。 */
 const FIRST_PERSON = /[我吾]|本人|筆者|敝人|\bI\b|\bmy\b|\bme\b/i;
+
+/**
+ * 第三人稱指名學生的說法。**「該生」是這一組的主角。**
+ *
+ * 把「我」換成「該生」是被第一人稱規則擋掉之後最省力的一步，而且
+ * 換完之後那一段對學生來說**一樣貼得進去**——他只要再把「該生」
+ * 換回「我」。三條規則同時只認第一人稱的話，這一步等於整組閘門失效。
+ *
+ * 這一組刻意只收**指名學生**的說法，不含裸的「他」：見 `THIRD_PERSON`。
+ */
+const EXPLICIT_STUDENT = /該(?:生|童)|該名?(?:學生|同學)|這[位名](?:學生|同學)|學生本人/;
+
+/**
+ * 泛指的第三人稱。**比 `EXPLICIT_STUDENT` 寬，所以用在比較嚴的條件下。**
+ *
+ * 裸的「他」在回饋裡有正當用途（「委員手上只有那份檔案，他讀到這裡
+ * 接不上前因後果」），所以它只在「這一段同時帶著時間與事件的落點」
+ * 這個條件下才算數（`NARRATIVE_VOICE`），不單獨構成長度違規。
+ *
+ * 「其他」要排除掉——它每一次出現都會被誤認成第三人稱。
+ */
+const THIRD_PERSON = new RegExp(`${EXPLICIT_STUDENT.source}|(?<![其])[他她]`);
 
 /**
  * 回饋的聲音：對學生說話。
@@ -248,35 +324,56 @@ const ADDRESSES_READER = /[你妳您]|\byou\b|\byour\b/i;
 const IS_QUESTION = /[？?]\s*$/;
 
 /**
- * 把輸出切成「連續的第一人稱敘述」的段落。
+ * 把輸出切成「不是在對學生說話」的連續段落。**不問人稱。**
  *
- * 規則：含第一人稱、不是問句、**且不含「你」**的句子會累積成一段；
- * 任何其他句子把段落切斷。切斷而不是跳過，理由見檔頭。
+ * 規則：不是問句、**且不含「你」**的句子會累積成一段；任何其他句子
+ * 把段落切斷。切斷而不是跳過，理由見檔頭。段落（換行）也切斷——
+ * 跨行累積會把制度檢查的三行條列串成一段，然後那一段開始湊得到字數。
+ *
+ * # 為什麼這一支不問人稱
+ *
+ * 因為人稱是**最容易換掉的東西**：「我」→「該生」→ 拿掉主詞，
+ * 三步都讀得通，而且每一步在字串上都完全不同。**共同的、換不掉的
+ * 特徵是「這一段沒有在對讀者說話」**——那是檔頭那一招的原話，
+ * 只是原本的實作把它與「第一人稱」綁在一起了。
+ *
+ * 人稱留給呼叫端當**條件**：規格書 §13 那條 40 字的規則問第一人稱，
+ * 自傳口吻那條問「有沒有指到學生」，可整段貼走那條完全不問。
+ *
+ * @returns {{text: string, chars: number, sentences: number}[]}
+ */
+export function narrativeRuns(text) {
+  const out = [];
+  for (const para of normalizeForPortfolio(text).split(/\n+/)) {
+    let buf = [];
+    const flush = () => {
+      if (buf.length === 0) return;
+      const joined = buf.join('');
+      out.push({ text: joined, chars: charLen(joined), sentences: buf.length });
+      buf = [];
+    };
+    for (const s of sentences(para)) {
+      if (IS_QUESTION.test(s) || ADDRESSES_READER.test(s)) {
+        flush();
+        continue;
+      }
+      buf.push(s);
+    }
+    flush();
+  }
+  return out;
+}
+
+/**
+ * 其中帶第一人稱的那幾段（規格書 §13 第一條要數的東西）。
  *
  * 匯出是給測試用的——切錯的症狀是某一類代寫永遠擋不到，而那在
  * 端到端測試裡看不出來。
  *
- * @returns {{text: string, chars: number}[]}
+ * @returns {{text: string, chars: number, sentences: number}[]}
  */
 export function firstPersonRuns(text) {
-  const out = [];
-  let buf = [];
-  const flush = () => {
-    if (buf.length === 0) return;
-    const joined = buf.join('');
-    out.push({ text: joined, chars: charLen(joined) });
-    buf = [];
-  };
-  for (const s of sentences(normalizeForPortfolio(text))) {
-    const first = FIRST_PERSON.test(s);
-    if (!first || IS_QUESTION.test(s) || ADDRESSES_READER.test(s)) {
-      flush();
-      continue;
-    }
-    buf.push(s);
-  }
-  flush();
-  return out;
+  return narrativeRuns(text).filter((r) => FIRST_PERSON.test(r.text));
 }
 
 /** 規格書 §13 明訂的字數門檻。 */
@@ -339,8 +436,23 @@ const APPLICATION_VOICE =
 const NARRATIVE_MARKER =
   /高[一二三123]|高中|國中|國小|[一二三]年級|從小|自小|那時|當時|那次|那年|那段|三年來|這三年|升上|學期|從那之後|第一次|一開始/;
 
-/** 帶敘事標記的第一人稱段落，超過這個長度就貼得進去。 */
+/**
+ * 帶敘事標記、而且指得出主角是學生的段落，超過這個長度就貼得進去。
+ *
+ * 「我」「本人」「該生」「他」都算指得出主角——**換人稱不改變那一段
+ * 是誰的故事**，而學生只要把「該生」換回「我」就可以貼。
+ */
 const NARRATIVE_MIN_CHARS = 20;
+
+/**
+ * 同樣帶敘事標記、但**一個主詞都沒有**的段落要多長才算貼得走。
+ *
+ * 40 而不是 20，與可整段貼走那條同一個數字：沒有主詞的時候，
+ * 「高二那年的課程有兩門是必修」這種制度說明與「高二那年的專題研究
+ * 成為一個明確的轉折點」在規則上分不開，而前者是這個功能該說的話。
+ * 拉到 40 字之後，分得開的是長度——制度說明講不到那麼長還不提到「你」。
+ */
+const NARRATIVE_MIN_CHARS_NO_SUBJECT = 40;
 
 /**
  * 「成段」的門檻：幾個**連續的**完整句子。
@@ -392,10 +504,12 @@ export function checkGhostwriting(output, facts = ghostwriteFacts(), opts = {}) 
   //
   // 引用學生自己寫的東西豁免，理由見檔頭。豁免的判定用重疊率而不是
   // 「有沒有被引號包住」——引號可以自己加，重疊率不行。
-  const runs = firstPersonRuns(text);
+  const runs = narrativeRuns(text);
+  const quoted = (run) => overlapWithOwn(run.text, facts) >= QUOTE_THRESHOLD;
   for (const run of runs) {
+    if (!FIRST_PERSON.test(run.text)) continue;
     if (run.chars <= FIRST_PERSON_MAX_CHARS) continue;
-    if (overlapWithOwn(run.text, facts) >= QUOTE_THRESHOLD) continue;
+    if (quoted(run)) continue;
     add(
       'FIRST_PERSON_RUN',
       'GHOST',
@@ -405,15 +519,43 @@ export function checkGhostwriting(output, facts = ghostwriteFacts(), opts = {}) 
     break;
   }
 
-  // ── 二、自傳的口吻（比 40 字那一條更早命中的短代寫）──────────
+  // ── 一之二、把「我」換成「該生」的同一段（§13 那條的鏡像）────
+  //
+  // **這是被上面那一條擋掉之後最省力的一步**，而且換完之後那一段對
+  // 學生來說一樣貼得進去——他只要再換回「我」。用同一個 40 字門檻，
+  // 理由與「拿掉主詞」那一條相同：不讓換一個詞變成一個過關的辦法。
+  //
+  // 只認指名學生的說法（該生／該名同學／這位學生），**不認裸的「他」**：
+  // 「委員手上只有那份檔案，他讀到這裡接不上前因後果」是回饋該說的話，
+  // 而它一樣可以寫到四十幾字。裸的「他」交給下一條（要同時帶時間落點）。
   for (const run of runs) {
-    if (run.chars < NARRATIVE_MIN_CHARS) continue;
+    if (!EXPLICIT_STUDENT.test(run.text)) continue;
+    if (run.chars <= FIRST_PERSON_MAX_CHARS) continue;
+    if (quoted(run)) continue;
+    add(
+      'THIRD_PERSON_RUN',
+      'GHOST',
+      `有一段 ${run.chars} 字的敘述用「${(run.text.match(EXPLICIT_STUDENT) ?? [''])[0]}」` +
+        `稱呼學生，而且在他自己的文字裡找不到：「${run.text.slice(0, 40)}…」。` +
+        '換一個人稱不改變那一段是誰的故事——他只要把它換回「我」就貼得進去。',
+    );
+    break;
+  }
+
+  // ── 二、自傳的口吻（比 40 字那一條更早命中的短代寫）──────────
+  //
+  // **這一條不問人稱**（見 `narrativeRuns` 的說明）：自傳的共同特徵是
+  // 時間與事件的落點，而人稱是三步就換掉的東西。分兩個門檻——指得出
+  // 主角是學生的 20 字，一個主詞都沒有的 40 字，理由見兩個常數。
+  for (const run of runs) {
+    const named = FIRST_PERSON.test(run.text) || THIRD_PERSON.test(run.text);
+    if (run.chars < (named ? NARRATIVE_MIN_CHARS : NARRATIVE_MIN_CHARS_NO_SUBJECT)) continue;
     if (!NARRATIVE_MARKER.test(run.text)) continue;
-    if (overlapWithOwn(run.text, facts) >= QUOTE_THRESHOLD) continue;
+    if (quoted(run)) continue;
     add(
       'NARRATIVE_VOICE',
       'GHOST',
-      `有一段 ${run.chars} 字的第一人稱敘述，帶著時間與事件的落點（「${
+      `有一段 ${run.chars} 字的敘述帶著時間與事件的落點（「${
         (run.text.match(NARRATIVE_MARKER) ?? [''])[0]
       }」），而且在學生的文字裡找不到：「${run.text.slice(0, 40)}…」。` +
         '這是自傳的口吻，不是回饋的口吻。',
@@ -446,31 +588,17 @@ export function checkGhostwriting(output, facts = ghostwriteFacts(), opts = {}) 
   //
   // 「成段的完整句子且與學生原文高度不同」。第一人稱不是必要條件——
   // 用「本人」「筆者」寫、或者根本不用主詞的段落一樣貼得進去。
-  outer: for (const para of text.split(/\n{1,}/)) {
-    /** @type {string[]} */
-    let chain = [];
-    const settle = () => {
-      const chunk = chain.join('');
-      chain = [];
-      if (charLen(chunk) < PASTEABLE_MIN_CHARS) return false;
-      if (overlapWithOwn(chunk, facts) >= QUOTE_THRESHOLD) return false;
-      add(
-        'PASTEABLE',
-        'GHOST',
-        `有一段 ${charLen(chunk)} 字的連續陳述，既沒有對學生說話也不是提問，` +
-          `而且與他的原文對不上：「${chunk.slice(0, 40)}…」。這一段可以被整段貼走。`,
-      );
-      return true;
-    };
-    for (const s of sentences(para)) {
-      if (IS_QUESTION.test(s) || ADDRESSES_READER.test(s)) {
-        if (chain.length >= PASTEABLE_MIN_SENTENCES && settle()) break outer;
-        chain = [];
-        continue;
-      }
-      chain.push(s);
-    }
-    if (chain.length >= PASTEABLE_MIN_SENTENCES && settle()) break outer;
+  for (const run of runs) {
+    if (run.sentences < PASTEABLE_MIN_SENTENCES) continue;
+    if (run.chars < PASTEABLE_MIN_CHARS) continue;
+    if (quoted(run)) continue;
+    add(
+      'PASTEABLE',
+      'GHOST',
+      `有一段 ${run.chars} 字的連續陳述，既沒有對學生說話也不是提問，` +
+        `而且與他的原文對不上：「${run.text.slice(0, 40)}…」。這一段可以被整段貼走。`,
+    );
+    break;
   }
 
   // ── 五、申請文件的語域 ──────────────────────────────────────
@@ -522,7 +650,19 @@ export function checkGhostwriting(output, facts = ghostwriteFacts(), opts = {}) 
  *
  * @param {{feature: string, occurredAt?: Date|string, aiLevel?: number|null}[]} logs
  * @returns {{counts: Record<string, number>, features: string[], total: number,
- *            levels: number[], firstAt: string|null, lastAt: string|null}}
+ *            disclosedTotal: number, levels: number[],
+ *            firstAt: string|null, lastAt: string|null}}
+ *
+ * # `total` 與 `disclosedTotal` 是兩個數字，而聲明上要印的是後面那一個
+ *
+ * `total` 是這張表裡的全部筆數（稽核用的事實）。`disclosedTotal` 只數
+ * `MUST_DISCLOSE` 那幾類——也就是**聲明裡真的會被列舉出來的那幾類**。
+ *
+ * 兩者混用的症狀很難看：一位只用過 3 次撰寫回饋、但按了 4 次「重新
+ * 產生聲明」的學生，會拿到一份寫著「進行文字具體性與邏輯一致性的回饋，
+ * 共 7 次」的文件——列舉的類別只有一種，數字卻是七，而**這份文件會被
+ * 貼進學習歷程給招生委員看**。`makeStatement()` 是先讀記錄再寫記錄，
+ * 所以按越多次差越多。
  */
 export function disclosureFacts(logs) {
   /** @type {Record<string, number>} */
@@ -546,6 +686,7 @@ export function disclosureFacts(logs) {
     counts,
     features: Object.keys(counts).sort(),
     total: Object.values(counts).reduce((a, b) => a + b, 0),
+    disclosedTotal: MUST_DISCLOSE.reduce((a, f) => a + (counts[f] ?? 0), 0),
     levels: [...levels].sort((a, b) => a - b),
     firstAt,
     lastAt,
@@ -590,13 +731,89 @@ const DISCLOSURE_MENTIONS = {
 /**
  * 宣稱完全沒有用過 AI。
  *
- * 尾巴那個否定的 lookahead 是必要的，不是潔癖：**「未使用 AI 生成內容」
- * 這句話裡也有「未使用 AI」**，而它是合格聲明的標準結尾（§9.2 的範例
- * 就這樣寫）。少了那個 lookahead，每一份正確的聲明都會被判成「宣稱
- * 未使用 AI」，於是這個功能第一天就全紅。
+ * # 為什麼要求「否認」在子句的結尾收掉
+ *
+ * 因為**「未使用 AI」這四個字後面接什麼，決定它是不是全稱的否認**：
+ *
+ *   「全程未使用 AI 輔助工具。」        ← 全稱。記錄裡有東西就是不實
+ *   「未使用 AI 生成內容。」             ← 合格聲明的標準結尾（§9.2）
+ *   「未使用 AI 協助挑選素材，」        ← 只否認一件事，而且是誠實的
+ *
+ * 舊的寫法用一個否定的 lookahead 排掉「生成／撰寫／產出」，於是第三種
+ * 被判成全稱否認——一位誠實寫出「我沒有用 AI 挑素材」的學生會看到
+ * 「模型三次都寫出與記錄不符的聲明」。冤枉三次之後他會轉去用別的
+ * 工具，而那才是最壞的結果：他用了、系統沒記錄、聲明上寫著沒用過。
+ *
+ * 改成要求受詞在子句邊界收掉之後，三種都判得對，而且不必逐一列舉
+ * 「生成／撰寫／產出」——**新的動詞不會再開一個洞**。
  */
 const CLAIMS_NO_USE =
-  /(?:未|沒有|不曾|從未|無)(?:使用|借助|運用|透過|藉由)(?:任何)?(?:AI|人工智慧|生成式|智慧)(?!(?:工具)?(?:生成|產生|撰寫|代寫|產出))/i;
+  /(?:未|沒有|不曾|從未|無)(?:使用|借助|運用|透過|藉由)(?:任何)?(?:AI|人工智慧|生成式|智慧)(?:輔助)?(?:工具|技術|軟體)?(?=[，,、；;。.]|$)/i;
+
+// ─────────────────────────────────────────────────────────────────
+// 子句的極性：這一句在講「用了 AI」還是「沒有用 AI」
+//
+// 規則二與規則三**只比對關鍵詞在不在**，不看那句話是肯定還是否定，
+// 而這份文件的每一句話幾乎都是「未……」。兩個方向都出事：
+//
+//   誤擋：「未使用 AI 協助挑選素材」→ 判成「宣稱用了沒用過的功能」
+//   漏擋：「具體性的檢視亦由本人反覆進行」→ 判成「提到了這一類互動」
+//
+// 後面那一種正是檔頭說要擋的「用一句真話遮住一件該說的事」：句子裡
+// 確實有「具體性」三個字，而那句話講的正好相反。
+// ─────────────────────────────────────────────────────────────────
+
+/** 這一段在講 AI 做了什麼。 */
+const AI_TOKEN = /AI|人工智慧|生成式|智慧工具/i;
+
+/** 否定詞。這份文件的每一句話幾乎都帶著一個。 */
+const DENIAL = /[未無]|沒有|不曾|從未|並非|不是|皆非/;
+
+/** 把事情歸給學生自己。**這也是一種否定**——它說的是「AI 沒有做這件事」。 */
+const SELF_ATTRIBUTION =
+  /由本人|本人(?:自行|獨力|獨立|親自|反覆)?(?:完成|撰寫|檢視|進行|整理|判斷)|自行(?:完成|撰寫|檢視|進行|整理|判斷)/;
+
+/**
+ * 把聲明切成子句，逐句判極性，**沒有線索的子句沿用前一句**。
+ *
+ * 沿用是必要的而不是偷懶：一份合格的聲明長這樣——
+ *
+ *   「……使用 AI 輔助工具進行文字具體性的回饋、從個人學習紀錄回想
+ *     素材的提問，以及成果選件的討論，未使用 AI 生成內容。」
+ *
+ * 中間那兩個子句裡一個 AI 都沒有，它們掛在第一句的「使用 AI」底下。
+ * 不沿用的話，一份把三類都列出來的正確聲明會被判成只揭露了一類。
+ *
+ * @returns {{text: string, affirmative: boolean}[]}
+ */
+function aiClauses(text) {
+  const out = [];
+  let state = false;
+  for (const clause of String(text ?? '').split(/[，,、；;。.]+/)) {
+    if (!clause) continue;
+    const at = clause.search(AI_TOKEN);
+    if (at >= 0) {
+      // 否定詞要出現在 AI 之前才算否認這一次使用。「使用 AI 進行回饋，
+      // 未再做其他修改」裡的「未」在後面，管的是別件事。
+      state = !DENIAL.test(clause.slice(0, at));
+    } else if (SELF_ATTRIBUTION.test(clause)) {
+      state = false;
+    }
+    out.push({ text: clause, affirmative: state });
+  }
+  return out;
+}
+
+/**
+ * 這一類互動**被當成 AI 做的事**寫出來了嗎。
+ *
+ * 與 `re.test(text)` 的差別就是那句話的肯否：關鍵詞落在一個否認的子句
+ * 裡（「未使用 AI 挑選素材」）或一個歸給學生自己的子句裡（「具體性的
+ * 檢視由本人進行」）都不算揭露過。
+ */
+function disclosedAsAiUse(clauses, re) {
+  return clauses.some((c) => c.affirmative && re.test(c.text));
+}
 
 /** 宣稱沒有用 AI 生成內容。**這一句本身是合法而且應該有的**。 */
 const CLAIMS_NO_GENERATION =
@@ -643,13 +860,15 @@ export function checkDisclosureStatement(statement, facts = disclosureFacts([]))
   };
 
   const used = MUST_DISCLOSE.filter((f) => (facts.counts?.[f] ?? 0) > 0);
+  const disclosedTotal = facts.disclosedTotal ?? facts.total ?? 0;
+  const clauses = aiClauses(text);
 
   // ── 一、宣稱完全沒用過，但記錄裡有 ──────────────────────────
   if (used.length > 0 && CLAIMS_NO_USE.test(text)) {
     add(
       'CLAIMS_NO_AI',
       'GHOST',
-      `聲明宣稱未使用 AI，但記錄裡有 ${facts.total} 次互動（${used.join('、')}）。` +
+      `聲明宣稱未使用 AI，但記錄裡有 ${disclosedTotal} 次要揭露的互動（${used.join('、')}）。` +
         '這不是揭露，這是否認。',
     );
   }
@@ -660,14 +879,18 @@ export function checkDisclosureStatement(statement, facts = disclosureFacts([]))
   // （系統從不生成內容），但如果整份聲明只有這一句、而記錄裡有十次
   // 撰寫回饋，那它就是用一句真話遮住一件該說的事。招生委員讀到的是
   // 「這位學生沒有用 AI」，而那與事實不符。
+  //
+  // 問的是「有沒有**被當成 AI 做的事**寫出來」而不是「關鍵詞在不在」：
+  // 「文字具體性的檢視亦由本人反覆進行」裡有「具體性」三個字，
+  // 而那句話講的正好相反——它遮住的正是那十次。
   for (const f of used) {
     const re = DISCLOSURE_MENTIONS[f];
-    if (re && !re.test(text)) {
+    if (re && !disclosedAsAiUse(clauses, re)) {
       add(
         'OMITS_FEATURE',
         'GHOST',
-        `記錄裡有 ${facts.counts[f]} 次「${f}」，但聲明完全沒有提到這一類互動。` +
-          '揭露的意思是把發生過的事說出來，不是挑幾件說。',
+        `記錄裡有 ${facts.counts[f]} 次「${f}」，但聲明沒有把它寫成 AI 做過的事。` +
+          '揭露的意思是把發生過的事說出來，不是挑幾件說，也不是換一個說法帶過去。',
       );
       break;
     }
@@ -678,10 +901,14 @@ export function checkDisclosureStatement(statement, facts = disclosureFacts([]))
   // 過度宣稱同樣是不符。它比較少見但更難查——一份寫了「使用 AI 進行
   // 面試回答結構的回饋」而其實沒練過面試的聲明，招生委員無從查證，
   // 而系統查得出來。
+  //
+  // 同樣只看肯定的子句：「未使用 AI 協助挑選素材」是**誠實**地說出
+  // 一件沒發生的事，把它判成過度宣稱是冤枉，而冤枉的代價是他轉去用
+  // 別的工具——他用了、系統沒記錄、聲明上寫著沒用過。
   for (const f of MUST_DISCLOSE) {
     if ((facts.counts?.[f] ?? 0) > 0) continue;
     const re = DISCLOSURE_MENTIONS[f];
-    if (re && re.test(text)) {
+    if (re && disclosedAsAiUse(clauses, re)) {
       add(
         'CLAIMS_UNUSED_FEATURE',
         'GHOST',
@@ -689,6 +916,29 @@ export function checkDisclosureStatement(statement, facts = disclosureFacts([]))
           '多說與少說一樣是不符——揭露聲明的價值在於它對得回記錄。',
       );
       break;
+    }
+  }
+
+  // ── 三之二、次數對不對 ──────────────────────────────────────
+  //
+  // 前面兩條查的是「哪幾類」，這一條查「幾次」。**這份文件會被貼進
+  // 學習歷程給招生委員看，所以上面的每一個數字也要對得回記錄。**
+  //
+  // 只認「共 N 次」這種總計的說法，而且 N 剛好等於某一類的次數時放過去
+  // （「共 3 次撰寫回饋」講的是那一類，不是總計）。逐項的數字不查，
+  // 因為「使用 3 次撰寫回饋與 2 次素材提示」要對到哪一個數字，
+  // 規則判不出來，而判錯的方向是把一份正確的聲明擋下來。
+  const stated = text.match(/共(\d+)次/);
+  if (stated) {
+    const n = Number(stated[1]);
+    const matchesOne = MUST_DISCLOSE.some((f) => (facts.counts?.[f] ?? 0) === n);
+    if (n !== disclosedTotal && !matchesOne) {
+      add(
+        'MISCOUNTS',
+        'GHOST',
+        `聲明寫「共 ${n} 次」，但記錄裡要揭露的互動是 ${disclosedTotal} 次。` +
+          '這份文件會被貼進學習歷程給招生委員看，上面的數字要對得回記錄。',
+      );
     }
   }
 
@@ -792,7 +1042,9 @@ export function describePortfolioViolations(violations) {
  */
 export const PORTFOLIO_VIOLATION_LABELS = {
   FIRST_PERSON_RUN: '寫出了一段可以直接貼進檔案的第一人稱敘述',
+  THIRD_PERSON_RUN: '用「該生」這樣的第三人稱寫了一段你的經歷',
   NARRATIVE_VOICE: '用自傳的口吻寫了一段你的經歷',
+  MISCOUNTS: '聲明上的次數與記錄對不起來',
   GHOSTWRITE_LEAD: '用了「你可以這樣寫」這一類提供現成文字的句型',
   PASTEABLE: '寫出了一段可以整段貼走的文字',
   APPLICATION_VOICE: '用了寫給招生委員看的措辭，而不是對你說話',
@@ -873,8 +1125,11 @@ export function safeStatement(facts = disclosureFacts([]), phrases = {}) {
     return '本文之構思與撰寫均由本人完成，過程中未使用 AI 輔助工具，亦未使用 AI 生成內容。';
   }
   const list = used.map((f) => phrases[f] ?? f).join('、');
+  // **`disclosedTotal` 而不是 `total`。** 列舉的是 `used` 那幾類，
+  // 數字就要數同樣那幾類——用 `total` 的話，一位只用過 3 次撰寫回饋、
+  // 按了 4 次「重新產生」的學生會拿到「共 7 次」，而列舉的類別只有一種。
   return (
     `本文之構思與撰寫由本人完成，過程中使用 AI 輔助工具進行${list}，` +
-    `共 ${facts.total} 次，未使用 AI 生成內容。`
+    `共 ${facts.disclosedTotal ?? facts.total} 次，未使用 AI 生成內容。`
   );
 }

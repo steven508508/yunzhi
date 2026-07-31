@@ -11,10 +11,10 @@
  * 做成 `/share` 與 `/unshare` 兩支的話，兩邊會各自演化，而演化的方向
  * 不會是撤回變得更嚴。
  */
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { portfolioFailure, shareEssay } from '@/lib/portfolioDb';
+import { deleteEssay, myEssays, portfolioFailure, shareEssay } from '@/lib/portfolioDb';
 import { scopedRoute } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
@@ -36,3 +36,22 @@ export const PATCH = scopedRoute<{ essayId: string }>(async (req, { user, params
     return NextResponse.json(body, { status });
   }
 });
+
+/**
+ * 刪掉一份自述，**連同它的每一個舊版本。**
+ *
+ * 只刪現行版本的話，舊版本會留在資料庫裡而畫面上永遠看不到
+ * （`myEssays()` 只回 `isCurrent`），連同它們的分享名單——那不是刪除，
+ * 那是把它藏起來。理由的完整版在 `lib/portfolioDb.ts` 的 `deleteEssay`。
+ */
+export const DELETE = scopedRoute<{ essayId: string }>(
+  async (_req: NextRequest, { user, params }) => {
+    try {
+      await deleteEssay(user, params.essayId);
+      return NextResponse.json(await myEssays(user));
+    } catch (e) {
+      const { status, body } = portfolioFailure(e);
+      return NextResponse.json(body, { status });
+    }
+  },
+);

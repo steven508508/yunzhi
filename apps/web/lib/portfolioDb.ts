@@ -79,6 +79,7 @@ import {
   itemCodeInfo,
   limitsOf,
   mayAddItem,
+  mayUpdateItem,
   submissionChecklist,
 } from '@/lib/portfolio.mjs';
 import {
@@ -90,9 +91,15 @@ import {
   safeStatement,
   summarizePortfolioViolations,
 } from '@/lib/portfolioGuard.mjs';
-import { QUESTION_TEMPLATES, consistencyCheck, structureFeedback } from '@/lib/interview.mjs';
+import {
+  INTERVIEW_AI_FEATURE,
+  QUESTION_TEMPLATES,
+  consistencyCheck,
+  structureFeedback,
+} from '@/lib/interview.mjs';
 import { admissionYearOf } from '@/lib/admission.mjs';
 import { prisma } from '@/lib/prisma';
+import { teachesClass } from '@/lib/teaching';
 import { requireTenant } from '@/lib/tenant';
 import type { SessionUser } from '@/lib/auth';
 
@@ -108,7 +115,8 @@ export type PortfolioErrorCode =
   | 'INVALID'
   | 'OVER_LIMIT'
   | 'AI_DISABLED'
-  | 'AI_DOWN';
+  | 'AI_DOWN'
+  | 'BUDGET';
 
 export class PortfolioError extends Error {
   readonly code: PortfolioErrorCode;
@@ -167,6 +175,50 @@ function assertStaff(user: SessionUser): void {
   if (!['TEACHER', 'SUBJECT_LEAD', 'SCHOOL_ADMIN', 'SYS_ADMIN'].includes(user.systemRole)) {
     throw new PortfolioError('FORBIDDEN', '這一頁是給老師用的。', 403);
   }
+}
+
+/**
+ * 面試題庫：學生要讀，老師日後要管，**家長一律不行**。
+ *
+ * 題庫本身不是誰的隱私（它是一份公開的問題清單），所以這一支比
+ * `assertStudent` 寬。但它仍然要有一道判定：導覽列不畫、頁面擋下來，
+ * 而 `GET /api/interview/questions` 只有登入判定的話，第三扇門是開的
+ * ——家長拿得到整份題庫，而且在還沒匯入過的租戶上，**那次請求會用
+ * 家長的 id 建立 39 筆 `InterviewQuestion`**。
+ */
+function assertNotGuardian(user: SessionUser): void {
+  if (user.systemRole === 'GUARDIAN') {
+    throw new PortfolioError(
+      'FORBIDDEN',
+      '面試準備不對家長開放。練習的回答裡會有他還沒想清楚的話與講砸的版本，' +
+        '而那與學習歷程的內容是同一類的東西。孩子的任務、成績與時程在「孩子的狀況」那一頁。',
+      403,
+    );
+  }
+}
+
+/**
+ * 這個班的 AI 使用層級，是不是這個人可以動的。
+ *
+ * **帶班判定不可以省。** `assertStaff` 只問「他是不是職員」，於是數學班
+ * 老師打一個 `{classId: 英文班, level: 4}` 就把英文老師事前明定的
+ * 第 1 級蓋掉了——而 `AiUsagePolicy` 是 update-in-place，舊的 `level`
+ * 直接消失，畫面上只會顯示新的日期。教育部函文要求的是**授課教師**
+ * 事前明定，不是任何一位老師。
+ *
+ * 管理員例外：他要處理老師離職、或是全校統一調整的情形，而那件事
+ * 本來就是他的職責（`saveLimits` 也是同一條線）。
+ */
+async function assertMayGovernClass(user: SessionUser, classId: string): Promise<void> {
+  assertStaff(user);
+  if (['SCHOOL_ADMIN', 'SYS_ADMIN'].includes(user.systemRole)) return;
+  if (await teachesClass(user.id, classId)) return;
+  throw new PortfolioError(
+    'FORBIDDEN',
+    'AI 使用層級只有這個班的授課老師改得動。教育部函文要求的是授課教師事前明定——' +
+      '別班的老師改掉之後，原本那位老師不會知道自己的決定被換掉了。',
+    403,
+  );
 }
 
 function assertAdmin(user: SessionUser): void {
@@ -353,9 +405,35 @@ export async function addItem(
   const title = String(input.title ?? '').trim();
   if (!title) throw new PortfolioError('INVALID', '這一件要有標題，不然三個月後你自己也認不出來。');
 
+  const itemCode = String(input.itemCode ?? '').trim().toUpperCase();
+
+  // **代碼與類別要互相驗證。** 兩者各自合法而湊在一起不合法的組合
+  // （`{category: 'COURSE_OUTCOME', itemCode: 'N'}`）現在建得起來，
+  // 而它的後果剛好是這個模組最在意的那一條失效：綜整心得被算進課程
+  // 學習成果的額度，然後系統告訴一位其實沒有超過的學生他超過了。
+  //
+  // 認不得的代碼（'Z'）也建得起來，`itemLabel` 是 null——三個月後
+  // 他自己看不出那是什麼，中央資料庫也收不了。
+  const info = itemCodeInfo(itemCode);
+  if (!info && input.category !== 'OTHER') {
+    throw new PortfolioError(
+      'INVALID',
+      `「${itemCode}」不是官方代碼。課程學習成果是 B 到 E、多元表現是 F 到 N，` +
+        '對不上的話請選「其他（校系自訂）」。',
+    );
+  }
+  if (info && info.category !== input.category) {
+    throw new PortfolioError(
+      'INVALID',
+      `代碼 ${info.code}（${info.label}）屬於${
+        info.category === 'COURSE_OUTCOME' ? '課程學習成果' : '多元表現'
+      }，與你選的類別對不起來。件數上限是逐類別算的，分錯類的後果是額度算錯。`,
+    );
+  }
+
   const candidate = {
     category: input.category,
-    itemCode: String(input.itemCode ?? '').trim().toUpperCase(),
+    itemCode,
     semester: input.semester ?? null,
     fileBytes: input.fileBytes ?? null,
     fileKind: input.fileKind ?? null,
@@ -408,6 +486,28 @@ export async function updateItem(
   if (!row) throw new PortfolioError('NOT_FOUND', '找不到這一件素材。', 404);
 
   const limits = await limitsFor(admissionYearOf());
+
+  // **改一件的效果與新增一件一樣，所以這裡也要問一次。**
+  //
+  // 兩條路都繞得過 `addItem` 的判定：改學期把一件搬進已經滿的那一年，
+  // 以及勾第四件課程學習成果給同一個校系——後者在畫面上只會染紅，
+  // 而**個申的勾選上限沒有任何其他地方會擋**（送出前的清單在他沒填
+  // 校系時看不到那幾件）。判定寫在 `portfolio.mjs` 的 `mayUpdateItem`，
+  // 與 `mayAddItem` 同一條「只在這一動才超過時擋」的規則。
+  if (patch.semester !== undefined || patch.selectedFor !== undefined) {
+    const existing = await prisma.portfolioItem.findMany({ where: { userId: user.id } });
+    const may = mayUpdateItem(
+      existing,
+      row.id,
+      {
+        ...(patch.semester !== undefined ? { semester: patch.semester } : {}),
+        ...(patch.selectedFor !== undefined ? { selectedFor: patch.selectedFor } : {}),
+      },
+      limits,
+    );
+    if (!may.ok) throw new PortfolioError('OVER_LIMIT', may.reason ?? '超過件數上限。');
+  }
+
   const updated = await prisma.portfolioItem.update({
     where: { id: row.id },
     data: {
@@ -593,8 +693,24 @@ export async function shareEssay(
   share: boolean,
 ): Promise<EssayView> {
   assertStudent(user);
-  const row = await prisma.portfolioEssay.findFirst({ where: { id: essayId, userId: user.id } });
-  if (!row) throw new PortfolioError('NOT_FOUND', '找不到這一份自述。', 404);
+  // **`isCurrent` 要在查詢裡，不是在回傳的時候才發現。**
+  //
+  // 少了它，一個舊版本的 essayId 會先被 `update()` 寫進 `sharedWith`，
+  // 然後 `myEssays()`（只回現行版本）找不到它、丟 404——學生看到
+  // 「找不到這一份自述」，而授權已經落地在一列他在畫面上永遠看不到、
+  // 也撤不回的舊版本上。目前老師端因為也查 `isCurrent: true` 所以沒有
+  // 外洩，但那條線是唯一擋著的東西，而它不該是唯一的。
+  const row = await prisma.portfolioEssay.findFirst({
+    where: { id: essayId, userId: user.id, isCurrent: true },
+  });
+  if (!row) {
+    throw new PortfolioError(
+      'NOT_FOUND',
+      '找不到這一份自述的現行版本。分享與撤回都只作用在現行版本上——' +
+        '舊版本是留給你自己回頭看的，不會被分享出去。',
+      404,
+    );
+  }
 
   if (share) {
     const teacher = await prisma.user.findFirst({
@@ -613,6 +729,34 @@ export async function shareEssay(
   const found = fresh.essays.find((e) => e.id === essayId);
   if (!found) throw new PortfolioError('NOT_FOUND', '找不到這一份自述。', 404);
   return found;
+}
+
+/**
+ * 刪掉一份自述——**連同它的每一個舊版本。**
+ *
+ * # 為什麼有進沒有出是一個問題
+ *
+ * 素材有 DELETE，自述與練習紀錄沒有。這一區裝的是他的生涯敘事，
+ * 而寫下來之後想拿掉的理由與素材完全不同：他可能寫了一段關於家裡的
+ * 事、或是一段他現在覺得很蠢的話。「你刪不掉」在這種內容上不是不方便，
+ * 它會讓他下一次不寫真話——而那時候這個功能就沒有用了。
+ *
+ * # 為什麼連舊版本一起刪
+ *
+ * 因為只刪現行版本的話，舊版本會留在資料庫裡而**畫面上永遠看不到**
+ * （`myEssays()` 只回 `isCurrent`），連同它們的 `sharedWith`。
+ * 那不是刪除，那是把它藏起來——症狀與這一支要解決的問題一模一樣。
+ *
+ * 保留舊版本的價值（回頭看自己三個月前怎麼想的）在這裡讓位：
+ * 那個價值是**他的**，而他正在說他不要了。
+ */
+export async function deleteEssay(user: SessionUser, essayId: string): Promise<void> {
+  assertStudent(user);
+  const row = await prisma.portfolioEssay.findFirst({ where: { id: essayId, userId: user.id } });
+  if (!row) throw new PortfolioError('NOT_FOUND', '找不到這一份自述。', 404);
+  await prisma.portfolioEssay.deleteMany({
+    where: { userId: user.id, kind: row.kind, programRef: row.programRef },
+  });
 }
 
 /**
@@ -662,6 +806,8 @@ export async function essaysSharedWithMe(user: SessionUser): Promise<SharedEssay
 export async function aiLevelOf(userId: string): Promise<{
   level: number | null;
   classes: { classId: string; className: string; level: number | null }[];
+  /** 還沒設定的班級名稱。**要點名**，否則學生不知道去找哪一位老師。 */
+  unsetClasses: string[];
 }> {
   const memberships = await prisma.classMembership.findMany({
     where: { userId, leftAt: null, role: 'STUDENT' },
@@ -672,7 +818,11 @@ export async function aiLevelOf(userId: string): Promise<{
     className: m.class.name,
     level: m.class.aiUsagePolicy?.level ?? null,
   }));
-  return { level: effectiveAiLevel(classes.map((c) => c.level)), classes };
+  return {
+    level: effectiveAiLevel(classes.map((c) => c.level)),
+    classes,
+    unsetClasses: classes.filter((c) => c.level === null).map((c) => c.className),
+  };
 }
 
 export async function setAiPolicy(
@@ -681,6 +831,8 @@ export async function setAiPolicy(
   level: number,
   note?: string | null,
 ): Promise<{ classId: string; level: number }> {
+  // 角色先問，班級存不存在後問：反過來的話，一個學生打這一支可以用
+  // 錯誤訊息的差別（400 還是 404）問出「這個班級 id 存不存在」。
   assertStaff(user);
   if (!Number.isInteger(level) || level < 1 || level > 4) {
     throw new PortfolioError('INVALID', 'AI 使用層級是 1 到 4。');
@@ -688,6 +840,9 @@ export async function setAiPolicy(
   const tenantId = requireTenant();
   const klass = await prisma.class.findFirst({ where: { id: classId }, select: { id: true } });
   if (!klass) throw new PortfolioError('NOT_FOUND', '找不到這個班級。', 404);
+  // 帶班判定。理由見 `assertMayGovernClass`——`AiUsagePolicy` 是
+  // update-in-place，被蓋掉的那一級沒有留下任何痕跡。
+  await assertMayGovernClass(user, classId);
 
   const existing = await prisma.aiUsagePolicy.findFirst({ where: { classId } });
   if (existing) {
@@ -703,11 +858,28 @@ export async function setAiPolicy(
   return { classId, level };
 }
 
-/** 老師端的班級層級一覽。 */
+/**
+ * 老師端的班級層級一覽。**只有他自己帶的班。**
+ *
+ * 全校每一班的設定不是他的事：這一頁的用途是「我帶的班我決定好了
+ * 沒有」，而列出全校會讓那句話變成「還有 37 個班級沒有設定」——
+ * 一個他做不了也不該做的待辦。管理員看得到全部，因為老師離職與
+ * 全校統一調整是他的職責。
+ */
 export async function aiPolicies(user: SessionUser) {
   assertStaff(user);
+  const isAdmin = ['SCHOOL_ADMIN', 'SYS_ADMIN'].includes(user.systemRole);
+  const mine = isAdmin
+    ? null
+    : await prisma.classSubjectTeacher.findMany({
+        where: { userId: user.id },
+        select: { classId: true },
+      });
   const rows = await prisma.class.findMany({
-    where: { active: true },
+    where: {
+      active: true,
+      ...(mine ? { id: { in: [...new Set(mine.map((m) => m.classId))] } } : {}),
+    },
     orderBy: { name: 'asc' },
     select: { id: true, name: true, aiUsagePolicy: { select: { level: true, note: true, setAt: true } } },
   });
@@ -842,6 +1014,17 @@ export async function makeStatement(
 
   const deterministic = () => safeStatement(facts, AI_FEATURE_DISCLOSURE_PHRASES);
 
+  // 預算用完時走程式版本而不是報錯。**揭露是及格線不是加分項**——
+  // 與 AI 連不上那一天同一個理由，而且這一天更難解釋：學生沒有辦法
+  // 讓預算變多，他只能交不出揭露。
+  const overBudget = await assertBudget(tenantId).then(
+    () => false,
+    (e) => {
+      if (e instanceof PortfolioError && e.code === 'BUDGET') return true;
+      throw e;
+    },
+  );
+
   // **第 1 級（不得使用 AI）不呼叫模型。**
   //
   // 這一級的學生依定義不可能有任何一次模型互動，所以他的聲明內容就是
@@ -850,13 +1033,19 @@ export async function makeStatement(
   // 還會被記進他自己的揭露記錄裡。那不是矛盾的邊緣案例，那是直接
   // 違反老師的決定。
   const out =
-    level === 1
-      ? { text: deterministic(), fellBack: true, blockedDrafts: 0, blockedReasons: [] }
+    level === 1 || overBudget
+      ? { text: deterministic(), fellBack: true, blockedDrafts: 0, blockedReasons: [], calledModel: false }
       : await generateWithGate({
           feature: 'DISCLOSURE_STATEMENT',
+          userId: user.id,
           payload: {
             counts: facts.counts,
-            total: facts.total,
+            // **要揭露的次數，不是記錄的總筆數。** 兩者的差是「產生
+            // 聲明」自己那幾筆，而模型會照著這個數字寫「共 N 次」——
+            // 用 total 的話，按幾次「重新產生」就多幾次（理由見
+            // `disclosureFacts` 的說明）。
+            total: facts.disclosedTotal,
+            audit_total: facts.total,
             first_at: facts.firstAt,
             last_at: facts.lastAt,
             ai_level: level,
@@ -865,7 +1054,7 @@ export async function makeStatement(
           facts: { disclosure: facts },
           fallback: deterministic,
           // 見 `generateWithGate` 的說明：揭露是及格線，AI 掛掉的那一天
-          // 不可以變成他交不出揭露的那一天。
+          // 不可以變成他交不出揭露的那一天。預算用完也一樣。
           fallbackOnUpstreamFailure: true,
         });
 
@@ -873,16 +1062,23 @@ export async function makeStatement(
     data: { tenantId, userId: user.id, essayId: essayId ?? null, generated: out.text },
   });
 
-  // **產生聲明本身也記一筆。** 它是一次 AI 互動，而這張表是稽核記錄
-  // 不是聲明的草稿——記錄要完整，聲明才可以只講該講的（`MUST_DISCLOSE`
-  // 刻意不含這一項，理由在 portfolioGuard.mjs）。
-  await logAiUse({
-    userId: user.id,
-    feature: 'DISCLOSURE_STATEMENT',
-    essayId: essayId ?? null,
-    natureNote: `依 ${facts.total} 筆使用記錄產生揭露聲明草稿`,
-    aiLevel: level,
-  });
+  // **只有真的呼叫過模型才記一筆。**
+  //
+  // 第 1 級（不得使用 AI）與 AI 連不上時走的是 `deterministic()`，
+  // 一行都沒有呼叫模型。無條件記錄的話，一位被老師明定不得使用 AI 的
+  // 學生，記錄上會有 AI 互動——而那筆記錄還會灌進下一次的次數。
+  //
+  // 「呼叫了但三次都被閘門擋下」要記：那幾次模型確實看過他的文字，
+  // 也確實花了錢，而揭露要算得進去。
+  if (out.calledModel) {
+    await logAiUse({
+      userId: user.id,
+      feature: 'DISCLOSURE_STATEMENT',
+      essayId: essayId ?? null,
+      natureNote: `依 ${facts.disclosedTotal} 次要揭露的互動產生揭露聲明草稿`,
+      aiLevel: level,
+    });
+  }
 
   return {
     id: row.id,
@@ -893,21 +1089,70 @@ export async function makeStatement(
   };
 }
 
-/** 學生編輯過的版本。**原始的 `generated` 留著**，那是系統說了什麼。 */
+/**
+ * 學生編輯過的版本。**原始的 `generated` 留著**，那是系統說了什麼。
+ *
+ * # 這一條路才是產出最終文件的那一條
+ *
+ * 閘門本來只掛在「模型生成」上，而學生按「產生一份」拿到正確的聲明
+ * 之後，可以在 textarea 裡把它改成「……未使用 AI 輔助工具」再按存檔，
+ * 然後畫面給他一顆「複製」按鈕——**而 `edited` 就是他要貼進檔案的
+ * 那一份**。`CLAIMS_NO_AI`（「這不是揭露，這是否認」）在這條路上
+ * 一次都不會執行。
+ *
+ * # 擋的是與記錄不符，不是擋編輯
+ *
+ * 學生**有權利用自己的話寫這份聲明**（§9.6 甚至要求它不能是樣板），
+ * 所以這裡不能改成「只准用系統產的那一份」。分界線與模型那條路完全
+ * 一樣：`GHOST` 是聲明不實（宣稱沒用過、漏掉發生過的、多說沒發生的、
+ * 數字對不上）——擋下來並且說明白哪裡對不上；`STYLE` 是體例
+ * （沒有寫「由本人完成」、太長）——存進去，回一句提醒。
+ *
+ * @returns 存進去了但值得提醒的幾句話
+ */
 export async function editStatement(
   user: SessionUser,
   statementId: string,
   edited: string,
-): Promise<void> {
+): Promise<{ warnings: string[] }> {
   assertStudent(user);
   const row = await prisma.aiDisclosureStatement.findFirst({
     where: { id: statementId, userId: user.id },
   });
   if (!row) throw new PortfolioError('NOT_FOUND', '找不到這一份聲明。', 404);
-  await prisma.aiDisclosureStatement.update({
-    where: { id: row.id },
-    data: { edited: String(edited ?? '') },
+
+  const text = String(edited ?? '');
+
+  // 空的＝把編輯撤掉，回到系統產的那一份。擋一份空聲明沒有意義：
+  // 他要的是「不要我改的版本」，而那是他的權利。
+  if (!text.trim()) {
+    await prisma.aiDisclosureStatement.update({ where: { id: row.id }, data: { edited: null } });
+    return { warnings: [] };
+  }
+
+  // 比對的記錄範圍要與產生時同一份（同一個 essayId），否則一份針對
+  // 某一份自述產生的聲明會被拿去對全部的記錄，然後被判成漏講。
+  const logs = await prisma.aiDisclosureLog.findMany({
+    where: { userId: user.id, ...(row.essayId ? { essayId: row.essayId } : {}) },
+    orderBy: { occurredAt: 'asc' },
+    take: 500,
   });
+  const verdict = checkPortfolioOutput('DISCLOSURE_STATEMENT', text, {
+    disclosure: disclosureFacts(logs),
+  });
+
+  if (verdict.ghostwritten) {
+    throw new PortfolioError(
+      'INVALID',
+      '這一份改過的聲明與你的實際使用記錄對不起來，所以沒有存進去：' +
+        summarizePortfolioViolations(verdict.violations.filter((v) => v.severity === 'GHOST')).join('；') +
+        '。你可以用自己的話寫這份聲明——它本來就該像你講話的樣子——' +
+        '但它會被貼進學習歷程給招生委員看，所以上面的每一件事與每一個數字都要對得回記錄。',
+    );
+  }
+
+  await prisma.aiDisclosureStatement.update({ where: { id: row.id }, data: { edited: text } });
+  return { warnings: summarizePortfolioViolations(verdict.violations) };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -956,6 +1201,119 @@ async function callPortfolioAi(body: unknown): Promise<AiResponse> {
   return JSON.parse(text) as AiResponse;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 成本
+//
+// 這個模組原本一列 `AiUsageLog` 都沒有寫，而 `doctor.sh` 的「AI 用量」、
+// `OPERATIONS.md` 的 SQL、匯入頁的成本**全部查那張表**——於是撰寫回饋、
+// 素材提示、選件討論、揭露聲明產生器（每一次最多打三次模型）的花費
+// 完全不在帳上。老師問「這個月花多少」時，答案少了一整個模組。
+//
+// 作法照 `lib/tutor.ts` 與 `lib/admissionRefDb.ts`：真相是 `AiUsageLog`
+// 的 aggregate，`AiBudgetCounter` 只是寫給人看的鏡子。
+// ─────────────────────────────────────────────────────────────────
+
+async function monthlyTokens(tenantId: string): Promise<number> {
+  const since = new Date();
+  since.setUTCDate(1);
+  since.setUTCHours(0, 0, 0, 0);
+  const agg = await prisma.aiUsageLog.aggregate({
+    where: { tenantId, createdAt: { gte: since } },
+    _sum: { inputTokens: true, outputTokens: true },
+  });
+  return (agg._sum.inputTokens ?? 0) + (agg._sum.outputTokens ?? 0);
+}
+
+/**
+ * 預算用完就不再呼叫模型。
+ *
+ * **只擋會呼叫模型的那幾項。** 制度檢查、送出前的清單、面試的結構
+ * 回饋都是純規則，不受影響——而揭露聲明的呼叫端會把這個錯誤接住、
+ * 改用程式組出來的版本（見 `makeStatement`）：它是及格線不是加分項，
+ * 預算用完的那一天不可以變成他交不出揭露的那一天。
+ */
+async function assertBudget(tenantId: string): Promise<void> {
+  const budget = Number(process.env.AI_MONTHLY_TOKEN_BUDGET ?? 0);
+  if (!(budget > 0)) return;
+  const used = await monthlyTokens(tenantId);
+  if (used >= budget) {
+    throw new PortfolioError(
+      'BUDGET',
+      `這個月的 AI 用量已經到上限（${used.toLocaleString()} / ${budget.toLocaleString()}）。` +
+        '學習歷程的 AI 回饋暫停，但制度檢查、送出前的確認清單與面試的結構回饋都不受影響——' +
+        '那幾項是系統自己算的。想繼續的話，請告訴老師。',
+      429,
+    );
+  }
+}
+
+/**
+ * 一列用量記錄。**退回罐頭時也要寫**——那幾次仍然呼叫過模型、仍然
+ * 花了錢，而少寫的那幾次會讓月底的帳與實際對不起來。
+ */
+async function recordPortfolioUsage(u: {
+  tenantId: string;
+  feature: string;
+  userId: string;
+  tokensIn: number;
+  tokensOut: number;
+  model: string;
+  promptVersion: string;
+  latencyMs: number;
+  succeeded: boolean;
+  retryCount: number;
+}): Promise<void> {
+  if (u.tokensIn === 0 && u.tokensOut === 0) return;
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  try {
+    await prisma.$transaction([
+      prisma.aiUsageLog.create({
+        data: {
+          tenantId: u.tenantId,
+          // OTHER 與 `AdmissionAdvice` 那一段同一個權宜之計：這個列舉
+          // 是資料庫的 enum，加一個值要遷移。`refType` 分得出來是哪一塊。
+          purpose: 'OTHER',
+          // 回饋不是推導。用 MID：這一段要產出的是一段兩三百字的提問，
+          // 而 HIGH 的價格是 MID 的五倍。
+          tier: 'MID',
+          provider: process.env.AI_PROVIDER ?? 'unknown',
+          model: u.model || 'unknown',
+          baseUrl: process.env.AI_BASE_URL ?? null,
+          inputTokens: u.tokensIn,
+          outputTokens: u.tokensOut,
+          latencyMs: u.latencyMs || null,
+          succeeded: u.succeeded,
+          errorCode: u.succeeded ? null : 'PORTFOLIO_GUARD_FALLBACK',
+          retryCount: u.retryCount,
+          refType: `Portfolio:${u.feature}`,
+          refId: u.userId,
+          promptVersion: u.promptVersion,
+        },
+      }),
+      prisma.aiBudgetCounter.upsert({
+        where: { tenantId_yearMonth: { tenantId: u.tenantId, yearMonth: ym } },
+        create: {
+          tenantId: u.tenantId,
+          yearMonth: ym,
+          inputTokens: BigInt(u.tokensIn),
+          outputTokens: BigInt(u.tokensOut),
+          callCount: 1,
+        },
+        update: {
+          inputTokens: { increment: BigInt(u.tokensIn) },
+          outputTokens: { increment: BigInt(u.tokensOut) },
+          callCount: { increment: 1 },
+        },
+      }),
+    ]);
+  } catch (e) {
+    // 記帳失敗不該把已經產生的回饋吞掉。真相在 AiUsageLog，那一筆若也
+    // 失敗了，下一次的 aggregate 會少算這一次——可以接受的誤差。
+    console.error('[portfolio] 用量記錄失敗', e);
+  }
+}
+
 /**
  * 生成 → 檢查 → 不過就重來 → 用完就退回程式組出來的版本。
  *
@@ -966,6 +1324,7 @@ async function callPortfolioAi(body: unknown): Promise<AiResponse> {
  */
 async function generateWithGate(input: {
   feature: string;
+  userId: string;
   payload: Record<string, unknown>;
   facts: { ghostwrite?: ReturnType<typeof ghostwriteFacts>; disclosure?: ReturnType<typeof disclosureFacts> };
   fallback: () => string;
@@ -982,10 +1341,30 @@ async function generateWithGate(input: {
    * 退路版本由程式依記錄組出來，內容一樣正確，只是讀起來像樣板。
    */
   fallbackOnUpstreamFailure?: boolean;
-}): Promise<{ text: string; fellBack: boolean; blockedDrafts: number; blockedReasons: string[] }> {
+}): Promise<{
+  text: string;
+  fellBack: boolean;
+  blockedDrafts: number;
+  blockedReasons: string[];
+  /**
+   * 模型真的看過他的文字嗎。
+   *
+   * **`fellBack` 回答不了這個問題**：它在「呼叫了三次都被閘門擋下」與
+   * 「一次都沒呼叫到」時都是 true，而這兩件事在揭露記錄上差很多——
+   * 前者是一次要揭露的 AI 互動，後者不是（見 `makeStatement`）。
+   */
+  calledModel: boolean;
+}> {
+  const tenantId = requireTenant();
   let accepted: string | null = null;
   let blockedDrafts = 0;
   const blockedReasons: string[] = [];
+  let calledModel = false;
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let latencyMs = 0;
+  let model = '';
+  let promptVersion = '';
 
   for (let attempt = 0; attempt <= MAX_REGENERATE; attempt += 1) {
     let out: AiResponse;
@@ -998,6 +1377,13 @@ async function generateWithGate(input: {
       if (attempt === 0 && !input.fallbackOnUpstreamFailure) throw e;
       break;
     }
+
+    calledModel = true;
+    tokensIn += out.input_tokens ?? 0;
+    tokensOut += out.output_tokens ?? 0;
+    latencyMs += out.latency_ms ?? 0;
+    model = out.model || model;
+    promptVersion = out.prompt_version || promptVersion;
 
     const verdict = checkPortfolioOutput(input.feature, out.text, input.facts);
     if (verdict.ok) {
@@ -1023,11 +1409,27 @@ async function generateWithGate(input: {
     }
   }
 
+  if (calledModel) {
+    await recordPortfolioUsage({
+      tenantId,
+      feature: input.feature,
+      userId: input.userId,
+      tokensIn,
+      tokensOut,
+      model,
+      promptVersion,
+      latencyMs,
+      succeeded: accepted !== null,
+      retryCount: blockedDrafts,
+    });
+  }
+
   return {
     text: accepted ?? input.fallback(),
     fellBack: accepted === null,
     blockedDrafts,
     blockedReasons,
+    calledModel,
   };
 }
 
@@ -1056,13 +1458,20 @@ export async function coachFeedback(
   ruleChecks: { code: string; ok: boolean; detail: string }[];
 }> {
   assertStudent(user);
-  const { level } = await aiLevelOf(user.id);
+  const tenantId = requireTenant();
+  const { level, unsetClasses } = await aiLevelOf(user.id);
 
   // **超出層級就停用，不是「可以用但要標註」。** 事前明定的意思就是
   // 有些事不准做（教育部 113/12/13 函文）。
   if (!aiFeatureAllowed(level, input.feature)) {
-    throw new PortfolioError('AI_DISABLED', aiDisabledReason(level, input.feature), 403);
+    throw new PortfolioError(
+      'AI_DISABLED',
+      aiDisabledReason(level, input.feature, unsetClasses),
+      403,
+    );
   }
+
+  await assertBudget(tenantId);
 
   const year = admissionYearOf();
   const limits = await limitsFor(year);
@@ -1100,6 +1509,7 @@ export async function coachFeedback(
 
   const out = await generateWithGate({
     feature: input.feature,
+    userId: user.id,
     payload: {
       question: String(input.question ?? '').slice(0, 500),
       essay: target ? { kind: target.kind, body: target.body.slice(0, 4000) } : null,
@@ -1119,13 +1529,18 @@ export async function coachFeedback(
     fallback: () => safeFeedback(ruleChecks),
   });
 
-  await logAiUse({
-    userId: user.id,
-    feature: input.feature,
-    essayId: target?.id ?? null,
-    natureNote: natureNoteFor(input.feature, out.fellBack),
-    aiLevel: level,
-  });
+  // 模型看過他的文字就要記一筆，包含三次都被閘門擋下那幾次——那幾次
+  // 仍然是 AI 互動。沒有呼叫到（連不上、被吞掉）就不記，理由與
+  // `makeStatement` 相同：沒發生的事不進稽核記錄。
+  if (out.calledModel) {
+    await logAiUse({
+      userId: user.id,
+      feature: input.feature,
+      essayId: target?.id ?? null,
+      natureNote: natureNoteFor(input.feature, out.fellBack),
+      aiLevel: level,
+    });
+  }
 
   return { feature: input.feature, ...out, ruleChecks };
 }
@@ -1232,6 +1647,10 @@ export async function checklistFor(
  * 他刪掉是因為他不要那一題。
  */
 export async function interviewQuestions(user: SessionUser, fieldTag?: string) {
+  // 導覽列不畫、頁面擋非學生，而這裡是**第三扇門**。少了它，家長
+  // 直接打 `GET /api/interview/questions` 拿得到整份題庫，而且在還沒
+  // 匯入過的租戶上，那次請求會用他的 id 建立 39 筆 `InterviewQuestion`。
+  assertNotGuardian(user);
   const tenantId = requireTenant();
   const existing = await prisma.interviewQuestion.count({ where: { tenantId } });
   if (existing === 0) {
@@ -1273,6 +1692,7 @@ export async function practiceInterview(
   user: SessionUser,
   questionId: string,
   answerText: string,
+  programRef?: string | null,
 ): Promise<{
   id: string;
   feedback: ReturnType<typeof structureFeedback>;
@@ -1280,6 +1700,26 @@ export async function practiceInterview(
 }> {
   assertStudent(user);
   const tenantId = requireTenant();
+
+  // **面試結構回饋在第 3 級才開，而這裡本來一道判定都沒有。**
+  //
+  // `AI_LEVELS[2].summary` 明寫「第 3 級……加開撰寫回饋與面試結構
+  // 回饋」，`PolicyEditor` 把那句話整段印給老師看，`aiFeatureAllowed`
+  // 也確實回 false——但沒有任何呼叫端用它，於是老師看到的說明與系統
+  // 的行為是兩回事。**老師以為他關掉了。**
+  //
+  // 回饋本身不呼叫模型（那一段是對的，見下面），所以擋的不是「送進
+  // 模型」而是「老師被告知這一項在他的層級之外」。兩者不一致的時候，
+  // 要改的是行為不是那句說明——說明是他做決定時看到的東西。
+  const { level, unsetClasses } = await aiLevelOf(user.id);
+  if (!aiFeatureAllowed(level, INTERVIEW_AI_FEATURE)) {
+    throw new PortfolioError(
+      'AI_DISABLED',
+      aiDisabledReason(level, INTERVIEW_AI_FEATURE, unsetClasses),
+      403,
+    );
+  }
+
   const q = await prisma.interviewQuestion.findFirst({ where: { id: questionId, tenantId } });
   if (!q) throw new PortfolioError('NOT_FOUND', '找不到這一題。', 404);
 
@@ -1303,9 +1743,26 @@ export async function practiceInterview(
       userId: user.id,
       questionId: q.id,
       answerText: answer,
+      programRef: programRef?.trim() || null,
       feedback: feedback as never,
       consistency: consistency as never,
     },
+  });
+
+  // **記一筆。** `INTERVIEW_FEEDBACK` 在 `MUST_DISCLOSE` 裡，而在此之前
+  // 沒有任何一行寫過它——於是一位練了二十次的學生，揭露聲明上一個字
+  // 都不會提到面試，而規則二（漏掉發生過的一類）永遠不會對它發動。
+  //
+  // 另一個選項是不記，理由是這一段確實一行都沒有呼叫模型（與
+  // `RULE_CHECK` 同一種東西）。不選它，是因為老師的層級設定管得到
+  // 這一項：一個「受 AI 使用層級管、但在揭露記錄上不存在」的功能，
+  // 事後查不出他到底用了沒有。`natureNote` 說清楚它是規則判的。
+  await logAiUse({
+    userId: user.id,
+    feature: INTERVIEW_AI_FEATURE,
+    essayId: null,
+    natureNote: '請系統依規則檢查面試回答的結構，以及它與學習歷程對不對得起來（不經過模型）',
+    aiLevel: level,
   });
 
   return { id: row.id, feedback, consistency };
@@ -1318,15 +1775,21 @@ export async function practiceInterview(
  * 講砸的版本、以及他對自己志向的猶豫——那與學習歷程的內容是同一類
  * 的東西，所以走同一條線：沒有任何一支函式讓老師查別人的練習。
  */
-export async function myPractices(user: SessionUser, limit = 50) {
+export async function myPractices(user: SessionUser, limit = 50, programRef?: string | null) {
   assertStudent(user);
+  const scope = programRef?.trim();
   const rows = await prisma.interviewPractice.findMany({
-    where: { userId: user.id },
-    orderBy: { createdAt: 'desc' },
+    where: { userId: user.id, ...(scope ? { programRef: scope } : {}) },
+    // 先按校系再按時間。四月的學生手上有兩到三個系要面試，同一題他會
+    // 為每一個系各練一次而三份答案應該長得完全不一樣——平鋪成一條
+    // 時間軸的話，他回頭找不到「台大那一版」，而面試前一晚要看的
+    // 正好就是那一版。
+    orderBy: [{ programRef: 'asc' }, { createdAt: 'desc' }],
     take: limit,
     select: {
       id: true,
       answerText: true,
+      programRef: true,
       feedback: true,
       consistency: true,
       createdAt: true,
@@ -1339,8 +1802,27 @@ export async function myPractices(user: SessionUser, limit = 50) {
     fieldTag: r.question.fieldTag,
     focusPoints: r.question.focusPoints,
     answerText: r.answerText,
+    programRef: r.programRef,
     feedback: r.feedback,
     consistency: r.consistency,
     createdAt: r.createdAt.toISOString(),
   }));
+}
+
+/**
+ * 刪掉一次練習。
+ *
+ * 這一區有進沒有出：素材有 DELETE，練習紀錄沒有。而練習框裡最可能
+ * 出現的東西，是一段他還沒想清楚的話、一個講砸的版本、或是一句他
+ * 對自己志向的猶豫——**沒有任何路徑刪得掉**在這種內容上不是不方便，
+ * 它會讓他下一次不寫真的那一版，而假的那一版練了沒有用。
+ */
+export async function deletePractice(user: SessionUser, practiceId: string): Promise<void> {
+  assertStudent(user);
+  const row = await prisma.interviewPractice.findFirst({
+    where: { id: practiceId, userId: user.id },
+    select: { id: true },
+  });
+  if (!row) throw new PortfolioError('NOT_FOUND', '找不到這一次練習。', 404);
+  await prisma.interviewPractice.delete({ where: { id: row.id } });
 }

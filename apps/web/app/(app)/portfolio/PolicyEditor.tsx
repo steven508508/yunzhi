@@ -66,14 +66,22 @@ export default function PolicyEditor({
           還有 <strong>{unset}</strong> 個班級沒有設定。教育部函文要求教師
           <strong>事前明定</strong>使用層級，所以沒有設定的班級，學生的 AI 功能
           全部停用（制度檢查與揭露聲明除外，那兩項不呼叫模型）。
-          那幾班的學生現在看到的是「請老師先設定」。
+          那幾班的學生現在看到的是「請老師先設定」，而且
+          <strong>他們在別的班也一起停用</strong>——沒有設定不等於沒有意見。
         </Note>
       )}
 
       <p className="yz-hint">
         超出層級的功能對該班學生<strong>停用</strong>，不是「可以用但要標註」——
-        事前明定的意思就是有些事不准做。學生同時在多個班級時<strong>取最嚴的一級</strong>：
-        取最寬的話，他只要另外加入一個第 4 級的班，你的決定就整組失效，而你不會知道。
+        事前明定的意思就是有些事不准做。學生同時在多個班級時<strong>取最嚴的一級</strong>，
+        而<strong>「還沒設定」比第 1 級更嚴</strong>：取最寬的話，他只要另外加入一個
+        第 4 級的班，你的決定就整組失效，而你不會知道；把「還沒設定」當成「沒有意見」的話，
+        失效的方式一模一樣，只是發生在你還沒動作的那一側。
+      </p>
+
+      <p className="yz-hint">
+        這裡列的是<strong>你被指派授課的班級</strong>。別班的層級是那一班的老師事前明定的，
+        改掉之後他不會知道自己的決定被換掉了——所以這一頁動不了別班的設定。
       </p>
 
       <button type="button" className="yz-linkish" onClick={() => setExpanded((v) => !v)}>
@@ -90,6 +98,15 @@ export default function PolicyEditor({
             </li>
           ))}
         </ul>
+      )}
+
+      {classes.length === 0 && (
+        <Note tone="info">
+          你目前沒有被指派授課的班級，所以這裡沒有可以設定的對象。
+          AI 使用層級只有<strong>該班的授課老師</strong>改得動——教育部函文要求的是授課教師
+          事前明定，而別班的老師改掉之後，原本那位老師不會知道自己的決定被換掉了。
+          需要幫別班設定的話，找教務主任。
+        </Note>
       )}
 
       <ul className="yz-pf__classes">
@@ -111,7 +128,9 @@ export default function PolicyEditor({
               ))}
             </span>
             {c.level === null ? (
-              <span className="yz-pf__unset">還沒設定，這一班的 AI 功能停用中</span>
+              <span className="yz-pf__unset">
+                還沒設定：這一班的學生 AI 功能停用中，在他的其他班級也一起停用
+              </span>
             ) : (
               <span className="yz-pf__meta">{c.setAt?.slice(0, 10)}</span>
             )}

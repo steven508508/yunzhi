@@ -360,6 +360,92 @@ export function mayAddItem(items, candidate, limits = limitsOf(null)) {
   return { ok: true, reason: null };
 }
 
+/**
+ * 改一件既有的素材之前先問：改了會不會超過。
+ *
+ * # 為什麼新增擋得住還不夠
+ *
+ * 因為**改一件的效果與新增一件一樣**，而且它有兩條路：
+ *
+ *   · 改學期。高二上已經 10 件，把高三的一件改成「高二上」就變 11 件。
+ *   · 改勾選。個人申請階段每一校系至多 3 件課程學習成果，而勾第四件
+ *     只會在畫面上染紅——**這條上限從頭到尾沒有一個地方會擋住人**。
+ *
+ * `mayAddItem` 的註解說錯的方向是「讓他傳到第 7 件才在中央資料庫端
+ * 被退」，PATCH 這條路正是那個方向：他以為存好了，然後在四月被退件。
+ *
+ * # 為什麼與 `mayAddItem` 用同一條「只在這一動才超過時擋」
+ *
+ * 本來就超過的（上限被調小、或舊資料）不該讓他連動都不能動——他要做的
+ * 第一件事可能正是把一件搬出那一年。兩支用不同的寬嚴，症狀是同一個
+ * 動作在新增與修改上結果不一樣，而學生分不出來為什麼。
+ *
+ * @param {PortfolioItemLike[]} items 現況（含要改的那一件）
+ * @param {string} itemId
+ * @param {{semester?: string|null, selectedFor?: string[], category?: string, itemCode?: string}} patch
+ * @returns {{ok: boolean, reason: string|null}}
+ */
+export function mayUpdateItem(items, itemId, patch, limits = limitsOf(null)) {
+  const before = items ?? [];
+  if (!before.some((it) => it.id === itemId)) return { ok: true, reason: null };
+  const after = before.map((it) => (it.id === itemId ? { ...it, ...patch } : it));
+
+  // ── 逐學年的上傳件數 ──
+  const bYears = countCentralUpload(before, limits).byYear;
+  const aYears = countCentralUpload(after, limits).byYear;
+  for (const a of aYears) {
+    const b = bYears.find((y) => y.year === a.year);
+    if (a.outcome.over && !(b?.outcome.over ?? false)) {
+      return {
+        ok: false,
+        reason:
+          `這樣改之後，${a.label}的課程學習成果會變成 ${a.outcome.used} 件，` +
+          `上限是 ${a.outcome.max} 件。要改的話，得先把那一年的某一件移走。`,
+      };
+    }
+    if (a.diverse.over && !(b?.diverse.over ?? false)) {
+      return {
+        ok: false,
+        reason:
+          `這樣改之後，${a.label}的多元表現會變成 ${a.diverse.used} 件，` +
+          `上限是 ${a.diverse.max} 件。要改的話，得先把那一年的某一件移走。` +
+          (a.diverse.summaryExcluded > 0
+            ? `（綜整心得不算在這 ${a.diverse.max} 件裡，所以你看到的檔案數會比這個數字多。）`
+            : ''),
+      };
+    }
+  }
+
+  // ── 逐校系的勾選件數 ──
+  //
+  // 兩邊都用同一份校系清單去算，否則「新出現的那個校系」在 before 裡
+  // 找不到對應的那一列，於是每一次第一個勾選都會被當成「本來就超過」。
+  const refs = [...new Set(after.flatMap((it) => it.selectedFor ?? []))];
+  const bProg = countSelected(before, limits, refs).byProgram;
+  const aProg = countSelected(after, limits, refs).byProgram;
+  for (const a of aProg) {
+    const b = bProg.find((p) => p.programRef === a.programRef);
+    if (a.outcome.over && !(b?.outcome.over ?? false)) {
+      return {
+        ok: false,
+        reason:
+          `${a.programRef} 的課程學習成果會變成 ${a.outcome.used} 件，` +
+          `而個人申請階段每一校系至多 ${a.outcome.max} 件。先取消一件再勾這一件。`,
+      };
+    }
+    if (a.diverse.over && !(b?.diverse.over ?? false)) {
+      return {
+        ok: false,
+        reason:
+          `${a.programRef} 的多元表現會變成 ${a.diverse.used} 件，` +
+          `而個人申請階段每一校系至多 ${a.diverse.max} 件。先取消一件再勾這一件。`,
+      };
+    }
+  }
+
+  return { ok: true, reason: null };
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 容量
 // ─────────────────────────────────────────────────────────────────
@@ -383,12 +469,17 @@ const MB = (n) => `${(n / 1024 / 1024).toFixed(0)}MB`;
  */
 export function checkFileSize(item, limits = limitsOf(null)) {
   const bytes = Number(item?.fileBytes);
-  if (!Number.isFinite(bytes) || bytes <= 0) return { ok: true, reason: null };
+  // **`measured` 與 `ok` 是兩件事。** 沒有大小資料時 `ok` 是 true
+  // （量不到不能當成超過，那會擋住學生），但那不是「量過了都在範圍內」。
+  // 少了這一欄，送出前的清單會把「沒有一件量得到」印成「都在範圍內」——
+  // 一個從來沒看過檔案的檢查，講得像看過了。
+  if (!Number.isFinite(bytes) || bytes <= 0) return { ok: true, measured: false, reason: null };
   const kind = item?.fileKind === 'MEDIA' ? 'MEDIA' : 'DOC';
   const max = kind === 'MEDIA' ? limits.mediaBytes : limits.docBytes;
-  if (bytes <= max) return { ok: true, reason: null };
+  if (bytes <= max) return { ok: true, measured: true, reason: null };
   return {
     ok: false,
+    measured: true,
     reason:
       `這一件是 ${(bytes / 1024 / 1024).toFixed(1)}MB，` +
       `中央資料庫的${kind === 'MEDIA' ? '影音' : '文件'}上限是 ${MB(max)}。` +
@@ -568,41 +659,66 @@ export function submissionChecklist(input) {
   //
   // **擇一不得混搭**是這一段的重點。它不是「建議選一種」，是同一個
   // 校系裡你勾了中央資料庫就不能再自行上傳 PDF，反之亦然。
+  //
+  // 一個校系都沒填的時候，下面三項在邏輯上**恆真**（沒有校系就沒有
+  // 校系沒選擇上傳方式）。印成「0 個校系都選好了」的話，學生會以為
+  // 核對過了——而一份漏掉重點的清單比沒有清單糟，這一段的檔頭自己
+  // 就是這樣寫的。所以「沒填校系」本身要先成為一項，而那三項在
+  // 沒有資料時報的是**沒有核對到**，不是通過。
+  const none = programs.length === 0;
+  const notChecked = '還沒有填校系，所以這一項沒有核對到——不是通過。';
+  add(
+    'PROGRAMS_LISTED',
+    '填了要申請的校系',
+    !none,
+    'BLOCK',
+    none
+      ? '一個校系都還沒填。擇一方式、截止日這兩項因此完全沒有核對到，' +
+        '而它們正是實務上最會出事的兩項。'
+      : `填了 ${programs.length} 個校系。`,
+  );
+
   const noMode = programs.filter((p) => !p.mode);
   add(
     'MODE_CHOSEN',
     '每一校系都選好了要用哪一種上傳方式',
-    noMode.length === 0,
+    !none && noMode.length === 0,
     'BLOCK',
-    noMode.length === 0
-      ? `${programs.length} 個校系都選好了。`
-      : `還有 ${noMode.length} 個校系沒選：${noMode.map((p) => p.name ?? p.programRef).join('、')}。` +
-        '「勾選中央資料庫」與「自行上傳 PDF」每一校系只能擇一，而且**不得混搭**。',
+    none
+      ? notChecked
+      : noMode.length === 0
+        ? `${programs.length} 個校系都選好了。`
+        : `還有 ${noMode.length} 個校系沒選：${noMode.map((p) => p.name ?? p.programRef).join('、')}。` +
+          '「勾選中央資料庫」與「自行上傳 PDF」每一校系只能擇一，而且**不得混搭**。',
   );
 
   const mixed = programs.filter((p) => p.mode === 'MIXED');
   add(
     'MODE_NOT_MIXED',
     '沒有校系同時用了兩種方式',
-    mixed.length === 0,
+    !none && mixed.length === 0,
     'BLOCK',
-    mixed.length === 0
-      ? '沒有混搭。'
-      : `${mixed.map((p) => p.name ?? p.programRef).join('、')} 同時登記了兩種方式。` +
-        '這在甄選會的系統上是做不到的，會在送出時被擋，而那時候可能已經是截止日當天。',
+    none
+      ? notChecked
+      : mixed.length === 0
+        ? '沒有混搭。'
+        : `${mixed.map((p) => p.name ?? p.programRef).join('、')} 同時登記了兩種方式。` +
+          '這在甄選會的系統上是做不到的，會在送出時被擋，而那時候可能已經是截止日當天。',
   );
 
   const noDeadline = programs.filter((p) => !p.deadline);
   add(
     'DEADLINE_KNOWN',
     '每一校系的截止日都查過了',
-    noDeadline.length === 0,
+    !none && noDeadline.length === 0,
     'WARN',
-    noDeadline.length === 0
-      ? '都填了。'
-      : `${noDeadline.map((p) => p.name ?? p.programRef).join('、')} 還沒填截止日。` +
-        '**起始日全國統一 4/30，但截止日是各大學各自規定的**——' +
-        '把最早的那一個當成自己的期限比較安全。',
+    none
+      ? notChecked
+      : noDeadline.length === 0
+        ? '都填了。'
+        : `${noDeadline.map((p) => p.name ?? p.programRef).join('、')} 還沒填截止日。` +
+          '**起始日全國統一 4/30，但截止日是各大學各自規定的**——' +
+          '把最早的那一個當成自己的期限比較安全。',
   );
 
   // ── 三、件數與容量 ──────────────────────────────────────────
@@ -632,12 +748,21 @@ export function submissionChecklist(input) {
           .join('；') || '還沒有任何素材。',
   );
 
-  const refs = programs.map((p) => p.programRef);
+  // **校系清單取的是「他填的」與「他已經標過的」的聯集。**
+  //
+  // 只用他填的那一份，一位把 5 件都勾給台大電機（上限 3 件）而確認
+  // 清單的校系欄留白的學生，會看到「每一校系的勾選都在 3 件與 10 件
+  // 之內」——一句在他的資料上完全不成立的話。而勾選當下的上限
+  // （`mayUpdateItem`）是這條規則的第一道，這裡是最後一道；兩道都
+  // 看不到的話，他會在四月被退件。
+  const marked = [...new Set((items ?? []).flatMap((it) => it.selectedFor ?? []))];
+  const refs = [...new Set([...programs.map((p) => p.programRef), ...marked])];
   const selected = countSelected(items, limits, refs);
+  const extra = marked.filter((r) => !programs.some((p) => p.programRef === r));
   add(
     'COUNT_SELECTED',
     '個人申請勾選的件數在上限內',
-    !selected.over,
+    refs.length > 0 && !selected.over,
     'BLOCK',
     selected.over
       ? selected.byProgram
@@ -648,19 +773,45 @@ export function submissionChecklist(input) {
               `多元表現 ${p.diverse.used}/${p.diverse.max}`,
           )
           .join('；')
-      : `每一校系的勾選都在 ${limits.outcomeSelected} 件與 ${limits.diverseSelected} 件之內。`,
+      : refs.length === 0
+        ? '沒有一件素材標了要送哪一個校系，所以這一項沒有核對到——不是通過。' +
+          `個人申請階段每一校系至多 ${limits.outcomeSelected} 件課程學習成果、` +
+          `${limits.diverseSelected} 件多元表現，要在素材那一頁逐件勾。`
+        : `${refs.length} 個校系的勾選都在 ${limits.outcomeSelected} 件與 ${limits.diverseSelected} 件之內。` +
+          (extra.length > 0
+            ? `（其中 ${extra.join('、')} 是從素材的勾選讀到的，你上面沒有填。）`
+            : ''),
   );
 
-  const oversize = (items ?? []).filter((it) => !checkFileSize(it, limits).ok);
+  // **「沒有一件量得到」與「量過了都在範圍內」是兩句不同的話。**
+  //
+  // 檔案大小是選填、要學生自己打，而且這一版根本沒有真的上傳
+  // （`storageKey` 從來沒寫過）。16 件全部沒填的時候印「都在範圍內」，
+  // 等於一個從來沒看過檔案的檢查講得像看過了——而容量是實務上最會
+  // 被退件的一項。
+  const all = items ?? [];
+  const sized = all.map((it) => ({ it, size: checkFileSize(it, limits) }));
+  const oversize = sized.filter((s) => !s.size.ok);
+  const measured = sized.filter((s) => s.size.measured);
   add(
     'FILE_SIZE',
     '沒有單件超過中央資料庫的容量上限',
-    oversize.length === 0,
-    'BLOCK',
-    oversize.length === 0
-      ? `文件上限 ${MB(limits.docBytes)}、影音上限 ${MB(limits.mediaBytes)}，都在範圍內。`
-      : `${oversize.map((it) => it.title ?? '（沒有標題）').join('、')} 超過上限。` +
-        '這一項在上傳當下就擋過一次了，會出現在這裡通常是上限被調過。',
+    oversize.length === 0 && (all.length === 0 || measured.length > 0),
+    oversize.length > 0 ? 'BLOCK' : 'WARN',
+    oversize.length > 0
+      ? `${oversize.map((s) => s.it.title ?? '（沒有標題）').join('、')} 超過上限。` +
+        '這一項在上傳當下就擋過一次了，會出現在這裡通常是上限被調過。'
+      : all.length === 0
+        ? '還沒有任何素材。'
+        : measured.length === 0
+          ? `${all.length} 件裡沒有一件填了檔案大小，所以這一項沒有核對到——不是通過。` +
+            `中央資料庫的文件上限是 ${MB(limits.docBytes)}、影音上限是 ${MB(limits.mediaBytes)}，` +
+            '而超過的那一件要到送件當天才會被退。'
+          : `${all.length} 件裡有 ${measured.length} 件填了大小，都在範圍內` +
+            `（文件上限 ${MB(limits.docBytes)}、影音上限 ${MB(limits.mediaBytes)}）。` +
+            (measured.length < all.length
+              ? `另外 ${all.length - measured.length} 件沒有填，那幾件沒有核對到。`
+              : ''),
   );
 
   // ── 四、必要子項 ────────────────────────────────────────────
@@ -806,20 +957,36 @@ export const AI_LEVELS = [
 export const AI_LEVEL_UNSET = null;
 
 /**
- * 學生在多個班級時取**最嚴的一級**。
+ * 學生在多個班級時取**最嚴的一級**，而「還沒設定」比第 1 級更嚴。
  *
  * 一位老師為他的班級設了第 1 級，意思就是「這個班的學生不要用」。
  * 取最寬的話，學生只要另外加入一個第 4 級的班就整組失效——而那位
  * 老師不會知道。取最嚴會誤傷（他在別的班本來可以用），但誤傷的症狀
  * 是他來問，而放行的症狀是沒有人知道。
  *
+ * # 為什麼「有一班沒設定」就整個是未設定
+ *
+ * 因為 `aiFeatureAllowed(null, …)` 一律拒絕（「事前明定」的意思是老師
+ * 要先做一個決定，沒做就是沒做）。若讓 `null` 在最小值裡被忽略，
+ * **它就從「未明定」被降級成「沒有意見」**：英文老師還沒設，畫面上
+ * 對他寫著「這一班的 AI 功能停用中」，而他班上那位同時在第 4 級數學班
+ * 的學生撰寫回饋與選件討論全開——他的「還沒明定」在那位學生身上等於
+ * 「全部開放」，而他不會知道。
+ *
+ * 這正是 `PolicyEditor` 自己寫給老師看的那個失效方式，只是發生在
+ * 未設定的那一側。代價是誤傷（同班的其他人都設好了他也用不了），
+ * 而症狀是他去催那位老師設定——這條規定要的就是那個動作。
+ *
  * @param {(number|null|undefined)[]} levels 各班級的設定，沒設定的傳 null
- * @returns {number|null} 沒有任何一班設定過就回 null
+ * @returns {number|null} 有任何一班沒設定、或一班都沒有，就回 null
  */
 export function effectiveAiLevel(levels) {
-  const set = (levels ?? []).filter((l) => Number.isInteger(l) && l >= 1 && l <= 4);
-  if (set.length === 0) return AI_LEVEL_UNSET;
-  return Math.min(...set);
+  const rows = levels ?? [];
+  if (rows.length === 0) return AI_LEVEL_UNSET;
+  // 範圍外的值（0、5，欄位是 Int 進得去）也算沒設定而不是「不算數」：
+  // 不算數的話，一列壞資料會變成「沒有意見」，於是另一班的第 4 級生效。
+  if (rows.some((l) => !(Number.isInteger(l) && l >= 1 && l <= 4))) return AI_LEVEL_UNSET;
+  return Math.min(...rows);
 }
 
 /**
@@ -841,13 +1008,25 @@ export function aiFeatureAllowed(level, feature) {
   return row.allows.includes(feature);
 }
 
-/** 被停用時給學生看的一句話。**要說得出是誰決定的、去問誰。** */
-export function aiDisabledReason(level, feature) {
+/**
+ * 被停用時給學生看的一句話。**要說得出是誰決定的、去問誰。**
+ *
+ * @param {number|null} level
+ * @param {string} feature
+ * @param {string[]} [unsetClasses] 還沒設定的班級名稱。**要點名**——
+ *   學生同時在四個班的時候，「你的班級還沒有設定」他不知道要去找誰，
+ *   而他下一步不是去問，是去用別的工具。
+ */
+export function aiDisabledReason(level, feature, unsetClasses = []) {
   const label = AI_FEATURE_LABELS[feature] ?? feature;
   if (level === AI_LEVEL_UNSET) {
     return (
       `「${label}」還不能用：教育部要求老師**事前明定** AI 使用層級，` +
-      '而你的班級還沒有設定。請老師到班級頁設定之後就會開。'
+      (unsetClasses.length > 0
+        ? `而${unsetClasses.join('、')}還沒有設定。`
+        : '而你的班級還沒有設定。') +
+      '只要有一個班沒設定就全部停用——沒有設定不等於沒有意見。' +
+      '請老師到班級頁設定之後就會開。'
     );
   }
   const row = AI_LEVELS.find((l) => l.level === level);

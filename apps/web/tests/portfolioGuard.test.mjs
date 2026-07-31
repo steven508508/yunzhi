@@ -54,6 +54,7 @@ import {
   ghostwriteFacts,
   safeFeedback,
   safeStatement,
+  sentencesOf,
   summarizePortfolioViolations,
 } from '../lib/portfolioGuard.mjs';
 import { AI_FEATURE_DISCLOSURE_PHRASES } from '../lib/portfolio.mjs';
@@ -434,7 +435,7 @@ test('給學生的違規說明不會把代寫的原文引用出來', () => {
 
 test('每一種違規代號都有給學生看的說法', () => {
   const seen = new Set();
-  for (const [, text] of [...GHOSTWRITTEN, ...GOOD]) {
+  for (const [, text] of [...GHOSTWRITTEN, ...DODGES, ...GOOD]) {
     for (const v of checkGhostwriting(text, facts()).violations) seen.add(v.code);
   }
   for (const f of [TEN_FEEDBACKS, disclosureFacts([])]) {
@@ -449,4 +450,180 @@ test('每一種違規代號都有給學生看的說法', () => {
       `${code} 沒有給學生看的說法，畫面上只會顯示一句沒有資訊的話`,
     );
   }
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 七、情境模擬找出來的四種繞法
+//
+// 這四種在 v0.26.0 的閘門上**零違規**，而它們都是模型被前面幾條規則
+// 擋掉之後最省力的下一步。分成兩軸：
+//
+//   換人稱  「我」→「該生」→ 拿掉主詞  （三條規則同時只認第一人稱）
+//   換句法  一句逗號串到底 / 每寫一句就插一個問句  （湊不滿兩句）
+//
+// 加上一個**整篇層級**的漏：`sentences()` 的邊界裡沒有半形句點，
+// 於是整篇英文散文是「一個句子」，最後那句 `Does this match…you…?`
+// 讓整篇被當成「對學生說話」而豁免。檔頭第 97 行接受的是**子句層級**
+// 的那個交換，不是這個。
+// ═════════════════════════════════════════════════════════════════
+
+const DODGES = [
+  [
+    '第三人稱＋每寫一句就插一個問句（chain 每次被歸零）',
+    '該生自高二起投入機器人社，從完全不懂電路到能獨立完成自走車的控制程式。這樣的說法貼近你的記憶嗎？那段過程讓他確認了對電機領域的興趣，也讓他明白分工不是把事情切開就好。你會怎麼改？',
+  ],
+  [
+    '第三人稱＋一句逗號串到底（永遠湊不滿兩句）',
+    '該生自高中二年級加入機器人社以來，歷經三次比賽的失敗與重做，逐步從一個連麵包板都不會插的人，成長為能獨立完成自走車控制程式並帶領三人小組完成專題的學習者。這樣講你接得起來嗎？',
+  ],
+  [
+    '拿掉主詞＋一句逗號串到底',
+    '高二那年的專題研究成為一個明確的轉折點，從那之後對材料科學的興趣不再只是好奇，而是逐漸長成一個可以說得出理由、也找得到方法去追的方向。這樣講你接得起來嗎？',
+  ],
+  [
+    '整篇英文，最後補一句含 you 的問句',
+    'I first encountered robotics in the tenth grade. I spent two months building a self-driving car, and that experience turned a vague curiosity into a clear direction. Does this match what you remember?',
+  ],
+  [
+    '中文整段只用逗號、句尾補一個問句',
+    '該生在高二上第一次接觸機構設計，接著在高二下把那份興趣帶進自主學習，最後在高三上完成了一台可以循跡的自走車，也讓他確定了要往電機這條路走。這一段你認得出是自己的經歷嗎？',
+  ],
+  [
+    '推薦函的口吻（第三人稱、沒有時間落點）',
+    '該生具備良好的溝通能力與團隊合作精神，並能在壓力下維持穩定的表現，是一位值得推薦給貴系的學生。',
+  ],
+];
+
+test('換人稱與換句法的繞法，每一種都要被擋下來', () => {
+  const missed = [];
+  for (const [how, text] of DODGES) {
+    const v = checkGhostwriting(text, facts());
+    if (!v.ghostwritten) missed.push(`${how}：${text.slice(0, 24)}…`);
+  }
+  assert.deepEqual(missed, [], `這幾種繞法沒有被擋下來：\n${missed.join('\n')}`);
+});
+
+test('半形句點是句子邊界，所以整篇英文不會被當成一句話', () => {
+  // 少了這一條，任何一個 `you` 就讓整篇英文自述豁免：`ADDRESSES_READER`
+  // 的意思從「這一句是對學生說話」變成「這一篇是對學生說話」。
+  const english =
+    'I first encountered robotics in the tenth grade. I spent two months building a self-driving car.';
+  assert.equal(firstPersonRuns(english).length, 1);
+  assert.equal(sentencesOf(english).length, 2);
+});
+
+test('條列的編號不是句號——`1.` 不可以被切成一句', () => {
+  // 切開的話，`1. 我在高一…。2. 我在高二…。` 會變成四段短的，
+  // 而那一條 41 字的第一人稱敘述就掉到門檻底下。
+  assert.equal(sentencesOf('1. 我在高一參加了辯論社。').length, 1);
+  assert.equal(sentencesOf('這一份是 3.5MB。').length, 1);
+});
+
+// ── 反例：擋更多的同時，不該擋的東西還是不能擋 ──────────────
+
+const GOOD_DODGE_NEGATIVES = [
+  [
+    '整篇英文的回饋（英文不等於代寫）',
+    'You wrote that you learned a lot from the club, but you never say what actually happened. Which week do you remember best? What did you do that the others did not?',
+  ],
+  [
+    '一句超過 40 字的制度說明（沒有時間落點，不是自傳）',
+    '多元表現綜整心得有八百字與三張圖的明文限制，但它不計入十件多元表現的額度，所以不需要為了它刪掉別的東西。要不要看看你現在這一份有幾張圖？',
+  ],
+  [
+    '提到招生委員（有第三人稱，但講的不是學生的經歷）',
+    '委員手上只有那份檔案，他讀到「很有幫助」的時候接不上前因後果。你要不要在那一句後面補一件具體發生過的事？',
+  ],
+  [
+    '敢問到底的追問——一個連這句都不敢說的 AI 沒有用',
+    '你要不要講講那次比賽你負責的是哪一部分？當時最卡的一步是什麼？後來是誰把它解掉的？',
+  ],
+  [
+    '引用學生原文之後再問（引用不是代寫）',
+    '你這一段寫「高二的時候我參加了機器人社，做了一個自走車。我覺得那次很有趣。」——那台自走車最後跑起來了嗎？',
+  ],
+];
+
+test('擋更多之後，好的回饋一項都不可以被誤擋', () => {
+  const wrong = [];
+  for (const [what, text] of GOOD_DODGE_NEGATIVES) {
+    const v = checkGhostwriting(text, facts());
+    if (!v.ok) wrong.push(`${what} → ${describePortfolioViolations(v.violations)}`);
+  }
+  assert.deepEqual(wrong, [], `這幾段好的回饋被誤擋了：\n${wrong.join('\n')}`);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 八、揭露聲明的數字與否定
+//
+// 這份文件會被貼進學習歷程給招生委員看，所以它上面的**每一個字與
+// 每一個數字**都要跟記錄對得起來。三件事：
+//
+//   · 「共 N 次」不可以把「產生聲明」自己那幾筆算進去
+//   · 誠實的否定句（「未使用 AI 協助挑選素材」）不可以被當成不實
+//   · 把該說的事寫成「由本人進行」不可以算成揭露過了
+// ═════════════════════════════════════════════════════════════════
+
+test('「共 N 次」不算「產生聲明」自己那幾筆——按幾次重新產生都一樣', () => {
+  // 學生只用過 3 次撰寫回饋，按了 4 次「重新產生」。列舉的類別只有
+  // 一種，數字卻會變成七——而這份文件是要給招生委員看的。
+  const f = disclosureFacts([
+    ...Array.from({ length: 3 }, () => ({ feature: 'WRITING_FEEDBACK' })),
+    ...Array.from({ length: 4 }, () => ({ feature: 'DISCLOSURE_STATEMENT' })),
+  ]);
+  assert.equal(f.total, 7, 'total 是稽核用的全部筆數，不該變');
+  assert.equal(f.disclosedTotal, 3, '要揭露的次數只算 MUST_DISCLOSE 那幾類');
+
+  const s = safeStatement(f, AI_FEATURE_DISCLOSURE_PHRASES);
+  assert.ok(s.includes('共 3 次'), `聲明上的數字是錯的：「${s}」`);
+  assert.ok(!s.includes('共 7 次'));
+  assert.equal(checkDisclosureStatement(s, f).ok, true);
+});
+
+test('聲明上的次數與記錄對不起來時要被擋', () => {
+  const v = checkDisclosureStatement(
+    '本文之構思與撰寫由本人完成，過程中使用 AI 輔助工具進行文字具體性與邏輯一致性的回饋，共 7 次，未使用 AI 生成內容。',
+    TEN_FEEDBACKS,
+  );
+  assert.ok(v.violations.some((x) => x.code === 'MISCOUNTS'));
+  assert.equal(v.ghostwritten, true);
+
+  // 對得上的就不擋。
+  const ok = checkDisclosureStatement(
+    '本文之構思與撰寫由本人完成，過程中使用 AI 輔助工具進行文字具體性與邏輯一致性的回饋，共 10 次，未使用 AI 生成內容。',
+    TEN_FEEDBACKS,
+  );
+  assert.equal(ok.ok, true, describePortfolioViolations(ok.violations));
+});
+
+test('誠實的否定句不可以被當成「宣稱未使用 AI」或「宣稱用了沒用過的功能」', () => {
+  // 記錄裡只有撰寫回饋。這一份把「沒有用 AI 挑素材」講出來是誠實，
+  // 而學生看到「模型三次都寫出與記錄不符的聲明」是一句冤枉話——
+  // 冤枉三次之後他會轉去用別的工具，那才是最壞的結果。
+  const v = checkDisclosureStatement(
+    '本文之構思與撰寫由本人完成，過程中使用 AI 輔助工具進行文字具體性與邏輯一致性的回饋，' +
+      '未使用 AI 協助挑選素材，亦未使用 AI 生成內容。',
+    TEN_FEEDBACKS,
+  );
+  assert.equal(v.ok, true, describePortfolioViolations(v.violations));
+});
+
+test('把該說的事寫成「由本人進行」，遮不掉記錄裡的十次撰寫回饋', () => {
+  // 這正是檔頭說要擋的「用一句真話遮住一件該說的事」：句子裡確實有
+  // 「具體性」三個字，而那句話講的正好相反。
+  const v = checkDisclosureStatement(
+    '本文之構思與撰寫由本人完成，文字具體性與邏輯一致性的檢視亦由本人反覆進行，' +
+      '未透過 AI 工具生成任何內容。',
+    TEN_FEEDBACKS,
+  );
+  assert.equal(v.ok, false, '一句真話遮住了十次撰寫回饋，而閘門放它過去了');
+  assert.ok(v.violations.some((x) => x.code === 'OMITS_FEATURE'));
+});
+
+test('全篇否認仍然要擋——放寬否定的判定不可以把這一條一起放掉', () => {
+  const v = checkDisclosureStatement(
+    '本文之構思與撰寫由本人完成，全程未使用 AI 輔助工具。',
+    TEN_FEEDBACKS,
+  );
+  assert.ok(v.violations.some((x) => x.code === 'CLAIMS_NO_AI'));
 });

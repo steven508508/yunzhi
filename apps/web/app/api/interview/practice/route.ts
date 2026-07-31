@@ -22,7 +22,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { myPractices, portfolioFailure, practiceInterview } from '@/lib/portfolioDb';
+import { deletePractice, myPractices, portfolioFailure, practiceInterview } from '@/lib/portfolioDb';
 import { scopedRoute } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
@@ -30,11 +30,20 @@ export const dynamic = 'force-dynamic';
 const Body = z.object({
   questionId: z.string().min(1),
   answerText: z.string().min(1).max(8000),
+  /**
+   * 這一次是為哪一個校系練的。
+   *
+   * 同一題（「你為什麼想讀這個系」）他會為每一個系各練一次，而三份
+   * 答案應該長得完全不一樣。沒有這一欄的話，紀錄是一條按時間排的
+   * 平鋪清單，他回頭找不到「台大那一版」。
+   */
+  programRef: z.string().max(40).nullish(),
 });
 
-export const GET = scopedRoute(async (_req: NextRequest, { user }) => {
+export const GET = scopedRoute(async (req: NextRequest, { user }) => {
   try {
-    return NextResponse.json({ practices: await myPractices(user) });
+    const programRef = new URL(req.url).searchParams.get('programRef');
+    return NextResponse.json({ practices: await myPractices(user, 50, programRef) });
   } catch (e) {
     const { status, body } = portfolioFailure(e);
     return NextResponse.json(body, { status });
@@ -45,8 +54,33 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
   const parsed = Body.safeParse((await req.json().catch(() => null)) ?? {});
   if (!parsed.success) return NextResponse.json({ error: '參數不正確' }, { status: 400 });
   try {
-    const result = await practiceInterview(user, parsed.data.questionId, parsed.data.answerText);
+    const result = await practiceInterview(
+      user,
+      parsed.data.questionId,
+      parsed.data.answerText,
+      parsed.data.programRef,
+    );
     return NextResponse.json({ ...result, practices: await myPractices(user) });
+  } catch (e) {
+    const { status, body } = portfolioFailure(e);
+    return NextResponse.json(body, { status });
+  }
+});
+
+/**
+ * 刪掉一次練習。
+ *
+ * **這一區在此之前有進沒有出。** 練習框裡最可能出現的東西是一段他
+ * 還沒想清楚的話、一個講砸的版本、或一句對自己志向的猶豫——
+ * 「你刪不掉」在這種內容上會讓他下一次不寫真的那一版，而假的那一版
+ * 練了沒有用。
+ */
+export const DELETE = scopedRoute(async (req: NextRequest, { user }) => {
+  const id = new URL(req.url).searchParams.get('id');
+  if (!id) return NextResponse.json({ error: '參數不正確' }, { status: 400 });
+  try {
+    await deletePractice(user, id);
+    return NextResponse.json({ practices: await myPractices(user) });
   } catch (e) {
     const { status, body } = portfolioFailure(e);
     return NextResponse.json(body, { status });

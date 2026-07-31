@@ -51,8 +51,17 @@ export const POST = scopedRoute(async (req: NextRequest, { user }) => {
     if (parsed.data.statementId) {
       // 學生編輯自己的版本。**原始的 `generated` 留著**——前者是系統
       // 說了什麼，後者是他決定要說什麼，兩者都要留。
-      await editStatement(user, parsed.data.statementId, parsed.data.edited ?? '');
-      return NextResponse.json(await myDisclosure(user, parsed.data.essayId));
+      //
+      // **編輯這條路也要過閘門**（見 `editStatement`）：產出最終文件
+      // 的是這一條，而不是模型生成那一條——他按「產生一份」拿到正確
+      // 的聲明，在框裡改成「未使用 AI 輔助工具」，然後按旁邊的「複製」。
+      // 擋的是與記錄不符，不是擋編輯。
+      const { warnings } = await editStatement(
+        user,
+        parsed.data.statementId,
+        parsed.data.edited ?? '',
+      );
+      return NextResponse.json({ warnings, ...(await myDisclosure(user, parsed.data.essayId)) });
     }
     const made = await makeStatement(user, parsed.data.essayId);
     return NextResponse.json({ made, ...(await myDisclosure(user, parsed.data.essayId)) });

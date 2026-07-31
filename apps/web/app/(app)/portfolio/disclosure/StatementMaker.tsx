@@ -48,6 +48,7 @@ export default function StatementMaker({
   const [loadedFor, setLoadedFor] = useState(latest?.id ?? '');
   const [blocked, setBlocked] = useState<string[]>([]);
   const [fellBack, setFellBack] = useState(false);
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   if (loadedFor !== (latest?.id ?? '')) {
     setLoadedFor(latest?.id ?? '');
@@ -68,9 +69,12 @@ export default function StatementMaker({
   const save = () =>
     run(async () => {
       if (!latest) return;
-      await submitJson('/api/portfolio/disclosure', {
+      // 存不進去的時候（改過的版本與記錄對不起來）伺服器回 400，
+      // `submitJson` 會把那句說明丟成錯誤，畫面上顯示在 `error` 那一格。
+      const out = await submitJson<{ warnings?: string[] }>('/api/portfolio/disclosure', {
         json: { statementId: latest.id, edited: draft },
       });
+      setWarnings(out.warnings ?? []);
       router.refresh();
     });
 
@@ -118,11 +122,20 @@ export default function StatementMaker({
         <>
           <TextAreaField
             label="這一份會貼進你的檔案"
-            hint="你可以改。系統會同時保留原始的版本——前者是系統依記錄說了什麼，後者是你決定要說什麼。"
+            hint="你可以改成像你講話的樣子。系統會同時保留原始的版本——前者是系統依記錄說了什麼，後者是你決定要說什麼。改過的版本一樣要對得回你的使用記錄。"
             rows={5}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
           />
+
+          {warnings.length > 0 && (
+            <Note tone="warn">
+              存起來了，但有 {warnings.length} 件事值得再看一眼（{warnings.join('；')}）。
+              這幾項不影響它與記錄相不相符，只是體例——
+              <strong>「構思與撰寫由本人完成」是這份聲明最重要的一句</strong>，
+              揭露的重點不是用了什麼工具，是這份文件仍然是你的。
+            </Note>
+          )}
           <div className="yz-actions">
             <Button variant="primary" busy={busy} onClick={save}>
               存我改過的版本

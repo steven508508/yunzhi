@@ -113,6 +113,25 @@ export default function EssayEditor({
       router.refresh();
     });
 
+  /**
+   * 整份刪掉，**連同它的每一個舊版本。**
+   *
+   * 這一區裝的是他的生涯敘事，而寫下來之後想拿掉的理由與素材完全不同：
+   * 他可能寫了一段關於家裡的事、或是一段他現在覺得很蠢的話。
+   * 「你刪不掉」在這種內容上不是不方便，它會讓他下一次不寫真話。
+   *
+   * 只刪現行版本的話，舊版本會留在資料庫裡而畫面上永遠看不到——
+   * 那不是刪除，那是把它藏起來。
+   */
+  const drop = () =>
+    run(async () => {
+      if (!current) return;
+      await submitJson(`/api/portfolio/essays/${current.id}`, { method: 'DELETE' });
+      setBody('');
+      setFeedback(null);
+      router.refresh();
+    });
+
   const ask = (feature: string) =>
     run(async () => {
       setAiError(null);
@@ -192,10 +211,22 @@ export default function EssayEditor({
           存一個新版本
         </Button>
         {current && <span className="yz-pf__meta">目前是第 {current.version} 版</span>}
+        {current && (
+          <Button
+            variant="quiet"
+            disabled={busy}
+            onClick={drop}
+            title="連同每一個舊版本一起刪掉。只刪現行版本的話，舊版本會留在資料庫裡而你永遠看不到。"
+          >
+            整份刪掉
+          </Button>
+        )}
       </div>
       <p className="yz-hint">
         舊版本會留著。寫學習歷程的價值有一半在回頭看自己三個月前怎麼想的，
         直接覆蓋的話那一半就沒了。
+        <strong>不想留的整份可以刪掉</strong>——連同每一個舊版本，因為留下一份你看不到
+        也刪不掉的東西不是保存，是把它藏起來。
       </p>
 
       {/* ── 回饋 ─────────────────────────────────────────── */}

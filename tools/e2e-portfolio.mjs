@@ -223,6 +223,36 @@ function adapt(base) {
               return m.create({ data: create });
             };
           }
+          if (op === 'aggregate') {
+            // 預算判定用的 `_sum`。pg-shim 沒有 `aggregate`，也沒有 `gte`
+            // （見它的檔頭：只實作管線用到的語法，用到沒實作的直接拋錯）。
+            // 範圍條件拆出來在這一側過濾，其餘照原樣交給它。
+            return async (args = {}) => {
+              const where = {};
+              const ranges = [];
+              for (const [k, v] of Object.entries(args.where ?? {})) {
+                const range =
+                  v && typeof v === 'object' && !(v instanceof Date) && !Array.isArray(v)
+                    ? v
+                    : null;
+                if (range && ('gte' in range || 'lte' in range)) ranges.push([k, range]);
+                else where[k] = v;
+              }
+              const rows = await m.findMany({ where });
+              const kept = rows.filter((r) =>
+                ranges.every(
+                  ([k, v]) =>
+                    (v.gte === undefined || r[k] >= v.gte) &&
+                    (v.lte === undefined || r[k] <= v.lte),
+                ),
+              );
+              const sum = {};
+              for (const k of Object.keys(args._sum ?? {})) {
+                sum[k] = kept.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+              }
+              return { _sum: sum };
+            };
+          }
           if (op === 'findMany') {
             return (args = {}) => queryWithRelations(key, args);
           }
@@ -433,7 +463,20 @@ async function seedTenant(spec) {
       data: { classId: klass2.id, userId: student.id, role: 'STUDENT', isHomeroom: false },
     });
 
-    return { tenant, admin, teacher, other, guardian, student, student2, klass, klass2 };
+    // **授課指派。** AI 使用層級的判定查的是 `ClassSubjectTeacher`
+    // 而不是 `ClassMembership`（見 `lib/teaching.ts` 的檔頭：那兩張表
+    // 在這個系統裡是分開的，而混用過一次）。`other` 刻意不指派——
+    // 「另一位老師改不動這個班的層級」那一條要有人來當反例。
+    const subject = await prisma.subject.create({
+      data: { tenantId: tenant.id, code: 'MATH_A', name: `${spec.tag} 數學 A`, order: 1 },
+    });
+    for (const c of [klass, klass2]) {
+      await prisma.classSubjectTeacher.create({
+        data: { classId: c.id, subjectId: subject.id, userId: teacher.id, isPrimary: true },
+      });
+    }
+
+    return { tenant, admin, teacher, other, guardian, student, student2, klass, klass2, subject };
   });
 }
 
@@ -464,6 +507,12 @@ const makeStatement = (a, json = {}) =>
   callAs(asUser(a), routes.disclosure.POST, '/api/portfolio/disclosure', { method: 'POST', json });
 const setPolicy = (a, json) =>
   callAs(asUser(a), routes.policy.POST, '/api/portfolio/policy', { method: 'POST', json });
+const getPolicies = (a) => callAs(asUser(a), routes.policy.GET, '/api/portfolio/policy');
+const deleteEssay = (a, id) =>
+  callAs(asUser(a), routes.essay.DELETE, `/api/portfolio/essays/${id}`, {
+    method: 'DELETE',
+    params: { essayId: id },
+  });
 const setLimits = (a, json) =>
   callAs(asUser(a), routes.limits.POST, '/api/portfolio/limits', { method: 'POST', json });
 const runChecklist = (a, json) =>
@@ -472,7 +521,16 @@ const ivQuestions = (a) =>
   callAs(asUser(a), routes.ivQuestions.GET, '/api/interview/questions?fieldTag=EECS');
 const ivPractice = (a, json) =>
   callAs(asUser(a), routes.ivPractice.POST, '/api/interview/practice', { method: 'POST', json });
-const ivHistory = (a) => callAs(asUser(a), routes.ivPractice.GET, '/api/interview/practice');
+const ivHistory = (a, programRef) =>
+  callAs(
+    asUser(a),
+    routes.ivPractice.GET,
+    `/api/interview/practice${programRef ? `?programRef=${encodeURIComponent(programRef)}` : ''}`,
+  );
+const ivDelete = (a, id) =>
+  callAs(asUser(a), routes.ivPractice.DELETE, `/api/interview/practice?id=${id}`, {
+    method: 'DELETE',
+  });
 
 const diverse = (i, semester = '高二上') => ({
   category: 'DIVERSE_PERFORMANCE',
@@ -589,6 +647,40 @@ async function main() {
       assert.match(r.body.error, /4MB/);
     });
 
+    await test('★ 代碼與類別要互相驗證，湊不起來的組合建不出來', async () => {
+      // `{category: 'COURSE_OUTCOME', itemCode: 'N'}` 兩個欄位各自合法，
+      // 湊在一起的後果剛好是這個模組最在意的那一條失效：綜整心得被
+      // 算進課程學習成果的額度，然後系統告訴一位沒有超過的學生他超過了。
+      const wrong = await addItem(student, {
+        category: 'COURSE_OUTCOME',
+        itemCode: 'N',
+        title: '混進去的綜整心得',
+        semester: '高三上',
+      });
+      assert.equal(wrong.status, 400, wrong.text);
+      assert.match(wrong.body.error, /多元表現/);
+
+      // 認不得的代碼也一樣——`itemLabel` 會是 null，三個月後他自己
+      // 看不出那是什麼，中央資料庫也收不了。
+      const unknown = await addItem(student, {
+        category: 'DIVERSE_PERFORMANCE',
+        itemCode: 'Z',
+        title: '不知道是什麼',
+        semester: '高三上',
+      });
+      assert.equal(unknown.status, 400, unknown.text);
+
+      // 「其他（校系自訂）」是刻意留的出口：R–T 由各校系自訂，
+      // 系統手上沒有那份對照表，而它不計入任何一個額度。
+      const other2 = await addItem(student, {
+        category: 'OTHER',
+        itemCode: 'R',
+        title: '某校系自訂的一項',
+        semester: '高三上',
+      });
+      assert.equal(other2.status, 200, other2.text);
+    });
+
     await test('個申勾選的上限是逐校系算的', async () => {
       const items = (await getItems(student)).body.items.filter(
         (i) => i.category === 'DIVERSE_PERFORMANCE' && i.itemCode === 'G',
@@ -600,6 +692,57 @@ async function main() {
       const p = r.body.selected.byProgram.find((x) => x.programRef === '001');
       assert.equal(p.diverse.used, 3);
       assert.equal(p.diverse.over, false);
+    });
+
+    await test('★ 勾選超過逐校系上限時，勾的當下就擋（畫面染紅不是擋）', async () => {
+      // 課程學習成果每一校系至多 3 件。在此之前，超過只會在畫面上
+      // 染紅，而送出前的清單在他沒填校系時看不到——**這條上限從頭到尾
+      // 沒有一個地方會擋住人**。
+      const made = [];
+      for (let i = 0; i < 4; i += 1) {
+        const r = await addItem(student, {
+          category: 'COURSE_OUTCOME',
+          itemCode: 'B',
+          title: `書面報告 ${i}`,
+          semester: '高一上',
+        });
+        assert.equal(r.status, 200, r.text);
+        made.push(r.body.item.id);
+      }
+      for (const id of made.slice(0, 3)) {
+        assert.equal((await patchItem(student, id, { selectedFor: ['台大電機'] })).status, 200);
+      }
+      const no = await patchItem(student, made[3], { selectedFor: ['台大電機'] });
+      assert.equal(no.status, 400, no.text);
+      assert.match(no.body.error, /台大電機/);
+      // 換一個校系就勾得上——擋的是那一個校系滿了，不是這一件不能勾。
+      assert.equal((await patchItem(student, made[3], { selectedFor: ['成大電機'] })).status, 200);
+      // 而且被擋的那一次沒有寫進去。
+      const fresh = (await getItems(student)).body.items.find((i) => i.id === made[3]);
+      assert.deepEqual(fresh.selectedFor, ['成大電機']);
+    });
+
+    await test('★ 改學期繞不過每學年的件數上限', async () => {
+      // `addItem` 擋得住，`updateItem` 擋不住：把高三的一件改成
+      // 「高二上」就變第 11 件，而它只會在送出前的清單上被退——
+      // `mayAddItem` 的註解說錯的方向正是這個。
+      const items = (await getItems(student)).body.items;
+      const g2 = items.filter((i) => i.semester === '高二上' && i.itemCode === 'G').length;
+      const spare = await addItem(student, diverse(99, '高三下'));
+      assert.equal(spare.status, 200, spare.text);
+
+      // 先把高二上填到 10 件。
+      for (let i = g2; i < 10; i += 1) {
+        assert.equal((await addItem(student, diverse(100 + i, '高二上'))).status, 200);
+      }
+      const no = await patchItem(student, spare.body.item.id, { semester: '高二上' });
+      assert.equal(no.status, 400, no.text);
+      assert.match(no.body.error, /高二/);
+      // 搬出去（往沒滿的那一年）要放行——不然他沒有辦法修正。
+      assert.equal(
+        (await patchItem(student, spare.body.item.id, { semester: '高一下' })).status,
+        200,
+      );
     });
 
     await test('學生改不到別人的素材（RLS 擋得住別家，擋不住隔壁同學）', async () => {
@@ -776,6 +919,47 @@ async function main() {
       const r = await shareEssay(student, essayId, student2.id, true);
       assert.equal(r.status, 404, r.text);
     });
+
+    await test('★ 對舊版本分享時，授權不可以先落地再回 404', async () => {
+      // `findFirst({id, userId})` 不看 `isCurrent`，於是老師的 id 已經被
+      // 寫進那一列的 `sharedWith`，然後 `myEssays()`（只回現行版本）
+      // 找不到它、丟 404——學生看到「找不到這一份自述」，而授權落在
+      // 一列他在畫面上永遠看不到、也撤不回的舊版本上。
+      const old = await prisma.portfolioEssay.findFirst({
+        where: { userId: student.id, kind: 'MOTIVATION', isCurrent: false },
+      });
+      assert.ok(old, '這一段需要至少一個舊版本');
+      const r = await shareEssay(student, old.id, other.id, true);
+      assert.equal(r.status, 404, r.text);
+      const after = await prisma.portfolioEssay.findFirst({ where: { id: old.id } });
+      assert.ok(
+        !after.sharedWith.includes(other.id),
+        '授權寫進舊版本了——他在畫面上看不到，也撤不回來',
+      );
+    });
+
+    await test('★ 自述刪得掉，而且舊版本不會留在資料庫裡', async () => {
+      // 只刪現行版本的話，舊版本連同它們的分享名單會留下來而畫面上
+      // 永遠看不到——那不是刪除，那是把它藏起來。
+      const target = (await getEssays(student)).body.essays.find((e) => e.kind === 'PLAN');
+      assert.ok(target, '這一段需要一份 PLAN');
+      const r = await deleteEssay(student, target.id);
+      assert.equal(r.status, 200, r.text);
+      assert.ok(!r.body.essays.some((e) => e.kind === 'PLAN'));
+      assert.equal(
+        await prisma.portfolioEssay.count({ where: { userId: student.id, kind: 'PLAN' } }),
+        0,
+        '舊版本留在資料庫裡了',
+      );
+      // 別人的刪不掉。
+      const mine = (await getEssays(student)).body.essays[0];
+      assert.equal((await deleteEssay(student2, mine.id)).status, 404);
+      // 把它寫回來，後面幾段還要用。
+      assert.equal(
+        (await saveEssay(student, { kind: 'PLAN', body: '未來我想做感測器的訊號處理。' })).status,
+        200,
+      );
+    });
   });
 
   // ═══════════════════════════════════════════════════════════
@@ -791,9 +975,24 @@ async function main() {
       assert.match(r.body.error, /老師/);
     });
 
+    await test('★ 只設好一班時仍然停用——沒有設定不等於沒有意見', async () => {
+      // **這一條是情境模擬找出來的**：`effectiveAiLevel([4, null])` 回 4，
+      // 於是英文老師還沒明定，畫面上對他寫著「這一班的 AI 功能停用中」，
+      // 而他班上那位同時在第 4 級數學班的學生全開——他的「還沒明定」
+      // 在那位學生身上等於「全部開放」，而他不會知道。
+      assert.equal((await setPolicy(teacher, { classId: klass2.id, level: 4 })).status, 200);
+      const r = await coach(student, { feature: 'WRITING_FEEDBACK' });
+      assert.equal(r.status, 403, r.text);
+      assert.equal(r.body.code, 'AI_DISABLED');
+      // 而且要說得出是哪一班還沒設定，否則他不知道去找哪一位老師。
+      assert.match(r.body.error, /三年甲班/, '沒有點名那一班，學生不知道要去催誰');
+
+      const d = await getDisclosure(student);
+      assert.equal(d.body.level, null, '有一班沒設定，整個人就該是未設定');
+    });
+
     await test('老師設定第 1 級之後，撰寫回饋仍然停用而且訊息換一句', async () => {
       assert.equal((await setPolicy(teacher, { classId: klass.id, level: 1 })).status, 200);
-      assert.equal((await setPolicy(teacher, { classId: klass2.id, level: 4 })).status, 200);
       const r = await coach(student, { feature: 'WRITING_FEEDBACK' });
       assert.equal(r.status, 403, r.text);
       assert.match(r.body.error, /第 1 級/);
@@ -806,6 +1005,29 @@ async function main() {
       const d = await getDisclosure(student);
       assert.equal(d.body.level, 1);
       assert.equal(d.body.classes.length, 2);
+    });
+
+    await test('★ 沒帶這個班的老師改不動它的層級（也看不到它）', async () => {
+      // `assertStaff` 只問「他是不是職員」，於是數學班老師打一個
+      // `{classId: 英文班, level: 4}` 就把英文老師事前明定的第 1 級
+      // 蓋掉了——而 `AiUsagePolicy` 是 update-in-place，舊的 level
+      // 直接消失，畫面上只會顯示新的日期。
+      const r = await setPolicy(other, { classId: klass.id, level: 4 });
+      assert.equal(r.status, 403, r.text);
+      assert.match(r.body.error, /授課/);
+      // 而那一班的設定沒有被動到。
+      const row = await prisma.aiUsagePolicy.findFirst({ where: { classId: klass.id } });
+      assert.equal(row.level, 1, '別班的老師把層級蓋掉了');
+
+      // 一覽也只列他自己帶的班。全校每一班對他來說是一份他做不了、
+      // 也不該做的待辦。
+      const list = await getPolicies(other);
+      assert.equal(list.status, 200, list.text);
+      assert.equal(list.body.classes.length, 0);
+      const mine = await getPolicies(teacher);
+      assert.equal(mine.body.classes.length, 2);
+      // 管理員看得到全部——老師離職與全校統一調整是他的職責。
+      assert.ok((await getPolicies(admin)).body.classes.length >= 2);
     });
 
     await test('★ 第 2 級開素材提示，但撰寫回饋仍然停用', async () => {
@@ -908,13 +1130,53 @@ async function main() {
       assert.ok(!/未使用\s*AI\s*輔助工具/.test(s), '記錄裡有互動，聲明卻說沒用過');
     });
 
-    await test('產生聲明這件事本身也被記了一筆（稽核要完整）', async () => {
+    await test('★ 只有真的呼叫過模型才記一筆 DISCLOSURE_STATEMENT', async () => {
       // 記錄要完整，聲明才可以只講該講的——`MUST_DISCLOSE` 刻意不含
       // 這一項（理由在 portfolioGuard.mjs），但那是「不寫進聲明」，
       // 不是「不記錄」。
+      //
+      // **不過「沒發生的事」不進稽核記錄。** 第 1 級與 AI 連不上時走的
+      // 是 `deterministic()`，一行都沒有呼叫模型；無條件記錄的話，
+      // 一位被明定不得使用 AI 的學生記錄上會有 AI 互動，而那一筆還會
+      // 灌進下一次的次數。
       const r = await getDisclosure(student);
-      assert.equal(r.body.counts.DISCLOSURE_STATEMENT, 1);
-      assert.equal(r.body.total, before.total + 3 + 1);
+      const logged = r.body.counts.DISCLOSURE_STATEMENT ?? 0;
+      assert.equal(logged, AI_UP ? 1 : 0, AI_UP ? '呼叫過模型卻沒記' : '沒呼叫模型卻記了一筆');
+      assert.equal(r.body.total, before.total + 3 + logged);
+    });
+
+    await test('★ 「共 N 次」不把產生聲明自己那幾筆算進去', async () => {
+      // 學生只用過幾次撰寫回饋，但按了好幾次「重新產生」。列舉的類別
+      // 只有一種，數字卻會跟著按的次數長——而這份文件是要貼進學習
+      // 歷程給招生委員看的，上面的數字錯了沒有人查得出來。
+      //
+      // 直接造記錄而不是靠按鈕：`makeStatement` 只在真的呼叫過模型時
+      // 才記一筆（見上一條），而 AI 沒起來時就一筆都不會有——那樣
+      // 這一條會在兩種環境下只有一種測得到東西。
+      for (let i = 0; i < 4; i += 1) {
+        await prisma.aiDisclosureLog.create({
+          data: {
+            tenantId: home.tenant.id,
+            userId: student.id,
+            feature: 'DISCLOSURE_STATEMENT',
+            essayId,
+            natureNote: '產生揭露聲明草稿',
+            aiLevel: 3,
+          },
+        });
+      }
+      const r = await makeStatement(student);
+      assert.equal(r.status, 200, r.text);
+
+      const d = await getDisclosure(student);
+      const disclosed = ['WRITING_FEEDBACK', 'MATERIAL_HINT', 'SELECTION_DISCUSS', 'INTERVIEW_FEEDBACK']
+        .reduce((a, f) => a + (d.body.counts[f] ?? 0), 0);
+      assert.ok(d.body.total > disclosed, '這一段要有「不必揭露但有記錄」的筆數，否則測不到差別');
+
+      const n = Number((r.body.made.generated.match(/共\s*(\d+)\s*次/) ?? [])[1] ?? NaN);
+      assert.ok(Number.isFinite(n), `聲明上沒有次數：「${r.body.made.generated}」`);
+      assert.equal(n, disclosed, `聲明上的數字是 ${n}，而要揭露的是 ${disclosed} 次`);
+      assert.notEqual(n, d.body.total, '把「產生聲明」自己那幾筆也算進去了');
     });
 
     await test('學生可以編輯聲明，而原始的版本留著', async () => {
@@ -927,6 +1189,63 @@ async function main() {
       const after = r.body.statements.find((s) => s.id === before.id);
       assert.equal(after.generated, before.generated, '原始版本被蓋掉了');
       assert.match(after.edited, /逐項確認/);
+    });
+
+    await test('★ 改成與記錄牴觸的版本存不進去（產出最終文件的是這一條路）', async () => {
+      // 學生用了幾次撰寫回饋，按「產生一份」拿到正確的聲明，然後在
+      // 框裡改成「未使用 AI 輔助工具」再按存檔——而畫面接著給他一顆
+      // 「複製」按鈕，`edited` 就是他要貼進檔案的那一份。
+      // 閘門本來只掛在模型生成那一條路上，`CLAIMS_NO_AI` 在這條路上
+      // 一次都不會執行。
+      const latest = (await getDisclosure(student)).body.statements[0];
+      const r = await makeStatement(student, {
+        statementId: latest.id,
+        edited: '本文之構思與撰寫均由本人完成，過程中未使用 AI 輔助工具，亦未使用 AI 生成內容。',
+      });
+      assert.equal(r.status, 400, r.text);
+      assert.match(r.body.error, /對不起來/);
+      const after = (await getDisclosure(student)).body.statements.find((s) => s.id === latest.id);
+      assert.ok(!/未使用\s*AI\s*輔助工具/.test(after.edited ?? ''), '不實的版本被存進去了');
+    });
+
+    await test('用自己的話寫的版本存得進去——擋的是與記錄不符，不是擋編輯', async () => {
+      // 學生有權利用自己的話寫這份聲明（§9.6 甚至要求它不能是樣板）。
+      // 改成「只准用系統產的那一份」的話，這個功能就違反了它自己的規格。
+      //
+      // **但「用自己的話」不等於「可以少講一類」。** 這個學生的記錄裡
+      // 有撰寫回饋**與**素材提示兩類，所以他的版本兩類都要提到——換句
+      // 話說、換順序、換語氣都可以，少一類就不行。這一段文字刻意寫得
+      // 與系統產的那一份完全不同（口語、順序相反、用詞不同），才證明
+      // 得了閘門擋的是「與記錄不符」而不是「不是系統寫的」。
+      const latest = (await getDisclosure(student)).body.statements[0];
+      const mine =
+        '這篇的構思與撰寫都由本人完成。我先請 AI 幫我回想高一到高三的' +
+        '學習紀錄裡有哪些經歷可以寫，後來又請它看過草稿，給我文字' +
+        '具體性與邏輯一致性的回饋，未使用 AI 生成內容。';
+      const r = await makeStatement(student, { statementId: latest.id, edited: mine });
+      assert.equal(r.status, 200, r.text);
+      const after = r.body.statements.find((s) => s.id === latest.id);
+      assert.equal(after.edited, mine);
+    });
+
+    await test('★ 只講一類的版本存不進去（記錄裡有兩類）', async () => {
+      // 這一條與上一條是同一組：上一條證明「改得動」，這一條證明
+      // 「改的自由不包含少講一件」。少了它，上一條可以在閘門被拿掉的
+      // 情況下照樣是綠的——而那正是這個功能最容易被改壞的方向，因為
+      // 「學生的聲明被擋下來」是使用者會抱怨的事，「漏講一類」不是。
+      const latest = (await getDisclosure(student)).body.statements[0];
+      const partial =
+        '這篇的構思與撰寫都由本人完成。過程中我請 AI 看過草稿，' +
+        '進行文字具體性與邏輯一致性的回饋，未使用 AI 生成內容。';
+      const r = await makeStatement(student, { statementId: latest.id, edited: partial });
+      assert.equal(r.status, 400, r.text);
+      assert.match(r.body.error, /OMITS_FEATURE/);
+
+      // **而且原本那一份要原封不動地留著。** 擋下來的編輯若順手把
+      // 現有的聲明清掉，學生就從「有一份聲明」變成「沒有聲明」，
+      // 而揭露是及格線。
+      const after = (await getDisclosure(student)).body.statements.find((s) => s.id === latest.id);
+      assert.equal(after.edited, latest.edited);
     });
 
     await test('★ 記錄改不動：沒有任何一支 API 可以刪或改 AiDisclosureLog', async () => {
@@ -948,16 +1267,76 @@ async function main() {
       assert.equal(r.body.total, 0);
     });
 
+    await test('★ 這個模組進得了成本帳（老師問「這個月花多少」時答得出來）', async () => {
+      // 在此之前這個模組**一列 `AiUsageLog` 都沒有寫**，而 `doctor.sh`
+      // 的「AI 用量」、`OPERATIONS.md` 的 SQL、匯入頁的成本全部查那張表
+      // ——於是撰寫回饋、素材提示、選件討論、揭露聲明（每次最多三個
+      // 呼叫）的花費完全不在帳上。
+      const rows = await prisma.aiUsageLog.findMany({ where: { tenantId: home.tenant.id } });
+      const ours = rows.filter((r) => String(r.refType ?? '').startsWith('Portfolio:'));
+      if (AI_UP) {
+        assert.ok(ours.length > 0, '呼叫過模型，帳上卻一列都沒有');
+        assert.ok(ours.every((r) => r.inputTokens + r.outputTokens > 0));
+      } else {
+        assert.equal(ours.length, 0, '一次都沒有呼叫到模型，卻記了用量');
+      }
+    });
+
+    await test('★ 預算用完時回饋停，但揭露聲明照樣產得出來', async () => {
+      // 揭露是**及格線不是加分項**（教育部函文要求在檔案中標註 AI
+      // 使用）。預算用完的那一天剛好是他要送件的那一天的話，拋錯等於
+      // 讓他交不出必要的揭露，而他沒有辦法讓預算變多。
+      await prisma.aiUsageLog.create({
+        data: {
+          tenantId: home.tenant.id,
+          purpose: 'OTHER',
+          tier: 'MID',
+          provider: 'mock',
+          model: 'mock',
+          inputTokens: 9_000,
+          outputTokens: 2_000,
+          refType: 'Portfolio:TEST',
+          refId: student.id,
+        },
+      });
+      const saved = process.env.AI_MONTHLY_TOKEN_BUDGET;
+      process.env.AI_MONTHLY_TOKEN_BUDGET = '1000';
+      try {
+        for (const c of [klass, klass2]) await setPolicy(teacher, { classId: c.id, level: 4 });
+        const w = await coach(student, { feature: 'WRITING_FEEDBACK' });
+        assert.equal(w.status, 429, w.text);
+        assert.equal(w.body.code, 'BUDGET');
+        assert.match(w.body.error, /制度檢查/, '要說出哪些東西不受影響');
+
+        const s = await makeStatement(student);
+        assert.equal(s.status, 200, s.text);
+        assert.ok(s.body.made.generated.length > 10);
+        assert.equal(s.body.made.fellBack, true, '預算用完時該用程式組出來的版本');
+      } finally {
+        if (saved === undefined) delete process.env.AI_MONTHLY_TOKEN_BUDGET;
+        else process.env.AI_MONTHLY_TOKEN_BUDGET = saved;
+      }
+    });
+
     await test('★ 第 1 級的學生產生聲明時完全不呼叫模型', async () => {
       // 這一級的學生依定義不可能有任何一次模型互動，而他的聲明內容就是
       // 「未使用」——一句由程式組得出來的話。為了產生它去呼叫模型，
       // 等於讓一位被明定不得使用 AI 的學生產生一次 AI 互動，
       // 而那次互動還會被記進他自己的揭露記錄裡。
       await setPolicy(teacher, { classId: klass.id, level: 1 });
+      const before = await prisma.aiDisclosureLog.count({ where: { userId: student2.id } });
       const r = await makeStatement(student2);
       assert.equal(r.status, 200, r.text);
       assert.equal(r.body.made.fellBack, true, `AI ${AI_UP ? '起來了' : '沒起來'}，但第 1 級不該呼叫它`);
       assert.match(r.body.made.generated, /未使用\s*AI\s*輔助工具/);
+      // **而且它不該在他的記錄上留下一次 AI 互動。** 一位被明定不得
+      // 使用 AI 的學生，記錄上有 AI 互動這件事本身就是矛盾的，而那一筆
+      // 還會灌進下一次聲明的「共 N 次」。
+      assert.equal(
+        await prisma.aiDisclosureLog.count({ where: { userId: student2.id } }),
+        before,
+        '沒有呼叫模型，卻記了一次 AI 互動',
+      );
       await setPolicy(teacher, { classId: klass.id, level: 3 });
     });
   });
@@ -989,6 +1368,43 @@ async function main() {
       const irr = r.body.items.find((c) => c.code === 'IRREVERSIBLE');
       assert.ok(irr);
       assert.equal(irr.severity, 'INFO');
+    });
+
+    await test('★ 沒填校系時，清單不可以把「沒有核對到」印成綠的', async () => {
+      // 一份漏掉重點的清單比沒有清單糟，因為他會以為自己核對過了。
+      const r = await runChecklist(student, { programs: [] });
+      const by = Object.fromEntries(r.body.items.map((c) => [c.code, c]));
+      assert.equal(by.PROGRAMS_LISTED.ok, false, '一個校系都沒填，這件事本身要說出來');
+      for (const code of ['MODE_CHOSEN', 'MODE_NOT_MIXED', 'DEADLINE_KNOWN']) {
+        assert.equal(by[code].ok, false, `${code} 在沒填校系時是綠的`);
+        assert.match(by[code].detail, /沒有核對/);
+      }
+    });
+
+    await test('★ 校系欄留白時，素材上已經標的校系照樣要算', async () => {
+      // 學生把幾件都勾給台大電機，確認清單的校系欄是空白的，他直接
+      // 按「跑一次清單」——實測 blocking = 0，逐項寫著「都在之內」。
+      const r = await runChecklist(student, { programs: [] });
+      const sel = r.body.items.find((c) => c.code === 'COUNT_SELECTED');
+      assert.match(sel.detail, /台大電機|成大電機|001/, `清單看不到他已經標過的校系：${sel.detail}`);
+    });
+
+    await test('★ 沒有一件填檔案大小時，不可以宣告「都在範圍內」', async () => {
+      // 檔案大小是選填、要學生自己打，而且這一版根本沒有真的上傳。
+      // 一個從來沒看過檔案的檢查，講得像看過了。
+      const r = await runChecklist(student, {
+        programs: [{ programRef: '001', mode: 'CENTRAL', deadline: '2026-05-10' }],
+      });
+      const size = r.body.items.find((c) => c.code === 'FILE_SIZE');
+      const items = (await getItems(student)).body.items;
+      const measured = items.filter((i) => (i.fileBytes ?? 0) > 0).length;
+      if (measured === 0) {
+        assert.equal(size.ok, false, `${items.length} 件都沒有大小，清單卻說都在範圍內`);
+        assert.equal(size.severity, 'WARN', '系統沒有這份資料，不該阻斷');
+        assert.match(size.detail, /沒有核對|沒有一件/);
+      } else {
+        assert.match(size.detail, new RegExp(`${measured}`), '沒有說出量到的是幾件');
+      }
     });
 
     await test('清單用的是真的素材與自述（不是前端傳來的數字）', async () => {
@@ -1025,6 +1441,31 @@ async function main() {
       const a = await ivQuestions(student);
       assert.ok(a.body.questions.some((q) => q.fieldTag === 'GENERAL'));
       assert.ok(a.body.questions.every((q) => ['EECS', 'GENERAL'].includes(q.fieldTag)));
+    });
+
+    await test('★ 家長打不到題庫（導覽不畫、頁面擋下來，這是第三扇門）', async () => {
+      // 少了這一道，家長拿得到整份題庫；而在還沒匯入過的租戶上，
+      // 那次請求會用**他的 id** 建立 39 筆 InterviewQuestion。
+      const r = await ivQuestions(guardian);
+      assert.equal(r.status, 403, r.text);
+      assert.match(r.body.error, /家長/);
+      assert.equal((await ivHistory(guardian)).status, 403);
+      assert.equal((await ivPractice(guardian, { questionId, answerText: '我來練一下' })).status, 403);
+    });
+
+    await test('★ 面試結構回饋受層級管：第 1 級擋、第 3 級才開', async () => {
+      // `AI_LEVELS[2].summary` 明寫「第 3 級……加開撰寫回饋與面試結構
+      // 回饋」，`PolicyEditor` 把那句話整段印給老師看，而在此之前
+      // **沒有任何呼叫端用 `aiFeatureAllowed`**——老師以為他關掉了。
+      for (const c of [klass, klass2]) await setPolicy(teacher, { classId: c.id, level: 1 });
+      const no = await ivPractice(student, { questionId, answerText: '我在高二做了自走車。' });
+      assert.equal(no.status, 403, no.text);
+      assert.equal(no.body.code, 'AI_DISABLED');
+      assert.match(no.body.error, /面試/);
+
+      for (const c of [klass, klass2]) await setPolicy(teacher, { classId: c.id, level: 3 });
+      const yes = await ivPractice(student, { questionId, answerText: '我在高二做了自走車。' });
+      assert.equal(yes.status, 200, yes.text);
     });
 
     await test('練習一題，拿到結構回饋而且回饋裡沒有任何評價', async () => {
@@ -1074,6 +1515,48 @@ async function main() {
       assert.equal(theirs.body.practices.length, 0);
       // 老師連這一支都打不到。
       assert.equal((await ivHistory(teacher)).status, 403);
+    });
+
+    await test('★ 練習分得開三個校系——面試前一晚要看的是「台大那一版」', async () => {
+      const a = await ivPractice(student, {
+        questionId,
+        programRef: '台大電機',
+        answerText: '台大這一版：我在高二做了自走車，那次卡最久的是感測器雜訊。',
+      });
+      assert.equal(a.status, 200, a.text);
+      assert.equal(
+        (
+          await ivPractice(student, {
+            questionId,
+            programRef: '成大電機',
+            answerText: '成大這一版：同一件事我想講的重點不一樣，我會先講分工那一段。',
+          })
+        ).status,
+        200,
+      );
+
+      const only = await ivHistory(student, '台大電機');
+      assert.ok(only.body.practices.length >= 1);
+      assert.ok(only.body.practices.every((p) => p.programRef === '台大電機'));
+      assert.ok(only.body.practices.some((p) => /台大這一版/.test(p.answerText)));
+      // 沒標校系的那幾次還在，只是不在這一組裡。
+      assert.ok((await ivHistory(student)).body.practices.some((p) => p.programRef === null));
+    });
+
+    await test('★ 練習刪得掉——「你刪不掉」會讓他下一次不寫真的那一版', async () => {
+      const list = await ivHistory(student);
+      const target = list.body.practices[0];
+      const r = await ivDelete(student, target.id);
+      assert.equal(r.status, 200, r.text);
+      assert.ok(!r.body.practices.some((p) => p.id === target.id));
+      assert.equal(
+        await prisma.interviewPractice.count({ where: { id: target.id } }),
+        0,
+        '從畫面上拿掉了，資料庫裡還在',
+      );
+      // 別人的刪不掉，而且回的是「找不到」不是「不准」。
+      const other2 = await ivHistory(student);
+      assert.equal((await ivDelete(student2, other2.body.practices[0].id)).status, 404);
     });
 
     await test('空的回答被擋', async () => {

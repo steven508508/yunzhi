@@ -44,6 +44,7 @@ import {
   itemCodeInfo,
   limitsOf,
   mayAddItem,
+  mayUpdateItem,
   submissionChecklist,
 } from '../lib/portfolio.mjs';
 
@@ -396,16 +397,6 @@ test('沒有設定（null）一律停用，除了那兩個永遠開的例外', (
   assert.equal(aiFeatureAllowed(99, 'WRITING_FEEDBACK'), false);
 });
 
-test('多個班級取最嚴的一級', () => {
-  // 取最寬的話，學生只要另外加入一個第 4 級的班，那位設第 1 級的老師
-  // 的決定就整組失效——而他不會知道。
-  assert.equal(effectiveAiLevel([4, 1]), 1);
-  assert.equal(effectiveAiLevel([3, null]), 3, '沒設定的班不該把有設定的拉低');
-  assert.equal(effectiveAiLevel([null, null]), AI_LEVEL_UNSET);
-  assert.equal(effectiveAiLevel([]), AI_LEVEL_UNSET);
-  assert.equal(effectiveAiLevel([0, 5, 2]), 2, '範圍外的值不算數');
-});
-
 test('被停用時的訊息說得出是誰決定的、去問誰', () => {
   // 學生看到「這個功能停用」的第一個反應是以為系統壞了，然後他會去找
   // 一個沒有這層限制的工具。
@@ -425,4 +416,179 @@ test('每一級都說得出「為什麼是這個順序」', () => {
     assert.ok(l.why && l.why.length > 30, `第 ${l.level} 級沒有寫理由`);
     assert.ok(l.summary && l.summary.length > 5);
   }
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 八、沒有設定的班級不可以被當成「沒有意見」
+//
+// `aiFeatureAllowed(null, …)` 一律拒絕（「往放行的方向倒的話，這條
+// 規定就等於沒有」），但只要**另一班設過**，`null` 就從「未明定」被
+// 降級成「沒有意見」——英文老師的「還沒明定」在這位學生身上等於
+// 「全部開放」，而畫面同時告訴他「這一班的 AI 功能停用中」。
+// ═════════════════════════════════════════════════════════════════
+
+test('只要有一個班沒設定，整個人就是未設定——不可以被別班的設定蓋過去', () => {
+  assert.equal(effectiveAiLevel([4, null]), AI_LEVEL_UNSET, '沒設定的班被當成「沒有意見」了');
+  assert.equal(effectiveAiLevel([3, null]), AI_LEVEL_UNSET);
+  assert.equal(effectiveAiLevel([1, null]), AI_LEVEL_UNSET);
+  assert.equal(effectiveAiLevel([null, null]), AI_LEVEL_UNSET);
+  assert.equal(effectiveAiLevel([]), AI_LEVEL_UNSET);
+});
+
+test('每一班都設過的時候，取最嚴的一級', () => {
+  assert.equal(effectiveAiLevel([4, 1]), 1);
+  assert.equal(effectiveAiLevel([3, 4]), 3);
+  assert.equal(effectiveAiLevel([2]), 2);
+});
+
+test('範圍外的值算「沒設定」而不是「不存在」——往停用的方向倒', () => {
+  // 0 與 5 進得了資料庫（欄位是 Int），而把它們當成「不算數」等於
+  // 讓一列壞資料變成「沒有意見」，於是另一班的第 4 級生效。
+  assert.equal(effectiveAiLevel([0, 5, 2]), AI_LEVEL_UNSET);
+  assert.equal(effectiveAiLevel([2, 3]), 2);
+});
+
+test('被停用時說得出是哪幾班還沒設定', () => {
+  const msg = aiDisabledReason(AI_LEVEL_UNSET, 'WRITING_FEEDBACK', ['高三英文', '高三數學']);
+  assert.ok(msg.includes('高三英文'), '學生不知道要去找哪一位老師');
+  assert.ok(msg.includes('高三數學'));
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 九、改一件素材繞不過件數上限
+//
+// `addItem` 擋得住，`updateItem` 擋不住：高二上已經 10 件時，把高三的
+// 一件改成「高二上」就變成 11 件，而它只會在送出前的清單上被退。
+// `mayAddItem` 的註解說錯的方向是「讓他傳到第 7 件才在中央資料庫端
+// 被退」，PATCH 這條路正是那個方向。
+// ═════════════════════════════════════════════════════════════════
+
+const withId = (n, over = {}) =>
+  Array.from({ length: n }, (_, i) => item({ id: `x${i}`, title: `社團 ${i}`, ...over }));
+
+test('改學期繞不過每學年的件數上限', () => {
+  const items = [...withId(10), item({ id: 'g3', semester: '高三上' })];
+  const no = mayUpdateItem(items, 'g3', { semester: '高二上' }, LIMITS);
+  assert.equal(no.ok, false);
+  assert.ok(no.reason.includes('高二'));
+
+  // 反過來（從滿的那一年搬出去）要放行——他要做的第一件事可能正是這個。
+  const yes = mayUpdateItem(items, 'x0', { semester: '高三上' }, LIMITS);
+  assert.equal(yes.ok, true, yes.reason ?? '');
+});
+
+test('勾選給某一校系時，逐校系的上限擋得住', () => {
+  // 上限是 3 件課程學習成果。畫面上超過只會染紅，而確認清單在沒填
+  // 校系時是全綠的——這條上限從頭到尾沒有一個地方會擋住人。
+  const items = [
+    ...Array.from({ length: 3 }, (_, i) =>
+      item({ id: `o${i}`, category: 'COURSE_OUTCOME', itemCode: 'B', selectedFor: ['001'] }),
+    ),
+    item({ id: 'o3', category: 'COURSE_OUTCOME', itemCode: 'B', selectedFor: [] }),
+  ];
+  const no = mayUpdateItem(items, 'o3', { selectedFor: ['001'] }, LIMITS);
+  assert.equal(no.ok, false);
+  assert.ok(no.reason.includes('001'));
+
+  // 換一個校系就加得下。
+  const yes = mayUpdateItem(items, 'o3', { selectedFor: ['002'] }, LIMITS);
+  assert.equal(yes.ok, true, yes.reason ?? '');
+});
+
+test('綜整心得在 PATCH 這條路上一樣不計入額度', () => {
+  const items = [...withId(10), item({ id: 'n', itemCode: 'N', semester: '高三上' })];
+  assert.equal(mayUpdateItem(items, 'n', { semester: '高二上' }, LIMITS).ok, true);
+});
+
+test('本來就超過的時候不會被鎖死', () => {
+  const tight = limitsOf({ diversePerYear: 3, sourceRef: 'x' });
+  const items = [...withId(5), item({ id: 'g3', semester: '高三上' })];
+  // 高二上本來就超過（5 > 3），再搬一件進去不擋——與 mayAddItem 同一條
+  // 規則：只在「這一動才超過」時擋，否則他沒有辦法修正。
+  assert.equal(mayUpdateItem(items, 'g3', { semester: '高二上' }, tight).ok, true);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 十、清單不可以把「沒有核對到」印成「都對了」
+//
+// 一份漏掉重點的清單比沒有清單糟，因為學生會以為自己核對過了。
+// ═════════════════════════════════════════════════════════════════
+
+test('沒填校系時，逐校系的那幾項不可以是綠的', () => {
+  const out = submissionChecklist({
+    items: [],
+    essays: fullEssays,
+    programs: [],
+    limits: LIMITS,
+    now: new Date('2026-05-01T10:00:00'),
+  });
+  assert.equal(code(out, 'PROGRAMS_LISTED').ok, false, '一個校系都沒填，這件事本身要說出來');
+  for (const c of ['MODE_CHOSEN', 'MODE_NOT_MIXED', 'DEADLINE_KNOWN']) {
+    assert.equal(code(out, c).ok, false, `${c} 在沒填校系時仍然是綠的`);
+    assert.ok(code(out, c).detail.includes('沒有核對'), `${c} 沒有說出它其實沒核對到`);
+  }
+});
+
+test('沒填校系，但素材上已經標了校系時，勾選件數照樣要算', () => {
+  // 學生把 5 件都勾給台大電機（上限 3），確認清單的校系欄是空白的，
+  // 他直接按「跑一次清單」——實測 blocking = 0，逐項寫著「都在之內」。
+  const items = Array.from({ length: 5 }, (_, i) =>
+    item({ id: `o${i}`, category: 'COURSE_OUTCOME', itemCode: 'B', selectedFor: ['台大電機'] }),
+  );
+  const out = submissionChecklist({
+    items,
+    essays: fullEssays,
+    programs: [],
+    limits: LIMITS,
+    now: new Date('2026-05-01T10:00:00'),
+  });
+  const c = code(out, 'COUNT_SELECTED');
+  assert.equal(c.ok, false, '五件勾給同一個校系（上限 3），清單卻說「都在之內」');
+  assert.ok(c.detail.includes('台大電機'));
+});
+
+test('一件都沒標校系時，勾選那一項要說「沒有核對到」而不是「都在之內」', () => {
+  const out = submissionChecklist({
+    items: diverse(3),
+    essays: fullEssays,
+    programs: [],
+    limits: LIMITS,
+    now: new Date('2026-05-01T10:00:00'),
+  });
+  const c = code(out, 'COUNT_SELECTED');
+  assert.ok(c.detail.includes('沒有核對'), `講得像核對過了：「${c.detail}」`);
+});
+
+test('沒有任何一件填了檔案大小時，不可以宣告「都在範圍內」', () => {
+  // 檔案大小是選填、要學生自己打，而且根本沒有真的上傳。一個從來
+  // 沒看過檔案的檢查，講得像看過了。
+  const out = submissionChecklist({
+    items: diverse(16),
+    essays: fullEssays,
+    programs: [{ programRef: '001', mode: 'CENTRAL', deadline: '2026-05-10' }],
+    limits: LIMITS,
+    now: new Date('2026-05-01T10:00:00'),
+  });
+  const c = code(out, 'FILE_SIZE');
+  assert.equal(c.ok, false);
+  assert.equal(c.severity, 'WARN', '沒有資料不該阻斷——系統本來就沒有這份資料');
+  assert.ok(c.detail.includes('沒有'), `講得像看過檔案了：「${c.detail}」`);
+
+  // 有量到的時候照舊說「都在範圍內」，而且說得出量到幾件。
+  const measured = submissionChecklist({
+    items: [...diverse(3), item({ fileBytes: 1024 * 1024, fileKind: 'DOC' })],
+    essays: fullEssays,
+    programs: [{ programRef: '001', mode: 'CENTRAL', deadline: '2026-05-10' }],
+    limits: LIMITS,
+    now: new Date('2026-05-01T10:00:00'),
+  });
+  assert.equal(code(measured, 'FILE_SIZE').ok, true);
+  assert.ok(code(measured, 'FILE_SIZE').detail.includes('1'));
+});
+
+test('checkFileSize 說得出它到底有沒有量到', () => {
+  const MB = 1024 * 1024;
+  assert.equal(checkFileSize({ fileBytes: 2 * MB, fileKind: 'DOC' }, LIMITS).measured, true);
+  assert.equal(checkFileSize({ fileBytes: null }, LIMITS).measured, false);
+  assert.equal(checkFileSize({ fileBytes: null }, LIMITS).ok, true, '量不到不能當成超過');
 });

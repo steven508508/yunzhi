@@ -630,5 +630,16 @@ export function consistencyCheck(answer, essays = [], items = []) {
  * 規則（`feature = INTERVIEW_FEEDBACK`，不在白名單裡）。
  *
  * 這個常數只是把那件事寫下來，讓讀到這個檔案的人不會另外做一套。
+ *
+ * # 它同時是層級判定與揭露記錄的鍵
+ *
+ * `AI_LEVELS` 把面試結構回饋排在第 3 級，而 `PolicyEditor` 把那句話
+ * 整段印給老師看——所以 `practiceInterview()` 要拿這個值去問
+ * `aiFeatureAllowed()`，並且用它寫 `AiDisclosureLog`。
+ *
+ * 曾經有一段時間這個常數在整個 repo 裡只有註解與測試引用得到，
+ * 而症狀是：老師把班級設成第 1 級「不得使用」，學生按「看結構回饋」
+ * 照樣拿得到，記錄上一個字都沒有。**一個看起來有、實際上沒有人用的
+ * 常數，比沒有這個常數更危險**——讀到 `AI_LEVELS` 的人會以為它接上了。
  */
 export const INTERVIEW_AI_FEATURE = 'INTERVIEW_FEEDBACK';

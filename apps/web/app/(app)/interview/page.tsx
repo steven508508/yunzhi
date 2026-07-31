@@ -29,6 +29,7 @@ import Link from 'next/link';
 
 import { interviewQuestions, myPractices } from '@/lib/portfolioDb';
 import { FIELD_TAGS } from '@/lib/interview.mjs';
+import { mayUse } from '@/lib/nav';
 import { scopedPage } from '@/lib/page';
 import { Empty, Note } from '@/components/Feedback';
 
@@ -42,25 +43,39 @@ export default async function InterviewPage({
   searchParams: Promise<{ fieldTag?: string }>;
 }) {
   return scopedPage(async (user) => {
-    if (user.systemRole !== 'STUDENT') {
+    // 角色判定走 `lib/nav.ts` 的那一份對照表而不是在這裡寫一個
+    // `!== 'STUDENT'`。系統有六種角色，二分法把家長歸到「老師」那一支，
+    // 於是家長看到的是「題庫本身你改得動」——一句對他完全不成立的話。
+    // 導覽列與頁面用同一份規則，就少了一次兩邊對不起來的機會。
+    if (!mayUse(user.systemRole, '/interview')) {
+      const guardian = user.systemRole === 'GUARDIAN';
       return (
         <main className="yz-panel">
           <div className="yz-panel__head">
             <h1>面試準備</h1>
           </div>
           <Empty
-            title="面試練習是學生自己的東西"
+            title={guardian ? '面試練習不對家長開放' : '面試練習是學生自己的東西'}
             hint={
-              <>
-                練習的回答裡會有他還沒想清楚的話、講砸的版本、以及對自己志向的猶豫。
-                那與學習歷程的內容是同一類的東西，所以走同一條線——
-                <strong>沒有任何一支查詢讓老師看別人的練習</strong>。
-                題庫本身你改得動，那在後續批次的題庫管理裡。
-              </>
+              guardian ? (
+                <>
+                  練習的回答裡會有他還沒想清楚的話、講砸的版本、以及對自己志向的猶豫。
+                  那與學習歷程的內容是同一類的東西，而
+                  <strong>一個家長看得到的練習框，孩子不會在裡面寫真的那一版</strong>。
+                  孩子的任務、成績與時程在「孩子的狀況」那一頁。
+                </>
+              ) : (
+                <>
+                  練習的回答裡會有他還沒想清楚的話、講砸的版本、以及對自己志向的猶豫。
+                  那與學習歷程的內容是同一類的東西，所以走同一條線——
+                  <strong>沒有任何一支查詢讓老師看別人的練習</strong>。
+                  題庫本身你改得動，那在後續批次的題庫管理裡。
+                </>
+              )
             }
             action={
-              <Link href="/portfolio" className="yz-btn yz-btn--primary">
-                回學習歷程
+              <Link href={guardian ? '/guardian' : '/portfolio'} className="yz-btn yz-btn--primary">
+                {guardian ? '回孩子的狀況' : '回學習歷程'}
               </Link>
             }
           />

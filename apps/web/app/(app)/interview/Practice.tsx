@@ -23,7 +23,7 @@ import { useState } from 'react';
 
 import { Button } from '@/components/Button';
 import { Note } from '@/components/Feedback';
-import { TextAreaField } from '@/components/Field';
+import { TextAreaField, TextField } from '@/components/Field';
 import { submitJson, useAction } from '@/components/Form';
 
 type Question = { id: string; fieldTag: string; question: string; focusPoints: string[] };
@@ -42,6 +42,7 @@ type PracticeRow = {
   id: string;
   question: string;
   answerText: string;
+  programRef: string | null;
   feedback: unknown;
   consistency: unknown;
   createdAt: string;
@@ -58,6 +59,7 @@ export default function Practice({
   const { busy, error, run } = useAction();
   const [picked, setPicked] = useState<Question | null>(null);
   const [answer, setAnswer] = useState('');
+  const [programRef, setProgramRef] = useState('');
   const [result, setResult] = useState<{ feedback: Feedback; consistency: Consistency } | null>(
     null,
   );
@@ -67,11 +69,23 @@ export default function Practice({
       if (!picked) return;
       const out = await submitJson<{ feedback: Feedback; consistency: Consistency }>(
         '/api/interview/practice',
-        { json: { questionId: picked.id, answerText: answer } },
+        { json: { questionId: picked.id, answerText: answer, programRef: programRef || null } },
       );
       setResult(out);
       router.refresh();
     });
+
+  const drop = (id: string) =>
+    run(async () => {
+      await submitJson(`/api/interview/practice?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      router.refresh();
+    });
+
+  // 同一題為每一個系各練一次，三份答案應該長得完全不一樣。平鋪成一條
+  // 時間軸的話，面試前一晚要看的「台大那一版」在裡面找不到。
+  const groups = [...new Set(practices.map((p) => p.programRef ?? ''))].sort();
 
   return (
     <>
@@ -110,6 +124,13 @@ export default function Practice({
               <strong>這幾項系統判斷不了</strong>——它們是內容不是形式，答完自己對一次。
             </p>
           )}
+
+          <TextField
+            label="這一次是為哪一個校系練的（選填）"
+            hint="同一題你會為每一個系各練一次，而三份答案應該長得完全不一樣。標了才找得回「台大那一版」。"
+            value={programRef}
+            onChange={(e) => setProgramRef(e.target.value)}
+          />
 
           <TextAreaField
             label="你的回答"
@@ -185,16 +206,31 @@ export default function Practice({
           <h2 className="yz-card__title" style={{ marginTop: 26 }}>
             練過的（{practices.length}）
           </h2>
-          <p className="yz-hint">只有你自己看得到。老師沒有任何一條路徑看得到這些。</p>
-          <ul className="yz-iv__history">
-            {practices.map((p) => (
-              <li key={p.id} className="yz-iv__past">
-                <span className="yz-pf__meta">{p.createdAt.slice(0, 10)}</span>
-                <span className="yz-iv__pastq">{p.question}</span>
-                <span className="yz-iv__pasta">{p.answerText.slice(0, 80)}…</span>
-              </li>
-            ))}
-          </ul>
+          <p className="yz-hint">
+            只有你自己看得到。老師沒有任何一條路徑看得到這些。
+            <strong>不想留的那一次可以刪掉</strong>——練習框裡本來就會出現講砸的版本。
+          </p>
+          {groups.map((g) => (
+            <section key={g || '（未標校系）'}>
+              <h3 className="yz-card__title" style={{ marginTop: 14 }}>
+                {g || '沒有標校系'}
+              </h3>
+              <ul className="yz-iv__history">
+                {practices
+                  .filter((p) => (p.programRef ?? '') === g)
+                  .map((p) => (
+                    <li key={p.id} className="yz-iv__past">
+                      <span className="yz-pf__meta">{p.createdAt.slice(0, 10)}</span>
+                      <span className="yz-iv__pastq">{p.question}</span>
+                      <span className="yz-iv__pasta">{p.answerText.slice(0, 80)}…</span>
+                      <Button variant="quiet" disabled={busy} onClick={() => drop(p.id)}>
+                        刪掉
+                      </Button>
+                    </li>
+                  ))}
+              </ul>
+            </section>
+          ))}
         </section>
       )}
     </>
