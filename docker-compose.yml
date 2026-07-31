@@ -173,6 +173,18 @@ services:
       - "${WEB_BIND:-127.0.0.1}:${WEB_BIND_PORT:-3000}:3000"
     networks:
       - internal
+      # **少了這一張，上面那行 ports 是無效的。**
+      #
+      # internal 網路是 `internal: true`（沒有對外路由）。Docker 對
+      # 只掛在這種網路上的容器**不會建立埠發布所需的 NAT 規則**，
+      # 而且不報錯：`docker inspect` 看得到 PortBindings 設定完整，
+      # `iptables -t nat -S DOCKER` 裡沒有對應規則，宿主機上沒有任何
+      # 東西在聽。容器自己還是 healthy 的（healthcheck 在容器內部打）。
+      #
+      # caddy 模式下沒人發現，因為 Caddy 掛在 edge＋internal 兩張網路上，
+      # 走的是容器間直連，根本不經過主機埠。PROXY_MODE=external 才會
+      # 現形，症狀是 nginx 一路 502 而每一個容器都顯示健康。
+      - edge
     depends_on:
       postgres:
         condition: service_healthy

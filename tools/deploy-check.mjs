@@ -1283,5 +1283,39 @@ check('scripts/*.mjs 的相依都有搬進映像', () => {
   }
 });
 
+// ── 發布主機埠的服務不能只掛在 internal 網路上 ────────────────
+//
+// **這一條擋的是「每個容器都健康但網站 502」。** Docker 對只掛在
+// `internal: true` 網路上的容器不會建立埠發布的 NAT 規則，而且完全
+// 不報錯——PortBindings 在 inspect 裡看得到，nat 表裡沒有規則，宿主機
+// 上沒東西在聽，容器自己還是 healthy（healthcheck 從容器內部打）。
+//
+// v0.27.2 的 web 就是這樣：caddy 模式下沒人發現（Caddy 走容器間直連），
+// PROXY_MODE=external 一上線就是滿江紅的 502，而所有指示燈都是綠的。
+if (compose) {
+  check('發布主機埠的服務有掛在非 internal 網路上', () => {
+    const nets = compose.networks ?? {};
+    const bad = [];
+    for (const [name, svc] of Object.entries(compose.services ?? {})) {
+      const published = (svc.ports ?? []).filter((p) =>
+        typeof p === 'string' ? /:\d+(?:->|:)/.test(p) : p?.published,
+      );
+      if (published.length === 0) continue;
+      const attached = Object.keys(svc.networks ?? {});
+      // 沒宣告 networks 的服務走 default bridge，那是通的。
+      if (attached.length === 0) continue;
+      if (attached.every((n) => nets[n]?.internal)) {
+        bad.push(`${name}（只在 ${attached.join('、')} 上，都是 internal:true）`);
+      }
+    }
+    assert(
+      bad.length === 0,
+      `這些服務的 ports 發布不出去，而且 Docker 不會報錯：\n` +
+        `       ${bad.join('\n       ')}\n` +
+        `       症狀是容器全綠、反向代理 502。加一張非 internal 的網路（例如 edge）。`,
+    );
+  });
+}
+
 console.log(`\n${passed}/${passed + failed} 通過\n`);
 process.exit(failed ? 1 : 0);
